@@ -1208,7 +1208,7 @@ impl<'a> Builder<'a> {
         let mut seen = std::collections::HashSet::new();
         parents.retain(|p| seen.insert(p.clone()));
         if residue {
-            self.dynamic_parent_packages.insert(pkg.clone());
+            self.package_parents.mark_dynamic(pkg.clone());
         }
         if parents != current && !(parents.is_empty() && !self.package_parents.contains_key(&pkg)) {
             self.package_parents.replace(pkg, parents);
@@ -1610,7 +1610,7 @@ impl<'a> Builder<'a> {
             left.kind(),
             "hash_element_expression" | "array_element_expression"
         ) {
-            self.record_key_write(left, Some(stored), None, self.current_scope());
+            self.record_key_write(left, Some(stored), None, true, self.current_scope());
         }
         // Slice / keyval writes (`@h{qw(a b)} = …`, `%h{k} = …`,
         // `@$h{…}`) land several keys at once — record an
@@ -1655,6 +1655,7 @@ impl<'a> Builder<'a> {
                         span,
                         rhs_span: None,
                         rhs_slot: None,
+                        replaces: false,
                         conditional: true,
                     });
                 }
@@ -1848,7 +1849,7 @@ impl<'a> Builder<'a> {
 /// the declaring package — with `main` (and its bare `::foo` shorthand)
 /// covering subs in a file that declares no package at all. Nothing here knows
 /// about `CORE`: it names no package this file declares, so it falls out.
-fn qualifier_admits_local_sub(qualifier: Option<&str>, sym_package: Option<&str>) -> bool {
+pub(super) fn qualifier_admits_local_sub(qualifier: Option<&str>, sym_package: Option<&str>) -> bool {
     let Some(qualifier) = qualifier else {
         return true;
     };

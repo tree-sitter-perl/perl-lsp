@@ -1860,13 +1860,16 @@ class A:
 }
 
 /// A return arm that reads a member no write types is `Unknown`, and
-/// `Unknown` poisons the join: `ev` does not claim `Ref` because one arm
-/// returns `self`.
+/// `Unknown` leaves the join open: `ev` keeps `Ref` (one arm returns
+/// `self`) as a possibility, never as the whole answer.
 #[test]
-fn an_untyped_member_read_poisons_a_return_join() {
+fn an_untyped_member_read_leaves_a_return_join_open() {
     let src = "class Ref:\n    def __init__(self, f):\n        self.v = f()\n\n    def ev(self, x):\n        if x:\n            return self\n        return self.v\n\n\nr = Ref(len).ev(1)\n";
     let fa = py_in(src, None);
-    assert_eq!(fa.inferred_type_via_bag("r", Point { row: 11, column: 0 }), Some(InferredType::Unknown));
+    assert_eq!(
+        fa.inferred_type_via_bag("r", Point { row: 11, column: 0 }),
+        Some(InferredType::Open(Box::new(InferredType::ClassName("Ref".into()))))
+    );
 }
 
 /// A local is offered below its first write in the body that writes it; a
@@ -1900,6 +1903,69 @@ LIMIT = 3
     assert_eq!(offered(3, 4), ["LIMIT", "early"]);
     assert_eq!(offered(7, 4), ["LIMIT"], "a function reads the module global it runs after");
     assert!(offered(9, 0).is_empty(), "module code above the global's write");
+}
+
+/// A local first written further down a loop's body is in force at the
+/// body's top on every pass after the first, so it is offered there.
+#[test]
+fn a_loop_carried_local_is_offered_above_its_write() {
+    let src = "\
+def f(xs):
+    for i in xs:
+        print(i)
+
+        acc = i
+
+def g():
+    print(1)
+
+    late = 2
+";
+    let fa = py_in(src, Some(&module(&["pkg", "mod"], false)));
+    let offered = |row: usize| -> Vec<String> {
+        crate::lsp::symbols::in_scope_completion(&fa, Point::new(row, 8))
+            .into_iter()
+            .map(|c| c.label)
+            .filter(|l| ["acc", "late"].contains(&l.as_str()))
+            .collect()
+    };
+    assert_eq!(offered(3), ["acc"], "a later pass reaches it");
+    assert!(offered(8).is_empty(), "no loop carries a local above its write");
+}
+
+/// A loop's head is what enters it or what a pass leaves; past it, what
+/// its failed test (through its `else`) or a `break` leaves.
+#[test]
+fn a_loop_joins_its_entry_its_passes_and_its_exits() {
+    let src = "\
+class A:
+    pass
+class B:
+    pass
+def f(c, xs):
+    x = A()
+    while c:
+        u = x
+        x = B()
+    v = x
+    y = A()
+    for i in xs:
+        if c:
+            y = B()
+            break
+    else:
+        w = y
+    z = y
+";
+    let fa = py_in(src, None);
+    let a = InferredType::ClassName("A".into());
+    let b = InferredType::ClassName("B".into());
+    let both = crate::model::file_analysis::join_all(&[a.clone(), b.clone()], &crate::model::file_analysis::Unordered);
+    let at = |n: &str, row| fa.inferred_type_via_bag(n, Point::new(row, 12));
+    assert_eq!(at("x", 7), both, "a later pass reads the body's write");
+    assert_eq!(at("x", 9), both, "past the loop: either");
+    assert_eq!(at("y", 16), Some(a), "the `else` runs only where no `break` left");
+    assert_eq!(fa.inferred_type_via_bag("y", Point::new(17, 8)), both, "past it: the `else`, or the `break`");
 }
 
 /// `x0 = A()` then `x{i+1} = x{i}.add()`: each call's receiver flows
@@ -1970,6 +2036,243 @@ fn a_write_hovers_the_value_it_writes() {
     assert!(hover(Point::new(9, 4)).contains("\nf: m.Bar\n"), "{}", hover(Point::new(9, 4)));
     let me = hover(Point::new(1, 8));
     assert!(me.ends_with("*method*\n\n*class m.Foo*\n\n*returns: m.Foo*"), "{me}");
+}
+
+/// Past an `if`, a variable a branch rebinds holds what every path leaves
+/// it: each arm's write, and, where no arm runs, what it held before. An
+/// arm's write is no other arm's, and a path that leaves the variable
+/// unbound reaches no read of it.
+#[test]
+fn a_branch_joins_what_its_arms_leave() {
+    let src = "\
+class A:
+    pass
+class B:
+    pass
+def f(c, d):
+    x = A()
+    if c:
+        x = B()
+    y = x
+    if c:
+        z = A()
+    elif d:
+        z = B()
+    else:
+        z = A()
+    w = z
+    if c:
+        if d:
+            x = B()
+    v = x
+    if c:
+        q = B()
+    else:
+        pass
+    r = q
+    s = A()
+    if c:
+        s = B()
+    elif d:
+        pass
+    t = s
+";
+    let fa = py_in(src, None);
+    let a = InferredType::ClassName("A".into());
+    let b = InferredType::ClassName("B".into());
+    let both = crate::model::file_analysis::join_all(&[a.clone(), b.clone()], &crate::model::file_analysis::Unordered);
+    let at = |n: &str, row| fa.inferred_type_via_bag(n, Point::new(row, 8));
+    assert_eq!(at("x", 8), both, "a write in the arm, the value before where it does not run");
+    assert_eq!(at("z", 15), both, "an `elif` chain joins every clause");
+    assert_eq!(at("x", 19), both, "a nested branch joins through the arm it closes");
+    assert_eq!(at("q", 24), Some(b.clone()), "the path that never binds `q` reads nothing");
+    assert_eq!(at("s", 30), both, "a chain with no `else` runs none of its arms");
+    let sibling = py_in("class A:\n    pass\nclass B:\n    pass\ndef f(c):\n    x = A()\n    if c:\n        x = B()\n        u = x\n    else:\n        u = x\n", None);
+    let at = |row| sibling.inferred_type_via_bag("x", Point::new(row, 12));
+    assert_eq!(at(8), Some(b), "inside the arm, its own write");
+    assert_eq!(at(10), Some(a), "a sibling arm starts from the value entering the branch");
+}
+
+/// A read inside a loop that reaches the loop's own recurrence (`req` is
+/// last pass's copy) closes the cycle above the head join; the recurring arm
+/// still drops out, so the head reads the entering type.
+#[test]
+fn a_recurrence_asked_from_inside_the_loop_drops_out() {
+    let src = "class PreparedRequest:\n    def copy(self) -> \"PreparedRequest\":\n        return PreparedRequest()\n\ndef resolve(req: PreparedRequest, url):\n    while url:\n        prepared_request = req.copy()\n        h = prepared_request\n        req = prepared_request\n    return req\n";
+    let fa = py_in(src, None);
+    assert_eq!(fa.inferred_type_via_bag("prepared_request", Point::new(7, 12)), Some(InferredType::ClassName("PreparedRequest".into())));
+}
+
+/// A `for` binds its target afresh each pass: what the body wrote to it last
+/// pass never reaches the next.
+#[test]
+fn a_for_target_is_bound_each_pass() {
+    let src = "def f(pairs, c):\n    for k, vs in pairs:\n        print(vs)\n        if c:\n            vs = [vs]\n";
+    let fa = py_in(src, None);
+    let t = fa.inferred_type_via_bag("vs", Point::new(2, 14));
+    assert!(!matches!(t, Some(InferredType::ArrayRef)), "last pass's write is gone: {t:?}");
+}
+
+/// Past a `try`, a variable holds what the body (or its `else`) leaves it
+/// or what an `except` does; a `finally` write is what comes past.
+#[test]
+fn a_try_joins_its_body_and_its_handlers() {
+    let src = "\
+class A:
+    pass
+class B:
+    pass
+class C:
+    pass
+def f():
+    x = A()
+    try:
+        x = B()
+        g()
+    except E:
+        x = C()
+    y = x
+    z = A()
+    try:
+        g()
+    except E:
+        pass
+    else:
+        z = B()
+    w = z
+    s = A()
+    try:
+        s = B()
+    finally:
+        s = C()
+    t = s
+";
+    let fa = py_in(src, None);
+    let two = |a: &str, b: &str| {
+        crate::model::file_analysis::join_all(
+            &[InferredType::ClassName(a.into()), InferredType::ClassName(b.into())],
+            &crate::model::file_analysis::Unordered,
+        )
+    };
+    let at = |n: &str, row| fa.inferred_type_via_bag(n, Point::new(row, 8));
+    assert_eq!(at("x", 13), two("B", "C"), "the body's end or the handler's");
+    assert_eq!(at("z", 21), two("A", "B"), "the `else` runs when the body ends, the handler leaves the entry");
+    assert_eq!(at("s", 27), Some(InferredType::ClassName("C".into())), "a `finally` runs on every path");
+}
+
+/// A `del` unbinds a name: a read past it raises, so a path through it
+/// reaches no join, and a read straight after it has no value.
+#[test]
+fn a_del_unbinds_the_name() {
+    let src = "\
+class A:
+    pass
+class B:
+    pass
+def f(c):
+    x = A()
+    if c:
+        del x
+    y = x
+    z = A()
+    del z
+    w = z
+    v = A()
+    if c:
+        del v
+        v = B()
+    u = v
+";
+    let fa = py_in(src, None);
+    let at = |n: &str, row| fa.inferred_type_via_bag(n, Point::new(row, 8));
+    assert_eq!(at("x", 8), Some(InferredType::ClassName("A".into())), "the path through `del` raises at the read");
+    assert_eq!(at("z", 11), Some(InferredType::Never), "a read with nothing bound raises");
+    let both = crate::model::file_analysis::join_all(
+        &[InferredType::ClassName("A".into()), InferredType::ClassName("B".into())],
+        &crate::model::file_analysis::Unordered,
+    );
+    assert_eq!(at("v", 16), both, "a write after `del` binds it again");
+}
+
+/// `except E as e` binds an instance of `E` in its handler and unbinds the
+/// name when the handler ends, so past the `try` only the paths that never
+/// ran the handler hold what it held before.
+#[test]
+fn an_except_name_is_bound_only_in_its_handler() {
+    let src = "\
+class A:
+    pass
+class E(Exception):
+    pass
+def f():
+    e = A()
+    try:
+        g()
+    except E as e:
+        h = e
+    y = e
+";
+    let fa = py_in(src, None);
+    assert_eq!(fa.inferred_type_via_bag("e", Point::new(9, 12)), Some(InferredType::ClassName("E".into())));
+    assert_eq!(fa.inferred_type_via_bag("e", Point::new(10, 8)), Some(InferredType::ClassName("A".into())));
+}
+
+/// `None` holds no value: joined with a typed path it makes the name
+/// optional.
+#[test]
+fn a_none_literal_is_no_value() {
+    let src = "\
+class A:
+    pass
+def f(c):
+    x = None
+    if c:
+        x = A()
+    y = x
+";
+    let fa = py_in(src, None);
+    assert_eq!(
+        fa.inferred_type_via_bag("x", Point::new(6, 8)),
+        Some(InferredType::Optional(Box::new(InferredType::ClassName("A".into()))))
+    );
+}
+
+#[test]
+fn a_field_of_an_unread_declared_type_written_none_is_not_none() {
+    let src = "\
+import _t
+class S:
+    auth: _t.AuthType
+    def __init__(self):
+        self.auth = None
+    def g(self):
+        a = self.auth
+        return a
+";
+    let fa = py_in(src, None);
+    assert_ne!(fa.inferred_type_via_bag("a", Point::new(7, 15)), Some(InferredType::Undef));
+}
+
+#[test]
+fn a_field_written_none_and_a_class_holds_that_class_or_none() {
+    let src = "\
+class CID:
+    pass
+class P:
+    headers: CID[str]
+    def __init__(self):
+        self.headers = None
+    def prep(self):
+        self.headers = CID()
+def f(p: P):
+    headers = p.headers
+    return headers
+";
+    let fa = py_in(src, None);
+    assert_eq!(
+        fa.inferred_type_via_bag("headers", Point::new(10, 11)),
+        Some(InferredType::Optional(Box::new(InferredType::ClassName("CID".into()))))
+    );
 }
 
 /// An annotation is advisory: nothing at run time holds a value to it, so a
@@ -2052,4 +2355,42 @@ fn a_nested_write_reads_as_its_flat_twin() {
     let nested = py_in("x: int = 0\nif c:\n    x = 's'\n    x\n", None);
     assert_eq!(flat.inferred_type_via_bag("x", Point::new(2, 0)), Some(InferredType::String));
     assert_eq!(nested.inferred_type_via_bag("x", Point::new(3, 4)), Some(InferredType::String));
+}
+
+/// A body stops only where something in it may raise, so a handler starts
+/// from the writes a later statement or call follows; only the paths that
+/// complete go on past a `finally`.
+#[test]
+fn a_try_unwinds_only_where_it_may_raise() {
+    let src = "\
+class A:
+    pass
+class B:
+    pass
+class C:
+    pass
+def f(c):
+    x = A()
+    try:
+        x = B()
+    except E:
+        u = x
+    y = A()
+    try:
+        y = B()
+        g()
+    finally:
+        if c:
+            y = C()
+    w = y
+";
+    let fa = py_in(src, None);
+    let two = |a: &str, b: &str| {
+        crate::model::file_analysis::join_all(
+            &[InferredType::ClassName(a.into()), InferredType::ClassName(b.into())],
+            &crate::model::file_analysis::Unordered,
+        )
+    };
+    assert_eq!(fa.inferred_type_via_bag("x", Point::new(11, 12)), Some(InferredType::ClassName("A".into())), "nothing raises past the write");
+    assert_eq!(fa.inferred_type_via_bag("y", Point::new(19, 8)), two("B", "C"), "the entry value only unwinds through the finally");
 }

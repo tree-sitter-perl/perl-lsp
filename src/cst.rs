@@ -1176,42 +1176,6 @@ pub(crate) fn string_content_span(node: Node) -> Span {
     node_to_span(string_content(node).unwrap_or(node))
 }
 
-/// One arm of an `if`/`unless` statement chain.
-#[derive(Clone, Copy)]
-pub(crate) struct CondArm<'a> {
-    /// `None` for the trailing `else`.
-    pub cond: Option<Node<'a>>,
-    pub block: Node<'a>,
-    /// The truth value `cond` must take for `block` to run: `false` only
-    /// for the leading arm of an `unless`. An `else` arm carries `true`.
-    pub enter: bool,
-}
-
-/// A `conditional_statement`'s arms in order: the leading `if`/`unless`,
-/// each `elsif`, then the `else`. The `elsif`/`else` nodes nest inside one
-/// another, so the chain is the walk down them.
-pub(crate) fn conditional_arms(stmt: Node<'_>) -> Vec<CondArm<'_>> {
-    let mut arms = Vec::new();
-    let (Some(cond), Some(block)) =
-        (stmt.child_by_field_name("condition"), stmt.child_by_field_name("block"))
-    else {
-        return arms;
-    };
-    let enter = stmt.child(0).is_none_or(|k| k.kind() != "unless");
-    arms.push(CondArm { cond: Some(cond), block, enter });
-    let mut tail = stmt;
-    while let Some(next) = tail.elements().find(|c| matches!(c.kind(), "elsif" | "else")) {
-        let Some(block) = next.child_by_field_name("block") else { break };
-        let cond = next.child_by_field_name("condition");
-        arms.push(CondArm { cond, block, enter: true });
-        if cond.is_none() {
-            break;
-        }
-        tail = next;
-    }
-    arms
-}
-
 /// The template node a `map` callback contributes. `map EXPR, LIST` is
 /// the callback itself; `map { ... } LIST` (the block form — at least
 /// as idiomatic) yields the block's tail expression, since Perl
@@ -1434,15 +1398,6 @@ pub(crate) fn enclosing_block<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> Opt
     syn.ancestors(node).find(|p| matches!(p.kind(), "block" | "source_file"))
 }
 
-/// How far [`conditional_arm`] climbs: to the enclosing sub (or file), or
-/// only to the enclosing block. A fact that lands on the block's own scope
-/// asks `Block` — inside the block, the block has, by construction, run.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ArmBound {
-    Sub,
-    Block,
-}
-
 /// A call on a variable or place whose callee `tag_of` names as reporting
 /// what a reference is: which function, and the operand.
 pub(crate) fn ref_tag_call<'a>(
@@ -1510,49 +1465,6 @@ fn one_operand_call(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
         _ => return None,
     };
     Some((name, peel_groups(operand)))
-}
-
-/// The arm of a conditionally-run construct, between `node` and `bound`,
-/// that holds `node`: an `if`/`elsif`/`else` body or a later branch, a loop
-/// body, a C-style `for`'s iterator, the statement a postfix
-/// `if`/`unless`/`for`/`while` modifies, a ternary branch, the right
-/// operand of a short-circuit. A condition, a loop list, a `for`
-/// initialiser and a non-short-circuit operand run whenever their
-/// construct does, so the climb passes through them. `None` = `node` runs
-/// whenever its bound does. Scope-crossing conditionality (a write inside
-/// a closure relative to an outer variable's scope) is the caller's check.
-pub(crate) fn conditional_arm<'a>(syn: &SyntaxForest<'a>, node: Node<'a>, bound: ArmBound) -> Option<Node<'a>> {
-    let mut child = node;
-    let mut up = syn.ancestors(node);
-    while let Some(p) = up.next() {
-        let is_field = |f: &str| p.child_by_field_name(f).is_some_and(|c| c == child);
-        let kind = p.kind();
-        if is_callable_boundary(kind) || kind == "source_file" {
-            return None;
-        }
-        let arm = match kind {
-            "block" if bound == ArmBound::Block => return None,
-            "conditional_statement" | "loop_statement" | "conditional_expression" => !is_field("condition"),
-            "postfix_conditional_expression" | "postfix_loop_expression" | "postfix_for_expression" => {
-                modifier_head(p) != Some(child)
-            }
-            "cstyle_for_statement" => !is_field("initialiser") && !is_field("condition"),
-            "for_statement" => !is_field("list") && !is_field("variable"),
-            "lowprec_logical_expression" => is_field("right"),
-            "binary_expression" => {
-                is_field("right")
-                    && (0..p.child_count())
-                        .filter_map(|i| p.child(i))
-                        .any(|c| !c.is_named() && matches!(c.kind(), "&&" | "||" | "//"))
-            }
-            _ => false,
-        };
-        if arm {
-            return Some(child);
-        }
-        child = p;
-    }
-    None
 }
 
 /// The kinds whose body runs when called, not where it is written.

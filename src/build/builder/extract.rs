@@ -156,6 +156,7 @@ impl<'a> Builder<'a> {
             span,
             rhs_span: None,
             rhs_slot: None,
+            replaces: false,
             conditional: true,
         });
     }
@@ -189,7 +190,24 @@ impl<'a> Builder<'a> {
         if self.element_written_in_place(elem) {
             return Some(ElementWrite::InPlace);
         }
+        if crate::cst::is_value_reset_target(self.syntax, elem, self.source) {
+            return Some(ElementWrite::Reset);
+        }
         self.element_escaped(elem).then_some(ElementWrite::Escaped)
+    }
+
+    /// Record the write an element's own position makes — every write but
+    /// an assignment's, which records with its right-hand side. Whether one
+    /// was made.
+    pub(super) fn record_positional_element_write(&mut self, elem: Node<'a>) -> bool {
+        match self.element_write_kind(elem) {
+            Some(ElementWrite::InPlace) => self.record_in_place_write(elem),
+            Some(ElementWrite::Escaped) => self.record_place_escape(elem),
+            // Stores no value, as `$h{k} = undef` stores none a type names.
+            Some(ElementWrite::Reset) => self.record_key_write(elem, None, None, true, self.current_scope()),
+            Some(ElementWrite::Plain | ElementWrite::Compound) | None => return false,
+        }
+        true
     }
 
     /// A reference to the element is taken (`\$opt{help}`, `\$v->{k}`):
@@ -205,7 +223,7 @@ impl<'a> Builder<'a> {
     /// exists and nothing below it is closed. The place-scoped form of
     /// `record_escape_write`, whose place is the whole root.
     pub(super) fn record_place_escape(&mut self, elem: Node<'a>) {
-        self.record_key_write(elem, None, None, self.current_scope());
+        self.record_key_write(elem, None, None, false, self.current_scope());
     }
 
     /// An element written in place. A list-assignment target's write is the
@@ -213,7 +231,7 @@ impl<'a> Builder<'a> {
     /// value the way it does a variable target's.
     pub(super) fn record_in_place_write(&mut self, elem: Node<'a>) {
         if crate::cst::list_assignment_target_of(self.syntax, elem).is_none() {
-            self.record_key_write(elem, None, None, self.current_scope());
+            self.record_key_write(elem, None, None, false, self.current_scope());
         }
     }
 
@@ -222,6 +240,7 @@ impl<'a> Builder<'a> {
         left: Node<'a>,
         rhs: Option<Node<'a>>,
         rhs_slot: Option<i32>,
+        replaces: bool,
         scope: crate::model::file_analysis::ScopeId,
     ) {
         use crate::model::file_analysis::{KeyWrite, WriteKey};
@@ -286,7 +305,8 @@ impl<'a> Builder<'a> {
             span,
             rhs_span: if typed { rhs.map(node_to_span) } else { None },
             rhs_slot,
-            conditional: crate::cst::conditional_arm(self.syntax, left, crate::cst::ArmBound::Sub).is_some(),
+            replaces: replaces && typed,
+            conditional: super::control::arm_around(self.syntax, self.source, left, super::control::ArmBound::Sub).is_some(),
         });
     }
 
@@ -912,6 +932,9 @@ pub(super) enum ElementWrite {
     /// `\$h{k}`: the element's place escapes (`element_escaped`), so its
     /// value may be written by whoever holds the reference.
     Escaped,
+    /// `delete $h{k}`, `undef $h{k}`, `local $h{k}`: the element is left
+    /// without a value, the write `$h{k} = undef` makes.
+    Reset,
 }
 
 impl ElementWrite {

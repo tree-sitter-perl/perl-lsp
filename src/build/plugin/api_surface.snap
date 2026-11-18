@@ -309,8 +309,17 @@ pub asserts: bool,
 
 pub struct TypeOverride {
 pub target: OverrideTarget,
-pub return_type: OverrideReturn,
+#[serde(default)]
+pub return_type: Option<OverrideReturn>,
 pub reason: String,
+#[serde(default)]
+pub ends: Option<Vec<OverrideEnds>>,
+}
+
+pub enum OverrideEnds {
+Completes,
+Unwinds,
+Exits,
 }
 
 pub enum OverrideReturn {

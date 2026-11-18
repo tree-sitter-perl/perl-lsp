@@ -30,6 +30,13 @@
     [(identifier) @parent @ref.type
      (attribute attribute: (identifier) @ref.type) @parent @ref.spelled]))
 
+; `-> NoReturn` / `-> Never` (bare or through `typing.`) says a call
+; never comes back; how it leaves is the body's business.
+(function_definition
+  name: (identifier) @ends.never
+  return_type: (type [(identifier) @_never (attribute attribute: (identifier) @_never)])
+  (#any-of? @_never "NoReturn" "Never"))
+
 ; A def's `-> T` is its declared return; without one, what it returns is.
 (function_definition
   name: (identifier) @def.sub.name
@@ -49,6 +56,23 @@
 (function_definition) @scope.sub
 ; A lambda is a callable too: what it yields is its own.
 (lambda) @scope.sub
+; A comprehension runs in a function of its own: its loop variables are its
+; locals, in force from its first token (the element is written before the
+; `for` that binds it), and never the names of the code around it.
+[(list_comprehension) (set_comprehension) (dictionary_comprehension) (generator_expression)] @scope.sub
+(for_in_clause
+  left: (identifier) @flow.rebind @flow.assign)
+(for_in_clause
+  left: [(pattern_list (identifier) @flow.rebind) (tuple_pattern (identifier) @flow.rebind)] @flow.assign)
+(for_in_clause
+  left: [(identifier) @def.assigned.name @def.assigned
+         (pattern_list (identifier) @def.assigned.name @def.assigned)
+         (tuple_pattern (identifier) @def.assigned.name @def.assigned)])
+
+; `nonlocal x` makes the function's `x` the variable of the function
+; around it; `global x` makes it the module's.
+(nonlocal_statement (identifier) @closure.capture.ref)
+(global_statement (identifier) @closure.capture.global)
 
 ; A name a class body binds — `count = 0`, `a: int`, `b: int = 5` — is two
 ; things from one token: a data member of the class (`Counter.count`) and a
@@ -88,13 +112,23 @@
 (augmented_assignment left: (_) @flow.place)
 
 ; An augmented assignment and a `del` leave what they name without the
-; value a guard proved, whatever it is: a name rebinds (to the operator's
-; result, or to nothing), a member or element is written.
+; value a guard proved, whatever it is: a name rebinds to the operator's
+; result, or a `del` unbinds it; a member or element is written.
 (augmented_assignment
   left: [(identifier) @flow.rebind (attribute) @flow.place (subscript) @flow.place])
-(delete_statement [(identifier) @flow.rebind (attribute) @flow.place (subscript) @flow.place])
+(delete_statement [(identifier) @flow.unbind (attribute) @flow.place (subscript) @flow.place])
 (delete_statement
-  (expression_list [(identifier) @flow.rebind (attribute) @flow.place (subscript) @flow.place]))
+  (expression_list [(identifier) @flow.unbind (attribute) @flow.place (subscript) @flow.place]))
+
+; `except E as e` binds an instance of what it catches, and unbinds the
+; name once its handler ends.
+; TODO(except-tuple-binds): `except (E, F) as e` binds an `E | F`; today
+; the name is bound to nothing typed. Owner: Python pack follow-up.
+(except_clause
+  value: (as_pattern . [(identifier) (attribute)] @type.annot
+    alias: (as_pattern_target (identifier) @flow.target)))
+(except_clause
+  value: (as_pattern alias: (as_pattern_target (identifier) @flow.unbind))) @flow.lasts
 
 (parameters
   (identifier) @def.var.name @def.var)
@@ -186,9 +220,12 @@
   !right)
 
 ; `for x in items:` — the loop var rebinds per element (a Rebind, no inflowing
-; type yet) so the narrowing cutoff ends a region at the loop.
+; type yet): each pass replaces what it held, so the narrowing cutoff ends a
+; region at the loop and nothing a pass wrote reaches the next.
 (for_statement
-  left: (identifier) @flow.rebind)
+  left: (identifier) @flow.rebind @flow.assign)
+(for_statement
+  left: [(pattern_list (identifier) @flow.rebind) (tuple_pattern (identifier) @flow.rebind)] @flow.assign)
 
 ; ---- calls: a call's value is an Invoke of its callee on its arguments. The
 ; argument list rides the callee's match, its arguments are the @arity.arg
@@ -246,6 +283,7 @@
 (float) @expr.lit.number
 (list) @expr.lit.arrayref
 (dictionary) @expr.lit.hashref
+(none) @expr.lit.null
 
 ; Guard narrowing. An atom states what a test proves of its subject, a
 ; name or a member (`self.x`): `isinstance(x, Foo)` that it is the class
@@ -269,44 +307,68 @@
 ; holds, every later clause of the chain where it fails; a conditional
 ; expression yields its first value or its last; the right of `and` runs
 ; where the left holds, of `or` where it fails. An `else` arm is its body;
-; the `else` of a loop or a `try` is no arm of a condition. A `while` body
-; runs where its condition holds, and the loop tests it again after each
-; run, so a `break` or `continue` in it goes to the loop.
-(if_statement condition: (_) @narrow.cond consequence: (_) @narrow.then)
+; the `else` of a `try` is no arm of a condition.
+(if_statement condition: (_) @ctl.cond consequence: (_) @ctl.then) @ctl.branch
 (if_statement
-  condition: (_) @narrow.cond
-  alternative: [(elif_clause) @narrow.else (else_clause body: (_) @narrow.else)])
-(elif_clause condition: (_) @narrow.cond consequence: (_) @narrow.then)
+  condition: (_) @ctl.cond
+  alternative: [(elif_clause) @ctl.else (else_clause body: (_) @ctl.else)]) @ctl.branch
+(elif_clause condition: (_) @ctl.cond consequence: (_) @ctl.then) @ctl.branch
 (if_statement
-  alternative: (elif_clause condition: (_) @narrow.cond)
-  alternative: [(elif_clause) @narrow.else (else_clause body: (_) @narrow.else)])
+  alternative: (elif_clause condition: (_) @ctl.cond) @ctl.branch
+  alternative: [(elif_clause) @ctl.else (else_clause body: (_) @ctl.else)])
 ; TODO(walrus-evaluation-order): `c` runs before `a` in `a if c else b`;
 ; once `:=` is a write, a read in `c` must skip `a` (`EvaluatedBefore`).
 (conditional_expression
-  (_) @narrow.then
+  (_) @ctl.then
   .
   "if"
   .
-  (_) @narrow.cond
+  (_) @ctl.cond
   .
   "else"
   .
-  (_) @narrow.else)
-(boolean_operator left: (_) @narrow.cond operator: "and" right: (_) @narrow.then)
-(boolean_operator left: (_) @narrow.cond operator: "or" right: (_) @narrow.else)
-; TODO(cfg-exit-join): `@narrow.loop` and `@flow.to_loop` stand in for
-; reachability until the CFG's loop edges answer it.
-(while_statement condition: (_) @narrow.cond body: (_) @narrow.then) @narrow.loop
+  (_) @ctl.else) @ctl.branch
+(boolean_operator left: (_) @ctl.cond operator: "and" right: (_) @ctl.then) @ctl.branch
+(boolean_operator left: (_) @ctl.cond operator: "or" right: (_) @ctl.else) @ctl.branch
+; A loop runs its body while its test holds (a `for` while items remain),
+; and its `else` where the test fails, never after a `break`.
+(while_statement condition: (_) @ctl.cond body: (_) @ctl.loop.body) @ctl.loop
+(for_statement body: (_) @ctl.loop.body) @ctl.loop
+; A `for` tests for a next item as it binds it.
+(for_statement left: (_) @ctl.cond) @ctl.loop
+(while_statement alternative: (else_clause body: (_) @ctl.else)) @ctl.loop
+(for_statement alternative: (else_clause body: (_) @ctl.else)) @ctl.loop
+; A try runs its body; where the body unwinds, an except; where it
+; completes, its else; past them all, its finally.
+(try_statement body: (_) @ctl.try.body) @ctl.try
+(try_statement (except_clause) @ctl.try.catch) @ctl.try
+(try_statement (else_clause body: (_) @ctl.try.else)) @ctl.try
+(try_statement (finally_clause (block) @ctl.try.finally)) @ctl.try
+; Where a tried body may unwind: almost any operation raises in Python, so
+; each statement may, and so may a call inside one. A write nothing here
+; follows in the body reaches no handler.
+(block (_) @ctl.raise)
+(call) @ctl.raise
 ; TODO(python-assert-narrowing): `assert G` leaves where G fails, but no node
 ; of it leaves; it needs a position whose failing arm is implicit.
 
 ; A statement that leaves its block: nothing after it there runs, and
 ; whether a chain of arms falls through follows from its arms' statements
 ; (`query_extract/extract/narrowing.rs`).
-; TODO(noreturn-callee): `sys.exit()` leaves too. A callee that never
-; returns is an effect on the callee; mark it once effects and the CFG exist.
-[(return_statement) (raise_statement) (continue_statement) (break_statement)] @flow.leaves
-[(continue_statement) (break_statement)] @flow.to_loop
+; TODO(noreturn-callee): `sys.exit()` leaves too: an effect on the callee,
+; minted from the pack's runtime-function document once one exists.
+(return_statement) @ctl.leave.return
+(raise_statement) @ctl.leave.throw
+(continue_statement) @ctl.leave.continue
+(break_statement) @ctl.leave.break
+
+; How a call to a def ends is how its body does; a call that is a whole
+; statement lets control past it only if it comes back
+; (`docs/adr/cfg-tier.md` §Effects). A def's or a lambda's body runs later,
+; so it reads the variables around it as they stand when it runs.
+(function_definition body: (block) @ctl.body)
+(lambda body: (_) @ctl.body)
+(expression_statement (call) @ctl.gate)
 
 ; `return EXPR` — the returned expression carries its own witness; this marks
 ; the site, an arm of the enclosing def's return when the def declares none.

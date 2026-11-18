@@ -1694,6 +1694,19 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
         if let Some(prov) = provenance {
             entry["return_type_provenance"] = prov;
         }
+        // How a call to it ends, and who said so — shown only when
+        // something did (the top is "no evidence").
+        let ends = analysis.symbol_ends(sym.id);
+        if ends != witnesses::Ends::all() {
+            let stated: Vec<String> = analysis
+                .witnesses
+                .for_attachment(&witnesses::WitnessAttachment::SymbolEffects(sym.id))
+                .iter()
+                .map(|w| format!("{:?}", w.source))
+                .collect();
+            entry["ends"] = serde_json::json!(ends.iter_names().map(|(n, _)| n.to_lowercase()).collect::<Vec<_>>());
+            entry["ends_provenance"] = serde_json::json!(stated);
+        }
         if !widening.is_empty() {
             entry["return_type_widening"] = serde_json::json!(widening);
         }

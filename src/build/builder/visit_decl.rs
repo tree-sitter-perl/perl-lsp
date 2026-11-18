@@ -83,7 +83,7 @@ impl<'a> Builder<'a> {
             }
             "lowprec_logical_expression" => {
                 self.narrow_logical_rhs(node);
-                self.narrow_logical_exit(node);
+                self.record_logical_exit_guard(node);
                 self.queue_children(node);
             }
             "conditional_expression" => {
@@ -103,11 +103,20 @@ impl<'a> Builder<'a> {
 
             // Call expressions
             "function_call_expression" | "ambiguous_function_call_expression" => {
+                self.push_builtin_ends(node);
                 self.narrow_assertion(node);
                 self.visit_function_call(node);
             }
+            // A builtin called with no arguments and no parens (`die;`): the
+            // word alone is the call. Inside a call it is the call's name,
+            // which the call states for.
+            "function" if self.syntax.parent(node).is_none_or(|p| p.child_by_field_name("function") != Some(node)) => {
+                self.push_builtin_ends(node);
+                self.queue_children(node);
+            }
             // Built-in calls: abs($x), length($s), time(), etc.
             "func1op_call_expression" | "func0op_call_expression" => {
+                self.push_builtin_ends(node);
                 if self.is_shift_call(node) {
                     self.consume_arg_head(node);
                 }
@@ -131,11 +140,7 @@ impl<'a> Builder<'a> {
             // Dereference expressions → rep observations on the operand
             "array_element_expression" => {
                 self.infer_deref_type(node, TypeObservation::ArrayRefAccess);
-                if self.element_written_in_place(node) {
-                    self.record_in_place_write(node);
-                } else if self.element_escaped(node) {
-                    self.record_place_escape(node);
-                }
+                self.record_positional_element_write(node);
                 // The direct `$arr[i]` indexes the named array; only a
                 // subscript through a reference has a receiver.
                 if let Some(base) = crate::cst::element_deref_base(node) {
@@ -194,7 +199,14 @@ impl<'a> Builder<'a> {
             // bodies returns `Edge(Expression(refidx))`; finding
             // refidx requires the ref to exist, which requires the
             // walker to have visited the method-call expression.
+            // `next` / `last` / `redo` / `goto`: control leaves to a target
+            // the construct names, so evaluation never ends here.
+            "loopex_expression" | "goto_expression" => {
+                self.push_leave_effect(node);
+                self.queue_children(node);
+            }
             "return_expression" => {
+                self.push_leave_effect(node);
                 let body_span = crate::cst::nth_element(node, 0).map(node_to_span);
                 let scope = self.enclosing_sub_scope();
                 if let Some(scope) = scope {
@@ -892,7 +904,7 @@ impl<'a> Builder<'a> {
                     }
                 }
                 "conditional_statement" => {
-                    let chain = crate::cst::conditional_arms(stmt);
+                    let chain = super::control::branch_chain(self.source, stmt);
                     let Some(last_arm) = chain.last().copied() else {
                         arms.push(TailArm::Value(node_to_span(stmt)));
                         continue;

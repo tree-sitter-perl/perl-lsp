@@ -1042,6 +1042,7 @@ fn sksym(src: &str, kind: DefCap, name: &str, occ: usize, package: Option<&str>)
         owner_stated: false,
         member_space: None,
         flags: Default::default(),
+        never_returns: false,
     }
 }
 
@@ -2040,6 +2041,28 @@ void f(Holder h) {
 }
 
 #[test]
+fn a_member_narrows_past_its_construct_until_disturbed() {
+    // Where the guard's arm leaves, the place holds what the test proves past
+    // the construct; a write to the place ends that.
+    let run_classes = |src: &str| {
+        let fa = cpp_skel(src).into_file_analysis();
+        let mut classes: Vec<(usize, Option<String>)> = fa
+            .refs()
+            .iter()
+            .filter(|r| r.target_name == "run" && matches!(r.kind, crate::model::file_analysis::RefKind::MethodCall { .. }))
+            .map(|r| (r.span.start.row, fa.method_call_invocant_type(r, None).and_then(|t| t.class_name().map(str::to_string))))
+            .collect();
+        classes.sort();
+        classes
+    };
+    let head = "struct Base { void run(); };\nstruct Derived : Base { void run(); };\nstruct Holder { Base* b; };\n";
+    let narrowed = format!("{head}void f(Holder h) {{\n    if (!dynamic_cast<Derived*>(h.b)) {{\n        return;\n    }}\n    h.b->run();\n}}\n");
+    assert_eq!(run_classes(&narrowed), vec![(7, Some("Derived".to_string()))]);
+    let written = format!("{head}void f(Holder h, Base* o) {{\n    if (!dynamic_cast<Derived*>(h.b)) return;\n    h.b = o;\n    h.b->run();\n}}\n");
+    assert_eq!(run_classes(&written), vec![(6, Some("Base".to_string()))]);
+}
+
+#[test]
 fn cpp_dynamic_cast_narrows_a_member_of_this() {
     // `this->b` and a bare `b` in a member function are one place: either
     // spelling's guard reaches the other's uses.
@@ -2151,7 +2174,7 @@ void f(std::optional<Widget> a, std::optional<Widget> b) {
 #[test]
 fn a_pack_guard_narrows_every_arm_it_enters() {
     // One region rule for every pack guard: the arm the pattern tags
-    // `@narrow.then`, whatever construct holds it, and nothing outside it.
+    // `@ctl.then`, whatever construct holds it, and nothing outside it.
     let src = "\
 void f(Base* b, std::optional<Widget> o) {
     if (o) return o->run();
@@ -2328,6 +2351,52 @@ void k(std::optional<Widget> o) {
 }
 
 #[test]
+fn a_pack_test_narrows_past_its_construct_through_each_join() {
+    // Past a construct some path of which leaves, a variable holds what each
+    // path that comes out proves: every falling arm a test narrows, an
+    // inner construct already joined, and no further than the statements the
+    // construct runs among (a loop's body, a `try`).
+    use crate::model::file_analysis::InferredType;
+    let class = |c: &str| Some(InferredType::ClassName(c.into()));
+    let python = |body: &str| {
+        let src = format!("class Foo:\n    pass\ndef f(x, z):\n{body}\n    x.run()\n");
+        let mut parser = python_parser();
+        let tree = parser.parse(&src, None).unwrap();
+        let fa = extract(&tree, src.as_bytes(), &python_pack()).unwrap().into_file_analysis();
+        let row = src.lines().position(|l| l.contains("x.run()")).unwrap();
+        fa.inferred_type_via_bag("x", tree_sitter::Point { row, column: 4 })
+    };
+    let narrows = [
+        (
+            "    if isinstance(x, Foo):\n        log()\n    elif isinstance(x, Foo):\n        log()\n    else:\n        return",
+            "two falling arms, each narrowed",
+        ),
+        (
+            "    if z:\n        if not isinstance(x, Foo):\n            return\n    else:\n        if not isinstance(x, Foo):\n            return",
+            "each arm holds a construct already joined",
+        ),
+        ("    if not isinstance(x, Foo):\n        raise ValueError()", "a bodiless path carries what its test proves"),
+    ];
+    for (body, why) in narrows {
+        assert_eq!(python(body), class("Foo"), "python: {why}");
+    }
+    let nothing = [
+        (
+            "    for y in z:\n        if not isinstance(x, Foo):\n            continue\n        log()",
+            "past the loop whose body the test is in",
+        ),
+        (
+            "    try:\n        if not isinstance(x, Foo):\n            raise ValueError()\n    except ValueError:\n        pass",
+            "past the `try` the test is in",
+        ),
+        ("    if z:\n        if not isinstance(x, Foo):\n            return", "one arm unproved"),
+    ];
+    for (body, why) in nothing {
+        assert_ne!(python(body), class("Foo"), "python: {why}");
+    }
+}
+
+#[test]
 fn a_pack_chain_narrows_the_rest_of_the_block_to_its_one_falling_arm() {
     // After a chain whose one arm falls through, the rest of the block runs
     // where that arm does; a missing `else` falls through where every
@@ -2418,11 +2487,11 @@ fn a_pack_chain_narrows_the_rest_of_the_block_to_its_one_falling_arm() {
 
 #[test]
 fn a_pack_loop_whose_body_always_leaves_narrows_after_the_loop() {
-    // A `while` body that always leaves never comes back to the test, so
-    // the loop is left only where its first test fails: the rest of the
-    // block narrows as after an `if` with no `else`. A `break` or
-    // `continue` in the body, or a body that falls through, says nothing
-    // after the loop. A bare block (C++) leaves where its statements do.
+    // A `while` loop is left where a test fails, so the rest of the block
+    // narrows as after an `if` with no `else`, whether the body leaves,
+    // falls through or continues: each comes back to the test. A `break`
+    // aimed at the loop leaves it with the test unsettled. A bare block
+    // (C++) leaves where its statements do.
     use crate::model::file_analysis::InferredType;
     let class = |c: &str| Some(InferredType::ClassName(c.into()));
     let python = |chain: &str| {
@@ -2440,14 +2509,14 @@ fn a_pack_loop_whose_body_always_leaves_narrows_after_the_loop() {
             "    while not isinstance(x, Foo):\n        if z:\n            return\n        else:\n            raise ValueError()",
             "a body chain whose every arm leaves",
         ),
+        ("    while not isinstance(x, Foo):\n        log()", "a body that falls through"),
+        ("    while not isinstance(x, Foo):\n        if z:\n            continue\n        return", "a continue before the exit"),
     ];
     for (chain, why) in narrows {
         assert_eq!(python(chain), class("Foo"), "python: {why}");
     }
     let nothing = [
-        ("    while not isinstance(x, Foo):\n        log()", "a body that falls through"),
         ("    while not isinstance(x, Foo):\n        if z:\n            break\n        return", "a break before the exit"),
-        ("    while not isinstance(x, Foo):\n        if z:\n            continue\n        return", "a continue before the exit"),
     ];
     for (chain, why) in nothing {
         assert_ne!(python(chain), class("Foo"), "python: {why}");
@@ -2465,14 +2534,14 @@ fn a_pack_loop_whose_body_always_leaves_narrows_after_the_loop() {
         ("    while (!o) { log(); { return; } }", "a bare block in the body"),
         ("    if (!o) { log(); { return; } }", "a bare block in an if"),
         ("    if (o) { log(); } else { { { throw 1; } } }", "nested bare blocks in an else"),
+        ("    while (!o) { log(); }", "a body that falls through"),
+        ("    while (!o) { if (z) continue; return; }", "a continue before the exit"),
     ];
     for (chain, why) in narrows {
         assert_eq!(cpp(chain), class("Widget"), "cpp: {why}");
     }
     let nothing = [
-        ("    while (!o) { log(); }", "a body that falls through"),
         ("    while (!o) { if (z) break; return; }", "a break before the exit"),
-        ("    while (!o) { if (z) continue; return; }", "a continue before the exit"),
         ("    if (!o) { { log(); } }", "a bare block that falls through"),
     ];
     for (chain, why) in nothing {
@@ -4168,6 +4237,256 @@ def f(x: Optional[Foo], y: Foo | None, u: A | B | None, z: Foo):
     );
     // A receiver holding None types no call, so ask the variable.
     assert_eq!(fa.inferred_type_via_bag("x", tree_sitter::Point { row: 22, column: 8 }), Some(InferredType::Undef));
+}
+
+/// A declaration that says a call never comes back states it on the
+/// callable, and on its class for a method; one that says nothing is the top.
+#[cfg(any(feature = "php", feature = "python", feature = "cpp"))]
+fn declared_ends(path: &str, src: &str) -> Vec<(String, crate::model::witnesses::Ends)> {
+    use crate::build::language_driver::LanguageRegistry;
+    use crate::model::file_analysis::SymKind;
+    let p = std::path::PathBuf::from(path);
+    let fa = LanguageRegistry::compiled().for_path(&p).unwrap().analyze_with_path(src, Some(&p));
+    let mut out: Vec<(String, crate::model::witnesses::Ends)> = fa
+        .symbols()
+        .iter()
+        .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method))
+        .map(|s| (s.name.clone(), fa.symbol_ends(s.id)))
+        .collect();
+    let ctx = fa.bag_context(None);
+    for s in fa.symbols().iter().filter(|s| s.kind == SymKind::Method) {
+        let class = s.package.clone().unwrap_or_default();
+        let ends = crate::model::witnesses::query_ends(
+            &fa.witnesses,
+            &crate::model::witnesses::WitnessAttachment::effects_of(class.clone(), s.name.clone()),
+            Some(&ctx),
+        );
+        out.push((format!("{class}::{}", s.name), ends));
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[cfg(any(feature = "php", feature = "python", feature = "cpp"))]
+fn never() -> crate::model::witnesses::Ends {
+    crate::model::witnesses::Ends::UNWINDS | crate::model::witnesses::Ends::EXITS
+}
+
+#[cfg(feature = "php")]
+#[test]
+fn php_never_return_says_a_call_never_comes_back() {
+    use crate::model::witnesses::Ends;
+    let src = "<?php\nfunction bail(): never { exit(1); }\nfunction ok(): int { return 1; }\nclass C { public function fail(): never { throw new E(); } }\n";
+    assert_eq!(
+        declared_ends("/x/n.php", src),
+        vec![("C::fail".into(), never()), ("bail".into(), never()), ("fail".into(), never()), ("ok".into(), Ends::COMPLETES)]
+    );
+}
+
+#[cfg(feature = "python")]
+#[test]
+fn python_noreturn_says_a_call_never_comes_back() {
+    use crate::model::witnesses::Ends;
+    let src = "import typing\nfrom typing import NoReturn\ndef bail() -> NoReturn:\n    raise E()\ndef stop() -> typing.Never:\n    raise E()\ndef ok() -> int:\n    return 1\n";
+    assert_eq!(
+        declared_ends("/x/n.py", src),
+        vec![("bail".into(), never()), ("ok".into(), Ends::COMPLETES), ("stop".into(), never())]
+    );
+}
+
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_noreturn_says_a_call_never_comes_back() {
+    use crate::model::witnesses::Ends;
+    let src = "[[noreturn]] void bail();\n__attribute__((noreturn)) void die_now(int c);\n[[noreturn]] void stop() { throw 1; }\nint ok() { return 1; }\n";
+    assert_eq!(
+        declared_ends("/x/n.cpp", src),
+        vec![("bail".into(), never()), ("die_now".into(), never()), ("ok".into(), Ends::COMPLETES), ("stop".into(), never())]
+    );
+}
+
+#[cfg(any(feature = "php", feature = "python", feature = "cpp"))]
+fn analyzed(path: &str, src: &str) -> crate::model::file_analysis::FileAnalysis {
+    let p = std::path::PathBuf::from(path);
+    crate::build::language_driver::LanguageRegistry::compiled().for_path(&p).unwrap().analyze_with_path(src, Some(&p))
+}
+
+/// Past a branch whose arm writes and then calls `call`, what `x` holds at
+/// `row`: the arm's write reaches the join only if the call comes back.
+#[cfg(any(feature = "php", feature = "python", feature = "cpp"))]
+fn past_a_gated_write(path: &str, src: &str, var: &str, row: usize) -> Option<crate::model::file_analysis::InferredType> {
+    analyzed(path, src).inferred_type_via_bag(var, tree_sitter::Point { row, column: 0 })
+}
+
+/// A function of the file that throws, called as a statement, lets no path
+/// past it; one that comes back does (`docs/adr/cfg-tier.md` §Effects).
+#[cfg(feature = "python")]
+#[test]
+fn python_a_call_to_a_raising_def_reaches_no_join() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = |body: &str| format!("def fatal():\n    {body}\ndef f(c):\n    x = 1\n    if c:\n        x = 's'\n        fatal()\n    y = x\n");
+    assert_eq!(past_a_gated_write("/x/g.py", &src("raise E()"), "x", 7), Some(T::Numeric));
+    assert!(matches!(past_a_gated_write("/x/g.py", &src("log()"), "x", 7), Some(T::Union(_))), "a def that comes back");
+    // A def nested in another's body ends as its own body does, not the
+    // outer one's.
+    let fa = analyzed("/x/g.py", "def f():\n    def g():\n        raise E()\n    log()\n");
+    let id = |n: &str| fa.symbols().iter().find(|s| s.name == n).unwrap().id;
+    assert!(fa.symbol_ends(id("f")).contains(crate::model::witnesses::Ends::COMPLETES));
+    assert_eq!(fa.symbol_ends(id("g")), crate::model::witnesses::Ends::UNWINDS);
+}
+
+/// A method call gates too: `$this`'s class resolves it, and a subclass
+/// override that comes back keeps the arm.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_call_to_a_throwing_method_reaches_no_join() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = |sub: &str| format!("<?php\nclass P {{\nfunction fail() {{ throw new E(); }}\nfunction f($c) {{\n$x = 1;\nif ($c) {{ $x = 's'; $this->fail(); }}\n$y = $x;\n}}\n}}\n{sub}\n");
+    assert_eq!(past_a_gated_write("/x/m.php", &src(""), "x", 6), Some(T::Numeric));
+    let soft = "class Q extends P { function fail() { log(); } }";
+    assert!(matches!(past_a_gated_write("/x/m.php", &src(soft), "x", 6), Some(T::Union(_))), "Q::fail comes back");
+}
+
+#[cfg(feature = "php")]
+#[test]
+fn php_a_call_to_a_throwing_function_reaches_no_join() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = |body: &str| format!("<?php\nfunction fatal() {{ {body} }}\nfunction f($c) {{\n$x = 1;\nif ($c) {{ $x = 's'; fatal(); }}\n$y = $x;\n}}\n");
+    assert_eq!(past_a_gated_write("/x/g.php", &src("throw new E();"), "x", 5), Some(T::Numeric));
+    assert!(matches!(past_a_gated_write("/x/g.php", &src("log();"), "x", 5), Some(T::Union(_))), "a function that comes back");
+}
+
+/// An arm ending in a chain whose every arm leaves comes out nowhere, though
+/// the arm's own `}` follows the chain's.
+#[cfg(feature = "php")]
+#[test]
+fn php_an_arm_closed_by_a_chain_that_leaves_reaches_no_join() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = "<?php\nfunction fatal() { throw new E(); }\nfunction f($c, $d) {\n$x = 1;\nif ($c) { $x = 's'; if ($d) { return; } else { fatal(); } }\n$y = $x;\n}\n";
+    assert_eq!(past_a_gated_write("/x/n.php", src, "x", 5), Some(T::Numeric));
+}
+
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_a_call_to_a_throwing_function_reaches_no_join() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = |body: &str| format!("void fatal() {{ {body} }}\nvoid f(bool c) {{\nauto x = 1;\nif (c) {{ x = \"s\"; fatal(); }}\nauto y = x;\n}}\n");
+    assert_eq!(past_a_gated_write("/x/g.cpp", &src("throw 1;"), "x", 4), Some(T::Numeric));
+    assert!(matches!(past_a_gated_write("/x/g.cpp", &src("log();"), "x", 4), Some(T::Union(_))), "a function that comes back");
+}
+
+/// A C++ loop joins its entry and each pass at its head, and past it what
+/// its failed test and each `break` leave; a `break` inside a `switch`
+/// leaves the `switch`, not the loop.
+#[test]
+fn cpp_a_loop_joins_its_entry_its_passes_and_its_exits() {
+    let src = "void f(bool c, int k) {\n    auto x = 1;\n    while (c) { auto u = x; x = \"s\"; }\n    auto v = x;\n    auto y = \"s\";\n    for (int i = 0; i < k; i++) { switch (k) { case 1: if (c) break; } y = 2; }\n    auto w = y;\n}\n";
+    let fa = cpp_fa(src);
+    let head = fa.witnesses.all().iter().any(|w| {
+        matches!(&w.attachment, crate::model::witnesses::WitnessAttachment::Join { role: crate::model::witnesses::JoinRole::Head, .. })
+    });
+    assert!(head, "the body's write joins at the loop's head");
+    let past = fa.inferred_type_via_bag("x", tree_sitter::Point { row: 3, column: 13 });
+    assert!(matches!(past, Some(crate::model::file_analysis::InferredType::Union(_))), "past the loop: either: {past:?}");
+    let switched = fa.inferred_type_via_bag("y", tree_sitter::Point { row: 6, column: 13 });
+    assert!(matches!(switched, Some(crate::model::file_analysis::InferredType::Union(_))), "every pass ends at the body's write: {switched:?}");
+}
+
+/// A C++ branch joins its arms like any other language's, braceless arm
+/// included: two arms that agree leave their agreed type.
+#[test]
+fn cpp_a_branch_joins_what_its_arms_leave() {
+    let src = "void f(bool c) {\n    auto n = 1;\n    if (c) n = 2;\n    auto m = n;\n}\n";
+    let fa = cpp_fa(src);
+    let joined = fa.witnesses.all().iter().any(|w| matches!(w.attachment, crate::model::witnesses::WitnessAttachment::Join { .. }));
+    assert!(joined, "the braceless arm's write joins past the `if`");
+    assert_eq!(fa.inferred_type_via_bag("n", tree_sitter::Point { row: 3, column: 13 }), Some(crate::model::file_analysis::InferredType::Numeric));
+}
+
+
+/// A def or lambda runs later, so it reads a variable of the code around it
+/// as it may stand then: as narrowed where it was made, or as written after.
+#[cfg(feature = "python")]
+#[test]
+fn python_a_nested_body_reads_writes_after_its_making() {
+    use crate::model::file_analysis::InferredType as T;
+    let at = |s: &str, v: &str, row, column| analyzed("/x/a.py", s).inferred_type_via_bag(v, tree_sitter::Point { row, column });
+    let narrowed = "def f(p):\n    if isinstance(p, dict):\n        def g():\n            return p\n        p = []\n        g()\n";
+    assert!(matches!(at(narrowed, "p", 3, 19), Some(T::Union(_))), "{:?}", at(narrowed, "p", 3, 19));
+    let rebound = "def f():\n    x = 'a'\n    def g():\n        return x\n    x = 1\n    g()\n";
+    assert!(matches!(at(rebound, "x", 3, 15), Some(T::Union(_))));
+    let lambda = "def f():\n    x = 'a'\n    g = lambda: x\n    x = 1\n    g()\n";
+    assert!(matches!(at(lambda, "x", 2, 16), Some(T::Union(_))));
+    let unwritten = "def f():\n    x = 'a'\n    g = lambda: x\n    g()\n";
+    assert_eq!(at(unwritten, "x", 2, 16), Some(T::String));
+}
+
+/// A php closure holds what `use ($x)` captured as it stood at the closure's
+/// making: a later write outside never reaches it.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_closure_holds_its_capture_as_made() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = "<?php\nfunction f() {\n$x = 'a';\n$g = function() use ($x) { return $x; };\n$x = 1;\n}\n";
+    assert_eq!(analyzed("/x/a.php", src).inferred_type_via_bag("x", tree_sitter::Point { row: 3, column: 34 }), Some(T::String));
+}
+
+/// A php closure's `use (&$x)` is the variable itself: it reads every write
+/// from its making on, and its own write reaches the variable past it. A
+/// write to a `use ($x)` copy stays inside the closure.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_closure_shares_a_capture_by_reference() {
+    use crate::model::file_analysis::InferredType as T;
+    let at = |s: &str, v: &str, row, column| analyzed("/x/a.php", s).inferred_type_via_bag(v, tree_sitter::Point { row, column });
+    let reads = "<?php\nfunction f() {\n$x = 'a';\n$g = function() use (&$x) { return $x; };\n$x = 1;\n}\n";
+    assert!(matches!(at(reads, "x", 3, 36), Some(T::Union(_))), "{:?}", at(reads, "x", 3, 36));
+    let writes = "<?php\nfunction f() {\n$x = 'a';\n$g = function() use (&$x) { $x = 1; };\n$g();\nreturn $x;\n}\n";
+    assert!(matches!(at(writes, "x", 5, 8), Some(T::Union(_))), "{:?}", at(writes, "x", 5, 8));
+    let copy = "<?php\nfunction f() {\n$x = 'a';\n$g = function() use ($x) { $x = 1; return $x; };\n$g();\nreturn $x;\n}\n";
+    assert_eq!(at(copy, "x", 5, 8), Some(T::String));
+    assert_eq!(at(copy, "x", 3, 43), Some(T::Numeric));
+}
+
+/// php's `global $g` makes the function's `$g` the file's.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_global_declaration_is_the_files_variable() {
+    use crate::model::file_analysis::InferredType as T;
+    let at = |s: &str, v: &str, row, column| analyzed("/x/a.php", s).inferred_type_via_bag(v, tree_sitter::Point { row, column });
+    let writes = "<?php\n$g = 1;\nfunction b() { global $g; $g = 'x'; }\nb();\necho $g;\n";
+    assert!(matches!(at(writes, "g", 4, 6), Some(T::Union(_))), "{:?}", at(writes, "g", 4, 6));
+    let reads = "<?php\n$g = 1;\nfunction b() { global $g; return $g; }\n";
+    assert_eq!(at(reads, "g", 2, 34), Some(T::Numeric));
+}
+
+/// python's `nonlocal` and `global` make a function's name the variable of
+/// the function around it or of the module: its writes reach that variable.
+#[cfg(feature = "python")]
+#[test]
+fn python_nonlocal_and_global_write_the_outer_variable() {
+    use crate::model::file_analysis::InferredType as T;
+    let at = |s: &str, v: &str, row, column| analyzed("/x/a.py", s).inferred_type_via_bag(v, tree_sitter::Point { row, column });
+    let nonlocal = "def outer():\n    n = 1\n    def inner():\n        nonlocal n\n        n = 's'\n        return n\n    inner()\n    return n\n";
+    assert!(matches!(at(nonlocal, "n", 7, 11), Some(T::Union(_))), "{:?}", at(nonlocal, "n", 7, 11));
+    assert_eq!(at(nonlocal, "n", 5, 15), Some(T::String));
+    let global = "g = 1\ndef b():\n    global g\n    g = 's'\nb()\nprint(g)\n";
+    assert!(matches!(at(global, "g", 5, 6), Some(T::Union(_))), "{:?}", at(global, "g", 5, 6));
+    let skips = "g = 1\ndef a():\n    g = 's'\n    def b():\n        global g\n        return g\n";
+    assert_eq!(at(skips, "g", 5, 15), Some(T::Numeric));
+}
+
+/// A comprehension's loop variable is its own: the element reads it, not
+/// the name of the code around it, and the name is untouched past it.
+#[cfg(feature = "python")]
+#[test]
+fn python_a_comprehension_binds_its_own_loop_variable() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = "k = 'x'\n[k for k in range(3)]\nprint(k)\n";
+    let fa = analyzed("/x/a.py", src);
+    assert_ne!(fa.inferred_type_via_bag("k", tree_sitter::Point { row: 1, column: 1 }), Some(T::String));
+    assert_eq!(fa.inferred_type_via_bag("k", tree_sitter::Point { row: 2, column: 6 }), Some(T::String));
 }
 
 /// A C++ declaration bounds its later writes: an untyped write reads the

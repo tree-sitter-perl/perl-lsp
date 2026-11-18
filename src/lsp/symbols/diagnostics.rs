@@ -53,8 +53,9 @@ pub fn widening_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex)
 
 /// `readonly-write`: a member written where it may not be set
 /// (`FileAnalysis::misplaced_member_writes`). Always on: from outside the
-/// member's set scope it fails at runtime every time (WARNING); a write-once
-/// member set by its class family outside a constructor is bad form (HINT).
+/// member's set scope, or again once set, it fails at runtime every time
+/// (WARNING); a write-once member set by its class family outside a
+/// constructor is bad form (HINT).
 /// One code at two severities, so one switch silences the family. Resolves
 /// through the file's own scope, as navigation does.
 pub fn readonly_write_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex) -> Vec<Diagnostic> {
@@ -67,6 +68,10 @@ pub fn readonly_write_diagnostics(analysis: &FileAnalysis, module_index: &Module
         .map(|w| {
             let classes = w.classes.join(" or ");
             let (severity, message) = match w.kind {
+                MisplacedWriteKind::AlreadySet => (
+                    DiagnosticSeverity::WARNING,
+                    format!("readonly property `{}` of {classes} is already set here", w.member),
+                ),
                 MisplacedWriteKind::OutsideClass => (
                     DiagnosticSeverity::WARNING,
                     format!("`{}` of {classes} cannot be set from outside {classes}", w.member),

@@ -234,12 +234,11 @@ $p = realpath($p); }` takes `string`. `TODO(pack-params)`: no pack mints
   so `hisds s` (`typedef char *hisds`) is a value binding and converts.
   Through a class-pointer typedef that drops a fitting subclass to the
   declared class.
-- **A write in a branch narrows past it.** The flow reads the latest
-  write a point reaches and does not join at a block's exit, so after
-  `if ($c) { $p = new Derived; }` a `Base $p` reads `Derived`, exactly as
-  an undeclared local does. A fitting write narrows by the rule above; the
-  missing piece is the block-exit join (`TODO(cfg-exit-join)`), not the
-  bound.
+- **A write in a branch joins past it.** Past
+  `if ($c) { $p = new Derived; }` a `Base $p` reads the branch's join
+  (`docs/adr/cfg-tier.md`) of the path through the arm and the path
+  around it, each read by the rule above, exactly as an undeclared local
+  joins.
 - **PHP's implicit nullable.** `string $m = null` declares `?string`, but
   the bound is the spelled `string`, so inside `if (null === $m)` the
   proof decidedly misfits and reads as both (`?string`), not `null`.

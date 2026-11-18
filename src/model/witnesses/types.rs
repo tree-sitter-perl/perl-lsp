@@ -155,9 +155,44 @@ pub enum WitnessAttachment {
     /// witness is a `SlotWrite` payload carrying its receiver, and a read
     /// of `Member{X, name, Holds}` takes the writes whose receiver turns
     /// out to be an `X` (`ReducerRegistry::owned_slot_writes`), so the
-    /// owner is decided where the index is. Kept at the END for bincode
-    /// variant-index stability (bump `EXTRACT_VERSION`).
+    /// owner is decided where the index is.
     SlotWrites { space: crate::model::file_analysis::NamespaceId, name: String },
+    /// The values of `place` that meet where control paths rejoin: a
+    /// collector, like `BranchArm`. `of` is the construct the join belongs
+    /// to and `role` which of its meeting points this is, so two joins never
+    /// share a key. Each arm is one witness sited where its value leaves the
+    /// arm, and an `Edge(Place)` arm reads the place AT that site; the place
+    /// itself carries a `Reset` and an `Edge` here at the join point, so a
+    /// read past the join folds the arms (`JoinFold`, `docs/adr/cfg-tier.md`).
+    /// New variants go at the END for bincode variant-index stability.
+    Join { place: Box<crate::model::file_analysis::Place>, of: Span, role: JoinRole },
+    /// How running this callable ends: the collector for its `Effect` arms
+    /// (a declaration, a plugin's statement, the body's inferred arms).
+    /// `Symbol(sid)` asks what calling it yields; this asks whether it comes
+    /// back (`docs/adr/cfg-tier.md` §Effects). Kept at the END for bincode
+    /// variant-index stability.
+    SymbolEffects(SymbolId),
+}
+
+/// Which of a construct's meeting points a `Join` is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum JoinRole {
+    /// Past a branching construct: the arms that fall through.
+    After,
+    /// The value entering a construct, where an arm written after another
+    /// begins and at a test written after the code it guards (`… if $c`),
+    /// which runs first.
+    ArmStart,
+    /// Where a loop tests: the value entering it, and each pass's end.
+    Head,
+    /// Past a loop: where its test fails, and each `break` aimed at it.
+    Exit,
+    /// Where a body that runs later starts: the value where the body was
+    /// made, and after each write from then on.
+    Entry,
+    /// What a later-running body may leave a place holding, as seen from
+    /// outside it: the place after each write the body makes.
+    Writes,
 }
 
 /// The question a `Member` attachment asks of its member.
@@ -168,6 +203,63 @@ pub enum MemberAspect {
     Returns,
     /// The value stored in it.
     Holds,
+    /// How calling it ends (`Ends`): the class-keyed twin of
+    /// `SymbolEffects`. Kept at the END for bincode variant-index stability.
+    Effects,
+}
+
+bitflags::bitflags! {
+    /// The ways evaluating something can end. A set, joined by union: a
+    /// callee that may return or may throw has two bits. The empty set is
+    /// the BOTTOM — no way of ending derived, which is what a callee on a
+    /// cycle is assumed to be while its answer is computed — and is never
+    /// "unknown": no evidence is `Ends::all()`, the top, spelled out
+    /// (`docs/adr/cfg-tier.md` §Effects).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
+    pub struct Ends: u8 {
+        /// Control continues after it: a call comes back to its call site.
+        const COMPLETES = 1 << 0;
+        /// It leaves by something an enclosing handler can catch (`die`, `throw`, `raise`).
+        const UNWINDS = 1 << 1;
+        /// It leaves and nothing catches it (`exit`, `abort`, `exec`).
+        const EXITS = 1 << 2;
+    }
+}
+
+impl Ends {
+    /// Does control come back? The one question v1 answers precisely: a
+    /// set holding `COMPLETES` reads as the top, because nothing yet
+    /// carries "may throw" out of a nested call.
+    pub fn completes(self) -> bool {
+        self.contains(Ends::COMPLETES)
+    }
+}
+
+/// The wire form is the bare bit set, so a bit added at the tail reads old
+/// blobs unchanged.
+impl Serialize for Ends {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.bits().serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Ends {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        u8::deserialize(d).map(Ends::from_bits_retain)
+    }
+}
+
+/// What running something does besides yielding a value. Closed and
+/// unconditional; each variant joins its own way (`EffectFold`), so a
+/// later variant (a write through a parameter) brings its own join rather
+/// than borrowing `Ends`' union.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Effect {
+    /// How it ends.
+    Ends(Ends),
+    /// How a declaration says it ends (`never`, `NoReturn`, `[[noreturn]]`):
+    /// at equal source priority it stands over the inferred arms.
+    Declared(Ends),
 }
 
 impl WitnessAttachment {
@@ -179,6 +271,17 @@ impl WitnessAttachment {
             space: crate::model::file_analysis::NamespaceId::CALLABLES,
             name: name.into(),
             aspect: MemberAspect::Returns,
+        }
+    }
+
+    /// How calling `name` on `owner` ends, in the namespace calls land in
+    /// untagged.
+    pub fn effects_of(owner: impl Into<String>, name: impl Into<String>) -> WitnessAttachment {
+        WitnessAttachment::Member {
+            owner: owner.into(),
+            space: crate::model::file_analysis::NamespaceId::CALLABLES,
+            name: name.into(),
+            aspect: MemberAspect::Effects,
         }
     }
 
@@ -199,6 +302,47 @@ impl WitnessAttachment {
         matches!(self, WitnessAttachment::Variable { .. } | WitnessAttachment::Place(_))
     }
 
+    /// Is the value here the join of EVERY arm on it, so an arm that cannot
+    /// be typed leaves the whole untyped? (A return-arm or ternary
+    /// collector instead counts the arms it could not type itself.)
+    pub fn folds_every_arm(&self) -> bool {
+        matches!(self, WitnessAttachment::Join { .. })
+    }
+
+    /// Does the fold here join the arms it could type, and so need to know
+    /// that an arm came back untyped (`tags::FACT_UNTYPED_ARM`)? An `Undef`
+    /// arm says only that the value may be absent: beside an untyped arm it
+    /// says nothing of what the value is. A place's live writes are its arms.
+    pub fn counts_untyped_arms(&self) -> bool {
+        self.is_temporal()
+            || matches!(
+                self,
+                WitnessAttachment::SymbolReturnArm(_) | WitnessAttachment::Member { aspect: MemberAspect::Holds, .. }
+            )
+    }
+    /// Whether this names the evaluation of an expression (its value as it
+    /// is computed) rather than a slot that holds values: only an
+    /// evaluation can be `Never`.
+    pub fn is_evaluation(&self) -> bool {
+        matches!(
+            self,
+            WitnessAttachment::Expr(_)
+                | WitnessAttachment::Expression(_)
+                | WitnessAttachment::BranchArm(_)
+                | WitnessAttachment::SymbolReturnArm(_)
+        )
+    }
+
+    /// Does this attachment ask how something ends rather than what it
+    /// holds? Its answer is `ReducedValue::Effects`, and an edge to it
+    /// carries an effect, never a type.
+    pub fn asks_effects(&self) -> bool {
+        matches!(
+            self,
+            WitnessAttachment::SymbolEffects(_) | WitnessAttachment::Member { aspect: MemberAspect::Effects, .. }
+        )
+    }
+
     /// The binding whose whole value this attachment states facts about.
     pub fn variable_binding(&self) -> Option<&crate::model::file_analysis::Binding> {
         match self {
@@ -215,6 +359,11 @@ pub struct RefIdx(pub u32);
 /// Source tag of the builder's write markers (`WitnessPayload::Reset`) —
 /// provenance only; the payload carries the meaning.
 pub const RESET_SOURCE: &str = "reset";
+
+/// Source tag of the joins `assemble_joins` mints, the point's and the arms'.
+pub const JOIN_SOURCE: &str = "join";
+/// Provenance of an arm of how a callable ends, inferred from its body.
+pub const EFFECT_ARM_SOURCE: &str = "effect_arm";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WitnessSource {
@@ -268,6 +417,7 @@ impl WitnessPayload {
         match self {
             WitnessPayload::Edge(_)
             | WitnessPayload::Reset
+            | WitnessPayload::Unbind
             | WitnessPayload::InferredType(_)
             | WitnessPayload::Observation(_) => true,
             WitnessPayload::ReturnExpr(_)
@@ -281,10 +431,13 @@ impl WitnessPayload {
             | WitnessPayload::DomainCompare { .. }
             | WitnessPayload::BrandOverlay { .. }
             | WitnessPayload::FreeValue { .. }
+            | WitnessPayload::Effect(_)
             | WitnessPayload::EvaluatedBefore(_)
             | WitnessPayload::Bound { .. }
             | WitnessPayload::Proof
-            | WitnessPayload::SlotWrite { .. } => false,
+            | WitnessPayload::SlotWrite { .. }
+            | WitnessPayload::MayBe(_) => false,
+            WitnessPayload::Gated { arm, .. } => arm.as_ref().is_some_and(|a| a.is_windowed()),
         }
     }
 }
@@ -297,7 +450,8 @@ impl WitnessPayload {
         match self {
             WitnessPayload::Edge(t)
             | WitnessPayload::Projected { base: t, .. }
-            | WitnessPayload::Bound { ty: BoundType::Edge(t), .. } => f(t),
+            | WitnessPayload::Bound { ty: BoundType::Edge(t), .. }
+            | WitnessPayload::MayBe(t) => f(t),
             WitnessPayload::Bound { ty: BoundType::Type(t), .. } => t.for_each_attachment_mut(f),
             WitnessPayload::Tuple(ts) => ts.iter_mut().for_each(|t| f(t)),
             WitnessPayload::SlotWrite { receiver, value } => {
@@ -320,14 +474,22 @@ impl WitnessPayload {
             }
             WitnessPayload::InferredType(t) => t.for_each_attachment_mut(f),
             WitnessPayload::ReturnExpr(r) => r.for_each_attachment_mut(f),
+            WitnessPayload::Gated { gates, arm } => {
+                gates.iter_mut().for_each(|g| f(g));
+                if let Some(a) = arm {
+                    a.for_each_attachment_mut(f);
+                }
+            }
             WitnessPayload::Observation(_)
             | WitnessPayload::Fact { .. }
             | WitnessPayload::Derivation
             | WitnessPayload::Custom { .. }
             | WitnessPayload::DomainCompare { .. }
             | WitnessPayload::Reset
+            | WitnessPayload::Unbind
             | WitnessPayload::BrandOverlay { .. }
             | WitnessPayload::FreeValue { .. }
+            | WitnessPayload::Effect(_)
             | WitnessPayload::EvaluatedBefore(_)
             | WitnessPayload::Proof => {}
         }
@@ -341,6 +503,11 @@ impl WitnessPayload {
     pub fn for_each_span_mut(&mut self, f: &mut dyn FnMut(&mut crate::model::file_analysis::Span)) {
         match self {
             WitnessPayload::EvaluatedBefore(s) => f(s),
+            WitnessPayload::Gated { arm, .. } => {
+                if let Some(arm) = arm {
+                    arm.for_each_span_mut(f)
+                }
+            }
             WitnessPayload::InferredType(_)
             | WitnessPayload::Observation(_)
             | WitnessPayload::Edge(_)
@@ -358,7 +525,10 @@ impl WitnessPayload {
             | WitnessPayload::FreeValue { .. }
             | WitnessPayload::Bound { .. }
             | WitnessPayload::Proof
-            | WitnessPayload::SlotWrite { .. } => {}
+            | WitnessPayload::Effect(_)
+            | WitnessPayload::SlotWrite { .. }
+            | WitnessPayload::MayBe(_)
+            | WitnessPayload::Unbind => {}
         }
     }
 }
@@ -561,6 +731,34 @@ pub enum WitnessPayload {
     /// `Member` read that adopts it chases `value`. Kept at the END for
     /// bincode variant-index stability (bump `EXTRACT_VERSION`).
     SlotWrite { receiver: WitnessAttachment, value: WitnessAttachment },
+    /// An effect of evaluating the thing at my attachment: a leaving
+    /// expression's own (`Expr(span)`), or one arm of how a callable ends
+    /// (`SymbolEffects`, `Member{.., Effects}`). `EffectFold` joins them.
+    /// Kept at the END for bincode variant-index stability.
+    Effect(Effect),
+    /// One path into a join or one arm of how a callable ends, reached only
+    /// where control comes back from each call in `gates` (statement-position
+    /// calls, each its `Expr`, which says how it ends). The registry drops
+    /// it when one does not come back, and otherwise reads it as `arm`; with
+    /// no `arm` the path is one its join speaks for nothing on, and the join
+    /// answers nothing (`docs/adr/cfg-tier.md` §Effects). Kept at the END for
+    /// bincode variant-index stability.
+    Gated { gates: Vec<WitnessAttachment>, arm: Option<Box<WitnessPayload>> },
+    /// From this site on the place may also hold what the target holds,
+    /// whatever is written after: a later-running body's writes, which
+    /// reach the place wherever the body is called. Not windowed, so a
+    /// later write never retires it; it does not hold inside the body the
+    /// target's `Join` is of, where the body's own writes stand in order
+    /// (`docs/adr/cfg-tier.md` §Later-running bodies). Kept at the END for
+    /// bincode variant-index stability.
+    MayBe(WitnessAttachment),
+    /// A WRITE that leaves the attachment's variable bound to nothing
+    /// (Python's `del x`, the `as` name of an `except` past its handler):
+    /// a read of it with this the latest write before it raises, so the
+    /// read answers `Never` and every join it reaches drops that path
+    /// (`docs/adr/cfg-tier.md` §Unbinding). Kept at the END for bincode
+    /// variant-index stability.
+    Unbind,
 }
 
 /// The type a bound states: a type, or an edge into the alias graph
@@ -698,6 +896,10 @@ pub struct KeyExtension {
     /// (`$s->{self} = $s`) sees the shape without this key. A list
     /// assignment's slot is already taken.
     pub value: Option<InferredType>,
+    /// The write stores `value` whatever it is (`KeyWrite::replaces`): an
+    /// unknown one leaves the key untyped rather than as it was.
+    #[serde(default)]
+    pub replaces: bool,
     /// The write may not have run (conditional, or reached across a scope
     /// boundary): it opens the shape instead of growing it.
     pub widen: bool,

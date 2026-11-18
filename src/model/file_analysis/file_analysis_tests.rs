@@ -234,24 +234,43 @@ fn test_resolve_return_type_empty() {
     assert_eq!(join_all(&[], &Perl), None);
 }
 
+fn open(t: InferredType) -> InferredType {
+    InferredType::Open(Box::new(t))
+}
+
 #[test]
-fn unknown_absorbs_in_return_arm_agreement() {
-    // An arm nothing can name makes the join something nothing can name:
-    // not `None` (a lone typed arm would answer for the sub) and not the
-    // coarse HashRef/Numeric joins below it.
+fn an_unknown_arm_leaves_the_known_arms_open() {
+    // An arm nothing can name keeps the typed arms as possibilities (`X | …`):
+    // not `Unknown` (which throws away the arm we know) and not the closed
+    // typed arm (which claims the untyped one is that too).
     assert_eq!(
         join_all(&[InferredType::ClassName("Foo".into()), InferredType::Unknown], &Perl),
-        Some(InferredType::Unknown),
+        Some(open(InferredType::ClassName("Foo".into()))),
     );
-    assert_eq!(
-        join_all(&[InferredType::HashRef, InferredType::Unknown], &Perl),
-        Some(InferredType::Unknown),
-    );
+    assert_eq!(join_all(&[InferredType::HashRef, InferredType::Unknown], &Perl), Some(open(InferredType::HashRef)));
+    // Nothing known stays the top; an open union stays open whatever joins it.
+    assert_eq!(join(&InferredType::Unknown, &InferredType::Unknown, &Perl), InferredType::Unknown);
+    let foo_open = open(class("Foo"));
+    assert_eq!(join(&foo_open, &class("Foo"), &Unordered), foo_open);
+    assert_eq!(join(&foo_open, &InferredType::Unknown, &Unordered), foo_open);
+    assert_eq!(join(&foo_open, &class("Bar"), &Unordered), open(join(&class("Bar"), &class("Foo"), &Unordered)));
+    assert_eq!(join(&foo_open, &class("Bar"), &Unordered), join(&class("Bar"), &foo_open, &Unordered));
+}
+
+#[test]
+fn an_open_union_proves_nothing_about_the_whole_value() {
+    let foo_open = open(class("Foo"));
+    assert!(!foo_open.may_be_undef());
+    assert_eq!(foo_open.class_name(), None);
+    assert_eq!(foo_open.receiver_arms(), &[class("Foo")]);
+    assert_eq!(fit(&foo_open, &class("Foo"), &Unordered), Fit::Undecided);
+    assert_eq!(fit(&open(class("Bar")), &class("Foo"), &Unordered), Fit::Undecided);
 }
 
 #[test]
 fn an_undef_arm_does_not_wrap_unknown_in_optional() {
-    // `Optional<Unknown>` would claim a value half nothing supports.
+    // `Optional<Unknown>` would claim a value half nothing supports, and an
+    // undef arm beside one nothing names says nothing of what the value is.
     assert_eq!(join_return_arms(&[InferredType::Unknown], true, &Unordered), Some(InferredType::Unknown));
     // The rule for a KNOWN value arm is untouched.
     assert_eq!(
@@ -318,9 +337,9 @@ fn an_undef_arm_wraps_the_union_in_optional() {
 }
 
 #[test]
-fn unknown_absorbs_a_union() {
+fn an_unknown_arm_opens_a_union() {
     let ab = join(&class("Bar"), &class("Foo"), &Unordered);
-    assert_eq!(join(&ab, &InferredType::Unknown, &Unordered), InferredType::Unknown);
+    assert_eq!(join(&ab, &InferredType::Unknown, &Unordered), open(ab));
 }
 
 #[test]
@@ -3454,17 +3473,33 @@ fn test_complete_hash_keys_offers_literal_and_written_keys() {
 
 #[test]
 fn unknown_return_is_not_displayed() {
-    // `fix`'s untyped argument flows to its return, which then joins the
-    // `''` arm: a value flowed that nothing names. A display surface shows
-    // no return rather than `→ unknown`.
+    // `fix`'s untyped argument flows to its return, which then joins an
+    // untyped read: a value flowed that nothing names. A display surface
+    // shows no return rather than `→ unknown`.
     let fa = build_fa_from_source(
         "package Foo;\n\
-         sub fix { my ($s) = @_; $s = '' if defined $s; return $s; }\n\
+         sub fix { my ($s) = @_; $s = $s->{j} if $s; return $s; }\n\
          sub a { my $t = shift; fix($t->{k}) }\n\
          1;\n",
     );
     assert_eq!(fa.find_method_return_type("Foo", "a", None, None), Some(InferredType::Unknown));
     assert_eq!(fa.method_detail("Foo", "a", None, None), "Foo");
+}
+
+#[test]
+fn an_open_return_is_displayed_with_its_unknown_part() {
+    // The `''` arm joins the untyped argument: `String|…`, shown as such.
+    let fa = build_fa_from_source(
+        "package Foo;\n\
+         sub fix { my ($s) = @_; $s = '' if $s; return $s; }\n\
+         sub a { my $t = shift; fix($t->{k}) }\n\
+         1;\n",
+    );
+    assert_eq!(
+        fa.find_method_return_type("Foo", "a", None, None),
+        Some(InferredType::Open(Box::new(InferredType::String)))
+    );
+    assert_eq!(fa.method_detail("Foo", "a", None, None), "Foo → String|…");
 }
 
 /// A bareword invocant naming a sub whose zero-argument call returns a

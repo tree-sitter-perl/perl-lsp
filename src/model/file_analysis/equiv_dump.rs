@@ -91,6 +91,7 @@ impl FileAnalysis {
                 let answer = match reg.query(&self.witnesses, &q) {
                     ReducedValue::Type(t) => serde_json::json!({ "type": t }),
                     ReducedValue::FactMap(m) => serde_json::json!({ "facts": m }),
+                    ReducedValue::Effects(e) => serde_json::json!({ "ends": e.bits() }),
                     ReducedValue::None => Value::Null,
                 };
                 serde_json::json!([att, answer])

@@ -11,7 +11,10 @@ whole-program engine) needs that join on a finite-height lattice.
 `types.rs::join(a, b, order)` is the one least upper bound; every fold
 reads it, through `join_all` / `join_return_arms`. It is total:
 
-- equal → that type; `Unknown` absorbs (it is the lattice's top)
+- equal → that type; `Unknown` beside a typed arm leaves the typed arms
+  open (`X|…`, §Open unions), and alone it stays the lattice's top
+- `Never` is the identity: an arm that does not complete drops out
+  (`join(Never, T) = T`)
 - an `Undef` or `Optional` arm makes the result `Optional<the rest>`
 - otherwise each arm folds into an arm it joins precisely with
   (`join_precise`: a class into its ancestor, an object over a hash
@@ -19,13 +22,59 @@ reads it, through `join_all` / `join_return_arms`. It is total:
   `Bool` into `Numeric`), and the rest stand side by side as a union
 
 `None` is bottom (no evidence) and is never produced by a join of
-two types; `join_all` answers `None` only for no arms.
+two types; `join_all` answers `None` only for no arms. `Never` is not
+`None`: it says the expression leaves, and only an evaluation answers it
+(`WitnessAttachment::is_evaluation`). A slot that would hold only `Never`
+holds nothing, and `join_return_arms` answers `None` when the only arms
+that come back are undef (`docs/adr/cfg-tier.md` §Effects).
+
+Every language's null literal (PHP and C++ `null`/`nullptr`, Python
+`None`, R `NULL`, Perl `undef`) types as `Undef`, and each pack spells it
+back in its own word (`X|None`, `X|null`). An `Undef` arm says only that
+the value may be absent, so beside an arm that came back untyped
+(`tags::FACT_UNTYPED_ARM`: a flow the registry could not type, or a data
+member declared with a type the pack cannot read) an all-`Undef` answer is
+no answer, and a typed answer stays open beside it (`X|…`, §Open unions):
+a return arm or a member write that came back untyped is an arm like any
+other. An arm a cycle guard cut came back through the fold itself
+(`return __SUB__->($n - 1)`) and is not counted. A place's writes are not
+counted this way: which write a read sees is the window's to say, and the
+flow joins keep what an untyped path leaves open. The `||`/`//` fallback
+with no left in sight stays closed: writing the fallback says the author
+expects it to run. An `Undef` stated on the attachment itself (a guard)
+still stands, and a declared bound still caps what is left
+(`docs/adr/declared-bounds.md`). A member's class-wide writes are arms of
+one value and join, as do any regions that tie on extent.
 
 `TypeOrder` is the only inheritance the join sees: `isa` for
 subsumption, `common_class` for widening. In-file folds without a bag
 context use `Unordered` (a class is an instance only of itself); a
 `BagContext` answers through the local + cross-file isa seam
 (`class_isa`, `least_common_class`).
+
+## Open unions
+
+`InferredType::Open(known)` is `X|…`: on some path the value is one of
+`known`'s arms, and on another it is something nothing could name. `join`
+builds it, and only `join`, wherever an `Unknown` arm meets a typed one, so
+every fold that reads the join (control-flow joins, return and ternary arms,
+slot writes) answers the same shape:
+
+- `join(X, Unknown) = Open(X)`; `join(Open(X), Y) = Open(join(X, Y))`
+- nothing known is not open: with no value arm the join is `Unknown`, and an
+  `Undef` arm beside one nothing names says nothing of what the value is
+- past the width cap the known arms widen as a closed union's do, to
+  `Unknown` when no common class holds them
+
+A known arm is a real possibility, so what reads ONE possibility reads it:
+completion, navigation, the per-arm unresolved-method hint ("which `$x` may
+be"). Nothing claims the WHOLE value from it: `class_name()` is `None`, it
+is never provably undef (`may_be_undef` is false), a bound `fit` is
+`Undecided`, and an open receiver has no single dispatch edge
+(`ReceiverClasses::single`, `ReceiverArms::Open`). A class ladder walks on
+past an open rung as past an untyped one, and an open plain-axis answer
+yields to later rep evidence as an untyped one does. Display spells it
+`X|…` in every language.
 
 ## Per-language subsumption
 

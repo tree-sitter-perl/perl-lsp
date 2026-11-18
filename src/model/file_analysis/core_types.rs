@@ -92,6 +92,37 @@ pub struct SymbolId(pub u32);
 
 // ---- Scope ----
 
+/// A name a callable body takes from outside it (`Scope::captures`).
+/// By value, the body holds the variable as it stood at the body's making;
+/// by reference, the body's name IS the outer variable: no local is
+/// declared, a write inside writes it, and the later-running rules
+/// (`docs/adr/cfg-tier.md` §Later-running bodies) apply as to any variable
+/// the body reaches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Capture {
+    pub name: String,
+    pub from: CaptureFrom,
+    pub by: CaptureBy,
+}
+
+/// Where a captured name is looked up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CaptureFrom {
+    /// The code around the body (php's `use`, python's `nonlocal`).
+    Enclosing,
+    /// The file's top level, past every callable around the body (php's
+    /// and python's `global`).
+    Module,
+}
+
+/// How a captured name binds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CaptureBy {
+    Value,
+    Reference,
+}
+
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scope {
     pub id: ScopeId,
@@ -128,10 +159,11 @@ pub struct Scope {
     /// closures). Read through `variable_lookup_chain`.
     #[serde(default)]
     pub closed: bool,
-    /// The names a closed body takes from the code around it
-    /// (`@closure.capture`, php's `use ($x)`).
+    /// The names this body takes from outside it, each saying from where
+    /// and how (`@closure.capture[.ref|.global]`): php's `use ($x)` /
+    /// `use (&$x)` / `global $x`, python's `nonlocal x` / `global x`.
     #[serde(default)]
-    pub captures: Vec<String>,
+    pub captures: Vec<Capture>,
     /// The names declared in this scope are in force only for code
     /// written directly in it (`@scope.direct`): a use inside a callable,
     /// or inside another such scope, nested here looks past the scope, as
@@ -716,6 +748,11 @@ bitflags::bitflags! {
         /// does. Minted from a capture (`@mark.constant`), never spelled as
         /// an attribute.
         const CONSTANT = 1 << 26;
+        /// A method its language runs on an object no constructor built
+        /// (php's `__clone`, `__wakeup`, `__unserialize`): what the
+        /// constructor left behind says nothing about the state it starts
+        /// in. Minted from a capture (`@mark.unconstructed`).
+        const UNCONSTRUCTED = 1 << 27;
     }
 }
 
@@ -1098,6 +1135,9 @@ pub struct MisplacedWrite {
 /// the most lenient verdict any arm gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MisplacedWriteKind {
+    /// Code of the class family writing a write-once member where it
+    /// surely holds a value already: the write fails at runtime.
+    AlreadySet,
     /// Code outside the declaring class of a member only that class may
     /// set (`AccessScope::Class`): the write fails at runtime.
     OutsideClass,
@@ -1197,6 +1237,12 @@ pub struct FlowEdge {
 }
 
 impl FlowEdge {
+    /// The expression whose whole value the write stores, where it stores
+    /// one (`Extraction::Whole`).
+    pub fn stored_value(&self) -> Option<Span> {
+        matches!(self.extraction, Extraction::Whole).then_some(self.source)
+    }
+
     /// Lower to the type-tier witness — the target's type flows from the
     /// source expression. `Whole` is a direct `Variable → Edge(Expr(source))`;
     /// the projecting extractions (Positional/Slurpy/KeyOf) await their
@@ -2316,9 +2362,19 @@ pub fn sym_kind_code(k: &SymKind) -> u8 {
 /// receiver may be, deduplicated in arm order. A union receiver has
 /// several; nothing pins an empty one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ReceiverClasses(Vec<String>);
+pub struct ReceiverClasses(Vec<String>, bool);
 
 impl ReceiverClasses {
+    /// Some path holds a value nothing names (an `X | …` receiver): the
+    /// classes are possibilities, so none of them is THE class.
+    pub fn is_open(&self) -> bool {
+        self.1
+    }
+
+    pub fn mark_open(&mut self) {
+        self.1 = true;
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &str> {
         self.0.iter().map(String::as_str)
     }
@@ -2336,7 +2392,7 @@ impl ReceiverClasses {
     /// why at its call. A union has none.
     pub fn single(&self) -> Option<&str> {
         match self.0.as_slice() {
-            [one] => Some(one),
+            [one] if !self.1 => Some(one),
             _ => None,
         }
     }
@@ -2428,6 +2484,9 @@ pub enum ReceiverArms {
     One(MethodTarget),
     /// Two or more arms.
     Union(Vec<MethodTarget>),
+    /// The arms of an open receiver (`X | …`): possibilities, never the
+    /// one dispatch edge. Kept at the END for bincode variant stability.
+    Open(Vec<MethodTarget>),
 }
 
 /// A member access's receiver as the stamp (`stamp_method_call_targets`)
@@ -2448,9 +2507,15 @@ pub struct FrozenReceiver {
 
 impl FrozenReceiver {
     pub fn from_arms(arms: Vec<MethodTarget>, source: ReceiverSource, view: ReceiverView) -> Self {
+        Self::from_receiver_arms(arms, false, source, view)
+    }
+
+    /// [`Self::from_arms`] for a receiver that may be `open` (`X | …`).
+    pub fn from_receiver_arms(arms: Vec<MethodTarget>, open: bool, source: ReceiverSource, view: ReceiverView) -> Self {
         let mut arms = arms;
         let arms = match arms.len() {
             0 => ReceiverArms::None,
+            _ if open => ReceiverArms::Open(arms),
             1 => ReceiverArms::One(arms.pop().expect("one arm")),
             _ => ReceiverArms::Union(arms),
         };
@@ -2461,15 +2526,20 @@ impl FrozenReceiver {
     pub fn single(&self) -> Option<&MethodTarget> {
         match &self.arms {
             ReceiverArms::One(t) => Some(t),
-            ReceiverArms::None | ReceiverArms::Union(_) => None,
+            ReceiverArms::None | ReceiverArms::Union(_) | ReceiverArms::Open(_) => None,
         }
+    }
+
+    /// Whether the receiver may also be a value nothing names.
+    pub fn is_open(&self) -> bool {
+        matches!(self.arms, ReceiverArms::Open(_))
     }
 
     pub fn targets(&self) -> &[MethodTarget] {
         match &self.arms {
             ReceiverArms::None => &[],
             ReceiverArms::One(t) => std::slice::from_ref(t),
-            ReceiverArms::Union(ts) => ts,
+            ReceiverArms::Union(ts) | ReceiverArms::Open(ts) => ts,
         }
     }
 

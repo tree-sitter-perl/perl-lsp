@@ -417,6 +417,23 @@
 ; since C++ name lookup finds the member before any free function.
 (function_definition) @scope.sub.implicit_receiver
 
+; ---- how a call ends ----
+; `[[noreturn]]` / `__attribute__((noreturn))` says a call never comes back,
+; on a definition or a prototype; how it leaves is the body's business.
+([(function_definition
+    [(attribute_declaration (attribute name: (identifier) @_attr))
+     (attribute_specifier (argument_list (identifier) @_attr))]
+    declarator: (function_declarator declarator: [(identifier) @ends.never (field_identifier) @ends.never (qualified_identifier name: (identifier) @ends.never)]))
+  (declaration
+    [(attribute_declaration (attribute name: (identifier) @_attr))
+     (attribute_specifier (argument_list (identifier) @_attr))]
+    declarator: (function_declarator declarator: [(identifier) @ends.never (qualified_identifier name: (identifier) @ends.never)]))
+  (field_declaration
+    [(attribute_declaration (attribute name: (identifier) @_attr))
+     (attribute_specifier (argument_list (identifier) @_attr))]
+    declarator: (function_declarator declarator: (field_identifier) @ends.never))]
+ (#any-of? @_attr "noreturn" "__noreturn__"))
+
 ; ---- top-level / namespaced function prototypes (the bulk of any
 ; header file) — a `declaration`, not a `function_definition`. A
 ; prototype has no body, so its parameter_list is the whole signature
@@ -889,6 +906,7 @@
 (string_literal) @expr.lit.string
 (true) @expr.lit.bool
 (false) @expr.lit.bool
+(null) @expr.lit.null
 ; A comparison / logical operator yields `bool` in C++ (unlike Perl's
 ; value-preserving `&&`/`||`, C++'s ARE boolean). Gate on the operator so
 ; an arithmetic `a + b` (same node kind) stays untyped and defers to the
@@ -910,7 +928,7 @@
 ; `for (auto x : items)` — the range-for var rebinds per element (a Rebind, no
 ; inflowing type yet) so the narrowing cutoff ends a region at the loop.
 (for_range_loop
-  declarator: (identifier) @flow.rebind)
+  declarator: (identifier) @flow.rebind @flow.assign)
 
 ; the std container / optional / smart-pointer resets put a moved-from object
 ; back into a known state: a use after `x.clear()` is NOT a use-after-move. A
@@ -983,16 +1001,14 @@
 ; and preprocessor conditionals actually gate a move. Capturing the whole
 ; construct (not just braceless bodies) keeps the pattern uniform; the
 ; containment test does the braced/braceless discrimination.
-(if_statement) @guard.region
-(while_statement) @guard.region
-(for_statement) @guard.region
-(for_range_loop) @guard.region
-(do_statement) @guard.region
-(switch_statement) @guard.region
-(conditional_expression) @guard.region
-(preproc_if) @guard.region
-(preproc_ifdef) @guard.region
-(preproc_elif) @guard.region
+(while_statement) @ctl.loop
+(for_statement) @ctl.loop
+(for_range_loop) @ctl.loop
+(do_statement) @ctl.loop
+(switch_statement) @ctl.block
+(preproc_if) @ctl.branch
+(preproc_ifdef) @ctl.branch
+(preproc_elif) @ctl.branch
 
 ; parameter lists — the use-after-move check reads these to tell a moved LOCAL
 ; (`Widget x;` in the body) from a moved PARAMETER. A moved parameter is
@@ -1039,36 +1055,46 @@
 ; it fails. An `else` arm is the statement it holds, so `else if` is the
 ; next link of the chain. The edge-driven cutoff ends a narrowing at any
 ; rebind.
-(if_statement condition: (condition_clause value: (_) @narrow.cond) consequence: (_) @narrow.then)
+(if_statement condition: (condition_clause value: (_) @ctl.cond) consequence: (_) @ctl.then) @ctl.branch
 ((if_statement
-   condition: (condition_clause value: (_) @narrow.cond)
-   alternative: (else_clause (_) @narrow.else))
- (#not-is-kind? @narrow.else comment))
-(conditional_expression condition: (_) @narrow.cond consequence: (_) @narrow.then)
-(conditional_expression condition: (_) @narrow.cond alternative: (_) @narrow.else)
-(binary_expression left: (_) @narrow.cond operator: "&&" right: (_) @narrow.then)
-(binary_expression left: (_) @narrow.cond operator: "||" right: (_) @narrow.else)
-; A `while` body runs where its condition holds, and the loop tests it again
-; after each run, so a `break` or `continue` in it goes to the loop.
-; TODO(cfg-exit-join): `@narrow.loop` and `@flow.to_loop` stand in for
-; reachability until the CFG's loop edges answer it.
-(while_statement condition: (condition_clause value: (_) @narrow.cond) body: (_) @narrow.then) @narrow.loop
+   condition: (condition_clause value: (_) @ctl.cond)
+   alternative: (else_clause (_) @ctl.else)) @ctl.branch
+ (#not-is-kind? @ctl.else comment))
+(conditional_expression condition: (_) @ctl.cond consequence: (_) @ctl.then) @ctl.branch
+(conditional_expression condition: (_) @ctl.cond alternative: (_) @ctl.else) @ctl.branch
+(binary_expression left: (_) @ctl.cond operator: "&&" right: (_) @ctl.then) @ctl.branch
+(binary_expression left: (_) @ctl.cond operator: "||" right: (_) @ctl.else) @ctl.branch
+; A loop runs its body while its test holds (a range `for` while items
+; remain), a `for`'s update after each pass; a `do` runs its body first. A
+; `break` leaves the `switch` around it as it leaves a loop.
+(while_statement condition: (condition_clause value: (_) @ctl.cond) body: (_) @ctl.loop.body) @ctl.loop
+(for_statement body: (_) @ctl.loop.body) @ctl.loop
+(for_statement condition: (_) @ctl.cond) @ctl.loop
+(for_statement update: (_) @ctl.loop.step) @ctl.loop
+(for_range_loop body: (_) @ctl.loop.body) @ctl.loop
+; A range `for` tests for a next item as it binds it.
+(for_range_loop declarator: (_) @ctl.cond) @ctl.loop
+(do_statement body: (_) @ctl.loop.body condition: (_) @ctl.cond) @ctl.loop.once
 
 ; A statement that leaves its block: nothing after it there runs, and
 ; whether a chain of arms falls through follows from its arms' statements
 ; (`query_extract/extract/narrowing.rs`).
 ; TODO(noreturn-callee): `std::abort()`, `exit()` and a `[[noreturn]]`
-; function leave too. A callee that never returns is an effect on the
-; callee; mark it once effects and the CFG exist.
-[(return_statement)
- (co_return_statement)
- (throw_statement)
- (continue_statement)
- (break_statement)] @flow.leaves
-; A `break` or `continue` leaves to the loop (or `switch`) around it, and a
-; bare block's statements run where it stands.
-[(continue_statement) (break_statement)] @flow.to_loop
+; function leave too: an effect on the callee, minted from the pack's
+; runtime-function document (and the declaration) once one exists.
+[(return_statement) (co_return_statement)] @ctl.leave.return
+(throw_statement) @ctl.leave.throw
+(continue_statement) @ctl.leave.continue
+(break_statement) @ctl.leave.break
+; A bare block's statements run where it stands.
 (compound_statement) @flow.block
+
+; How a call to a function ends is how its body does; a call that is a
+; whole statement lets control past it only if it comes back
+; (`docs/adr/cfg-tier.md` §Effects).
+(function_definition body: (compound_statement) @ctl.body)
+(lambda_expression body: (compound_statement) @ctl.body)
+(expression_statement (call_expression) @ctl.gate)
 
 ; ---- branch arms are lexical scopes (conditional-move soundness) ----
 ; if/else arm bodies each mint a @scope, so a `std::move` in one arm bounds its

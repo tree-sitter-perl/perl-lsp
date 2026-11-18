@@ -100,7 +100,7 @@ impl FileAnalysis {
         };
         match reg.query(&self.witnesses, &q) {
             ReducedValue::Type(t) => Some(t),
-            ReducedValue::FactMap(_) | ReducedValue::None => None,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
         }
     }
 
@@ -171,7 +171,7 @@ impl FileAnalysis {
         let reg = ReducerRegistry::with_defaults();
         match reg.query(&self.witnesses, &q) {
             ReducedValue::Type(t) => Some(t),
-            ReducedValue::FactMap(_) | ReducedValue::None => None,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
         }
     }
 
@@ -608,7 +608,9 @@ impl FileAnalysis {
     /// (`READONLY`) member is set by a constructor, so a write its class
     /// family makes where no constructor encloses it is
     /// `OutsideConstructor`, unless the write only fills an unset member
-    /// (`AccessKind::WriteIfUnset`): a lazy initialisation. A site is
+    /// (`AccessKind::WriteIfUnset`, or one its state says is unset): a lazy
+    /// initialisation; and one it makes where its state says the member is
+    /// surely set already is `AlreadySet`. A site is
     /// reported only when every class its receiver may be resolves the
     /// member to a declaration that finds it misplaced: an untyped
     /// receiver, or one arm that may be written there, is no finding.
@@ -634,14 +636,14 @@ impl FileAnalysis {
             if arms.is_empty() {
                 continue;
             }
-            // TODO(readonly-after-cfg): with control flow modelled, an in-class write after the
-            // constructor has run is a second write: a certain error, not just a hint.
-            // A write where the member holds nothing (`??=`, or one a guard
-            // proves unset) initialises it.
-            let lazy = r.access == AccessKind::WriteIfUnset
-                || r.access_place().is_some_and(|place| {
-                    self.place_type_at(place, r.read_point_at(site.name_span.start), module_index) == Some(InferredType::Undef)
-                });
+            // What the member holds where it is written, where its place
+            // has a state (`FileAnalysis::member_states`). One that holds
+            // nothing (`??=` fills only that, or a guard proves it unset)
+            // is initialised; one that surely holds a value is set again,
+            // which fails at runtime. A value nothing typed says neither.
+            let held = r.access_place().and_then(|place| self.place_type_at(place, r.read_point_at(site.name_span.start), module_index));
+            let lazy = r.access == AccessKind::WriteIfUnset || held == Some(InferredType::Undef);
+            let set = !lazy && held.is_some_and(|t| t.is_known() && !t.may_be_undef());
             let in_constructor = self.scope_chain(r.scope).iter().any(|&sc| {
                 self.scope(sc)
                     .owner
@@ -649,7 +651,7 @@ impl FileAnalysis {
             });
             let member = r.unqualified_target_name(self.names());
             let mut classes: Vec<String> = Vec::new();
-            let mut kind = MisplacedWriteKind::OutsideClass;
+            let mut kind = MisplacedWriteKind::AlreadySet;
             let reported = arms.iter().all(|cn| {
                 let Some(res) = self.resolve_field_in_ancestors(cn, member, module_index) else {
                     return false;
@@ -663,7 +665,7 @@ impl FileAnalysis {
                 };
                 let scope = flags.set_scope();
                 let write_once = flags.contains(SymbolFlags::READONLY);
-                if scope == AccessScope::Anywhere && (!write_once || in_constructor || lazy) {
+                if scope == AccessScope::Anywhere && (!write_once || ((in_constructor || lazy) && !set)) {
                     return false;
                 }
                 let declaring = res.class();
@@ -681,6 +683,7 @@ impl FileAnalysis {
                     // Only a write-once member has a place it is set in good
                     // form; a write from outside the family to one any code
                     // may set is what its set scope declares.
+                    _ if write_once && in_family && set => MisplacedWriteKind::AlreadySet,
                     _ if write_once && in_family && !in_constructor && !lazy => {
                         MisplacedWriteKind::OutsideConstructor
                     }
@@ -933,7 +936,7 @@ impl FileAnalysis {
         let domain = match reg.query(&bag, &q) {
             ReducedValue::Type(InferredType::ClassName(d)) => d,
             ReducedValue::Type(_)
-            | ReducedValue::FactMap(_)
+            | ReducedValue::FactMap(_) | ReducedValue::Effects(_)
             | ReducedValue::None => return None,
         };
         // Confidence = dominant share, recomputed from the same witnesses the
@@ -1067,7 +1070,7 @@ impl FileAnalysis {
         let reg = ReducerRegistry::with_defaults();
         match reg.query(&self.witnesses, &q) {
             ReducedValue::Type(t) => Some(t),
-            ReducedValue::FactMap(_) | ReducedValue::None => None,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
         }
     }
 

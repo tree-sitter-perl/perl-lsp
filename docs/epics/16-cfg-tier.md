@@ -1,8 +1,9 @@
 # Epic 16 — The CFG tier: path sensitivity on the witness bag
 
-> **Status:** scheduled (16th on the slate, but see the ordering note —
-> **two of its representation decisions bind on epics scheduled
-> before it**).
+> **Status:** being built for 0.10.0. The contract is
+> `docs/adr/cfg-tier.md`; it departs from this ladder where the anchors
+> below moved (Phase B landed as `Place`; joins are bag edges, not
+> persisted conclusions; effects get their own lane).
 > **Design owner-doc:** `docs/prompt-cfg-tier.md` — read it WHOLE
 > before planning anything. It is a completed design brief with the
 > options weighed and the pick made; this epic is its ladder, its
@@ -71,10 +72,10 @@ the brief weighs all three options and says why.
 | `control_regions` (untyped `Vec<Span>`) | **`PackFacts`** — pack-only | `grep -rn 'control_regions' src/` — note `surface_feed` discards it as "own-file straight-line gate spans"; the typed upgrade is also its promotion to a lane Perl populates |
 | `NarrowSubject` (builder-transient) | `build/builder/narrowing.rs` | `grep -rn 'NarrowSubject' src/` |
 | The three spellings `Place` converges | across layers | `GuardSite.subject: String`, `moved_from`'s `(String, Span, ScopeId)`, `ArrowDerefSite.receiver` |
-| `FlowEdge` + the dominance stand-in | `model/file_analysis/core_types.rs` | `grep -n 'struct FlowEdge' -A 12 src/model/file_analysis/core_types.rs`; `grep -n 'struct RebindIndex'` |
+| `FlowEdge` + the dominance stand-in | `model/file_analysis/core_types.rs`; `model/witnesses/` | `grep -n 'struct FlowEdge' -A 12 src/model/file_analysis/core_types.rs`; the stand-in is `LiveWindow` + `WitnessBag::live_at`, and the cutoff is `PlaceDisturbanceIndex` (`model/file_analysis/place.rs`) |
 | `cst::conditional_arm` — the syntactic must-run stand-in, shared by key-write flow edges and the `@_` window (`consume_arg_head`: a conditional `shift` opens the window) | `cst.rs` | `grep -rn 'conditional_arm' src/` — reachability replaces the "unconditional syntax or open" rule with the real must-run verdict |
 | `BranchArmFold` — what grows into `JoinFold` | `model/witnesses/reducers.rs` | `grep -rn 'BranchArmFold' src/model/witnesses/` |
-| **The join approximation `JoinFold` deletes** — a rebind inside a nested block or under a statement modifier is emitted as `Unknown` on the variable's binding scope, because a reducer only sees one attachment and the write landed on the block's | `build/builder/fold.rs`, `apply_chain_typing_assignments` | `grep -n 'approximation of a join' src/build/builder/fold.rs` — Phase C's `Join { place, at }` + `JoinFold` answer `old ⊔ new` natively (one attachment per variable, write witnesses carrying their region, a write/guard distinction the join reads); when that lands, delete this block and re-measure `redundant-guard` on the substrate, which is where the approximation earns its keep today |
+| **The join approximation `JoinFold` deletes** — a rebind inside a nested block mints one reset marker per enclosing level, at the end of the statement holding that level, and a read after it is `Unknown` | `build/builder/fold.rs` | `grep -n 'a marker stands in for the join' src/build/builder/fold.rs` — the join builder gives each marker its arms; when it lands, delete the marker loop and re-measure `redundant-guard` on the substrate |
 | **The join** — `JoinFold` folds arms by the lattice's one total join, unions included | `model/file_analysis/types.rs` | `grep -n 'pub fn join' src/model/file_analysis/types.rs`; `docs/adr/union-types.md` |
 | The cycle-cut site | `model/witnesses/registry.rs` | `grep -n 'fn query_rec' src/model/witnesses/registry.rs` |
 | Does NOT exist yet | — | `place_state_at`, `PredicateAtom`, `GuardRef`, `ExitFact`, `unreachable_regions` — all return zero hits; that is expected |
@@ -108,6 +109,9 @@ the brief weighs all three options and says why.
    pack capture vocabulary exercised by at least one pack language.
 
 ### Phase B — the `Place` promotion
+
+**Landed** (stacks 355/357): `Place { root: Binding, path: Vec<PathStep> }`
+in `model/file_analysis/place.rs`.
 
 **Mechanical and wide.** Buys UAM class-2 (subobject moves) and unified
 subjects.

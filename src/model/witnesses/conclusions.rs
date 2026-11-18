@@ -66,6 +66,8 @@ impl ConclusionKey {
     /// attachment is file-internal.
     pub fn from_attachment(att: &WitnessAttachment) -> Option<Self> {
         match att {
+            // A conclusion is a type; how a call ends is not one.
+            WitnessAttachment::Member { aspect: super::types::MemberAspect::Effects, .. } => None,
             WitnessAttachment::Member { owner, space, name, aspect } => Some(Self::Member {
                 owner: owner.clone(),
                 space: *space,
@@ -1047,7 +1049,7 @@ fn bake_one(
         // Facts, not a type, where the bare probe gave a type. The two probes
         // disagree about the KIND of answer, which no conclusion form
         // represents.
-        ReducedValue::FactMap(_) => {
+        ReducedValue::FactMap(_) | ReducedValue::Effects(_) => {
             demote("bake.demoted_kind_disagreement", OpenReason::KindDisagreement)
         }
         // The answer vanished once a receiver was supplied — binder-dependent

@@ -293,6 +293,10 @@
 ; The one method `new Foo(...)` invokes; its name belongs to the language.
 ((method_declaration name: (name) @mark.constructor)
  (#eq? @mark.constructor "__construct"))
+; The methods that run on an object no constructor built: a clone's copy
+; (which may set a readonly member again) and an unserialized one.
+((method_declaration name: (name) @mark.unconstructed)
+ (#any-of? @mark.unconstructed "__clone" "__wakeup" "__unserialize"))
 ; A class declaring one of these answers ANY member name at runtime, so it
 ; has no closed member surface to check a name against.
 ((class_declaration
@@ -376,6 +380,10 @@
  (#has-parent? @expr.lit.bool assignment_expression augmented_assignment_expression
    return_statement argument const_element property_element
    static_variable_declaration binary_expression unary_op_expression))
+((null) @expr.lit.null
+ (#has-parent? @expr.lit.null assignment_expression augmented_assignment_expression
+   return_statement argument const_element property_element
+   static_variable_declaration binary_expression unary_op_expression))
 
 ; Parentheses hold the value they wrap.
 ((parenthesized_expression (_) @expr.wrapper.inner) @expr.wrapper
@@ -400,6 +408,7 @@
   left: (list_literal (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled)) @flow.assign
 (assignment_expression
   left: (list_literal (pair (_) . (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled .))) @flow.assign
+; Each pass replaces what the loop variable held.
 (foreach_statement . (_) . [
   (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled
   (by_ref (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled)
@@ -408,14 +417,16 @@
     (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled
     (by_ref (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled)
   ] .)
-])
+] @flow.assign)
 ; A caught exception is an instance of the class the clause names, on
 ; entry to the clause: a write in it may retype the variable. A clause
 ; naming several (`A | B`) names no single type.
 (catch_clause
   type: (type_list . (named_type) @type.annot.entry .)
   name: (variable_name (name) @def.assigned.name @flow.target) @def.assigned @def.assigned.spelled)
-(global_declaration (variable_name (name) @def.assigned.name) @def.assigned @def.assigned.spelled)
+; `global $x` makes the function's `$x` the file's: declared there when
+; nothing there declares it yet.
+(global_declaration (variable_name (name) @closure.capture.global @def.assigned.name) @def.assigned @def.assigned.spelled)
 (static_variable_declaration
   name: (variable_name (name) @def.assigned.name @flow.target) @def.assigned @def.assigned.spelled
   value: (_)? @flow.source)
@@ -432,12 +443,13 @@
 (unset_statement (_) @flow.place)
 
 ; ---- closures ----
-; `use ($x)` reads the variable of the code around the closure, and the
-; closure body sees it by that name. `use (&$x)` binds it there,
-; declaring it when nothing there does yet.
+; `use ($x)` holds the variable of the code around the closure as it
+; stood at the closure's making. `use (&$x)` is that variable: the
+; closure reads it as it stands when it runs and writes it back, and the
+; clause declares it there when nothing there does yet.
 (anonymous_function_use_clause (variable_name (name) @closure.capture))
 (anonymous_function_use_clause
-  (by_ref (variable_name (name) @closure.capture @def.assigned.name @def.hoist) @def.assigned.spelled) @def.assigned)
+  (by_ref (variable_name (name) @closure.capture.ref @def.assigned.name) @def.assigned.spelled) @def.assigned)
 
 ; ---- guards ----
 ; An atom states what a test proves of its subject, a local `$x` or a
@@ -493,28 +505,47 @@
 ; loop body run where it holds, every later clause of the chain where it
 ; fails; a ternary yields its body or its alternative; the right of `&&`
 ; runs where the left holds, of `||` where it fails. An `else` arm is its
-; body. A loop tests its condition again after each run of its body, so a
-; `break` or `continue` in it goes to the loop, and the loop is left where
-; a test fails. A short-circuit written as a statement (`G || throw …`,
+; body. A short-circuit written as a statement (`G || throw …`,
 ; `G or die`) is a chain of its own, so the rest of the block runs where
 ; its right side does not leave.
-(if_statement condition: (_) @narrow.cond body: (_) @narrow.then)
+(if_statement condition: (_) @ctl.cond body: (_) @ctl.then) @ctl.branch
 (if_statement
-  condition: (_) @narrow.cond
-  alternative: [(else_if_clause) @narrow.else (else_clause body: (_) @narrow.else)])
-(else_if_clause condition: (_) @narrow.cond body: (_) @narrow.then)
+  condition: (_) @ctl.cond
+  alternative: [(else_if_clause) @ctl.else (else_clause body: (_) @ctl.else)]) @ctl.branch
+(else_if_clause condition: (_) @ctl.cond body: (_) @ctl.then) @ctl.branch
 (if_statement
-  alternative: (else_if_clause condition: (_) @narrow.cond)
-  alternative: [(else_if_clause) @narrow.else (else_clause body: (_) @narrow.else)])
-; TODO(cfg-exit-join): `@narrow.loop`, `@flow.to_loop` and the
-; fall-through they guard stand in for reachability; the CFG retires them,
-; since a `break` is an edge to the loop's exit there.
-(while_statement condition: (_) @narrow.cond body: (_) @narrow.then) @narrow.loop
-(conditional_expression condition: (_) @narrow.cond body: (_) @narrow.then)
-(conditional_expression condition: (_) @narrow.cond alternative: (_) @narrow.else)
-(binary_expression left: (_) @narrow.cond operator: ["&&" "and"] right: (_) @narrow.then)
-(binary_expression left: (_) @narrow.cond operator: ["||" "or"] right: (_) @narrow.else)
-(expression_statement (binary_expression left: (_) @narrow.cond operator: ["&&" "and" "||" "or"])) @narrow.stmt
+  alternative: (else_if_clause condition: (_) @ctl.cond) @ctl.branch
+  alternative: [(else_if_clause) @ctl.else (else_clause body: (_) @ctl.else)])
+(conditional_expression condition: (_) @ctl.cond body: (_) @ctl.then) @ctl.branch
+(conditional_expression condition: (_) @ctl.cond alternative: (_) @ctl.else) @ctl.branch
+(binary_expression left: (_) @ctl.cond operator: ["&&" "and"] right: (_) @ctl.then) @ctl.branch
+(binary_expression left: (_) @ctl.cond operator: ["||" "or"] right: (_) @ctl.else) @ctl.branch
+; A loop runs its body while its test holds (a `foreach` while items
+; remain), a `for`'s update after each pass. `break` and `continue` leave a
+; `switch` as they leave a loop, and `break 2` the second around them.
+(while_statement condition: (_) @ctl.cond body: (_) @ctl.loop.body) @ctl.loop
+(for_statement body: (_) @ctl.loop.body) @ctl.loop
+(for_statement condition: (_) @ctl.cond) @ctl.loop
+(for_statement update: (_) @ctl.loop.step) @ctl.loop
+(foreach_statement body: (_) @ctl.loop.body) @ctl.loop
+; A `foreach` tests for a next item as it binds it.
+(foreach_statement (_) @ctl.cond . body: (_)) @ctl.loop
+(do_statement body: (_) @ctl.loop.body condition: (_) @ctl.cond) @ctl.loop.once
+(switch_statement) @ctl.block.next
+; A try runs its body; where the body unwinds, a catch; past both, its
+; finally.
+(try_statement body: (_) @ctl.try.body) @ctl.try
+(try_statement (catch_clause) @ctl.try.catch) @ctl.try
+(try_statement (finally_clause body: (_) @ctl.try.finally)) @ctl.try
+; Where a tried body may unwind: a call or a construction, an include, a
+; throw, or a division, which throws on a zero divisor. A write nothing here
+; follows in the body reaches no catch.
+[(function_call_expression) (member_call_expression) (nullsafe_member_call_expression)
+ (scoped_call_expression) (object_creation_expression) (include_expression)
+ (include_once_expression) (require_expression) (require_once_expression)
+ (throw_expression)] @ctl.raise
+(binary_expression operator: ["/" "%"]) @ctl.raise
+(expression_statement (binary_expression left: (_) @ctl.cond operator: ["&&" "and" "||" "or"])) @ctl.stmt
 
 ; A statement that leaves its block: nothing after it there runs, and
 ; whether a chain of arms falls through follows from its arms' statements
@@ -522,26 +553,37 @@
 ; calls by the grammar's reading (`die;` a bare name), and the language
 ; reserves both words, so their spelling names them, from the global
 ; namespace too (`\exit(1)`).
-; TODO(noreturn-callee): a callee that never returns is an effect on the
-; callee; replace the spelling lookup once effects and the CFG exist.
-[(return_statement)
- (continue_statement)
- (break_statement)
- (exit_statement)
- (expression_statement (throw_expression))] @flow.leaves
+(return_statement) @ctl.leave.return
+(continue_statement (integer)? @ctl.levels) @ctl.leave.continue
+(break_statement (integer)? @ctl.levels) @ctl.leave.break
+(exit_statement) @ctl.leave.exit
+(expression_statement (throw_expression)) @ctl.leave.throw
 ((expression_statement
-   [(function_call_expression function: [(name) @_exit (qualified_name . (name) @_exit)]) (name) @_exit]) @flow.leaves
+   [(function_call_expression function: [(name) @_exit (qualified_name . (name) @_exit)]) (name) @_exit]) @ctl.leave.exit
  (#any-of? @_exit "die" "exit"))
 ; The right side of a short-circuit leaves the same way (`G || throw …`).
-(binary_expression operator: ["&&" "and" "||" "or"] right: (throw_expression) @flow.leaves)
+(binary_expression operator: ["&&" "and" "||" "or"] right: (throw_expression) @ctl.leave.throw)
 ((binary_expression
    operator: ["&&" "and" "||" "or"]
-   right: [(function_call_expression function: [(name) @_exit (qualified_name . (name) @_exit)]) (name) @_exit] @flow.leaves)
+   right: [(function_call_expression function: [(name) @_exit (qualified_name . (name) @_exit)]) (name) @_exit] @ctl.leave.exit)
  (#any-of? @_exit "die" "exit"))
-; A `break` or `continue` leaves to the loop around it, and a bare block's
-; statements run where it stands.
-[(break_statement) (continue_statement)] @flow.to_loop
+; A bare block's statements run where it stands.
 (compound_statement) @flow.block
+
+; How a call to a function ends is how its body does; a call that is a
+; whole statement lets control past it only if it comes back
+; (`docs/adr/cfg-tier.md` §Effects).
+(function_definition body: (compound_statement) @ctl.body)
+(method_declaration body: (compound_statement) @ctl.body)
+(anonymous_function body: (compound_statement) @ctl.body)
+(expression_statement
+  [(function_call_expression) (member_call_expression) (nullsafe_member_call_expression) (scoped_call_expression)] @ctl.gate)
+
+; ---- how a call ends ----
+; A `never` return says a call never comes back; how it leaves is the
+; body's business.
+(function_definition name: (name) @ends.never return_type: (bottom_type))
+(method_declaration name: (name) @ends.never return_type: (bottom_type))
 
 ; ---- calls ----
 ; A call's value is an Invoke of its callee on its arguments, and the

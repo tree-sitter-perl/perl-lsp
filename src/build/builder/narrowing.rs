@@ -218,6 +218,25 @@ pub(super) enum RegionFact {
 /// pass. A cutoff searched per fact is a scan per use, and every use
 /// observes. `scope` is captured at recognition time (the walk's
 /// `current_scope`), invisible post-walk.
+/// What a test proves of a place on the path through its construct on
+/// which no arm runs (`of`): an arm of that construct's join.
+pub(super) struct UntakenProof {
+    pub(super) of: Span,
+    pub(super) place: Place,
+    pub(super) payload: crate::model::witnesses::WitnessPayload,
+}
+
+/// A construct whose test proves something of `places` (each with the key
+/// variables its subscripts read), written in `scope`: where an arm of it
+/// leaves, the places join past it.
+pub(super) struct GuardSeed<'a> {
+    pub(super) construct: Node<'a>,
+    /// The construct is a statement that dies unless its test holds.
+    pub(super) asserts: bool,
+    pub(super) places: Vec<(Place, Vec<String>)>,
+    pub(super) scope: ScopeId,
+}
+
 pub(super) struct PendingNarrow {
     subject: NarrowSubject,
     fact: RegionFact,
@@ -517,68 +536,6 @@ fn recognize_ref_eq_guard<'a>(builder: &Builder<'a>, eq: Node<'a>, source: &[u8]
     Some(GuardFact { subject: NarrowSubject::TagOf(var), op: NarrowOp::TagEq(lit), asserts_when_true: true, read })
 }
 
-/// True if an expression is a guaranteed control-flow exit
-/// (`return`/`die`/`exit`/`croak`/`last`/`next`/`redo`/`goto`): it never
-/// yields a value, so `STMT if/unless G` narrows the rest of the block and
-/// `X || EXIT` is worth only `X`. The words are read by spelling, so a sub
-/// of the file's own named `croak` counts too.
-// TODO(noreturn-callee): a callee that never returns (`croak`, `confess`)
-// is an effect on the callee; replace the spelling lookup once effects and
-// the CFG exist.
-pub(super) fn is_exit_expression(node: Node, source: &[u8]) -> bool {
-    const EXITS: [&str; 8] = ["die", "exit", "croak", "confess", "last", "next", "redo", "goto"];
-    match node.kind() {
-        "return_expression" | "last_expression" | "next_expression" | "redo_expression" => true,
-        "function" | "bareword" => node
-            .utf8_text(source)
-            .map(|s| EXITS.contains(&s.trim()))
-            .unwrap_or(false),
-        "func1op_call_expression"
-        | "function_call_expression"
-        | "ambiguous_function_call_expression" => node
-            .child_by_field_name("function")
-            .or_else(|| node.child(0))
-            .and_then(|n| n.utf8_text(source).ok())
-            .map(|s| EXITS.contains(&s.trim()))
-            .unwrap_or(false),
-        _ => false,
-    }
-}
-
-/// True if `block` never falls through: one of its statements leaves,
-/// wherever it sits, so what follows it there is dead.
-fn block_leaves(block: Node, source: &[u8]) -> bool {
-    use crate::cst::NodeExt;
-    block.elements().any(|stmt| statement_leaves(stmt, source))
-}
-
-/// True if a statement leaves its block: an exit, a conditional with an
-/// `else` whose every arm leaves, or a bare block that leaves.
-fn statement_leaves(stmt: Node, source: &[u8]) -> bool {
-    match stmt.kind() {
-        "expression_statement" => crate::cst::nth_element(stmt, 0).is_some_and(|e| is_exit_expression(e, source)),
-        "conditional_statement" => {
-            let arms = crate::cst::conditional_arms(stmt);
-            arms.last().is_some_and(|arm| arm.cond.is_none()) && arms.iter().all(|arm| block_leaves(arm.block, source))
-        }
-        // A bare block is a loop that runs once (perlsyn).
-        "block_statement" => loop_block_leaves(stmt, source),
-        _ => false,
-    }
-}
-
-/// True if a loop's block never comes back to the loop or lands after it:
-/// it leaves, and no `last`/`next`/`redo` in it can reach the loop
-/// (conservatively, even one an inner loop owns, or a label names).
-// TODO(cfg-exit-join): a loop-control edge to the loop's exit is the CFG's.
-fn loop_block_leaves(block: Node, source: &[u8]) -> bool {
-    use crate::cst::NodeExt;
-    fn has_loop_control(node: Node) -> bool {
-        node.elements().any(|c| c.kind() == "loopex_expression" || has_loop_control(c))
-    }
-    block_leaves(block, source) && !has_loop_control(block)
-}
-
 impl<'a> Builder<'a> {
     /// Classify a guard's operand into the subject it narrows: a plain
     /// scalar (`Variable`), else a part of a variable whose every
@@ -634,69 +591,103 @@ impl<'a> Builder<'a> {
     /// `isa`/`ref-eq` have no positive complement (stay wide). The `else`
     /// arm is pure cumulative negation; an `elsif` arm combines its own
     /// guard with the priors' negation. A chain with no `else` has an
-    /// implicit one. Where exactly one arm falls through (`block_leaves`),
-    /// the rest of the enclosing block runs where that arm does; where none
-    /// does it never runs, and two or more join (`TODO(cfg-exit-join)`).
+    /// implicit one, which runs no arm: what it proves goes to the chain's
+    /// join (`assemble_joins`), which is also what carries a narrowing past
+    /// an arm that leaves.
     pub(super) fn narrow_block_guard(&mut self, cond_stmt: Node<'a>) {
-        let arms: Vec<(Option<Node<'a>>, Node<'a>, bool)> = crate::cst::conditional_arms(cond_stmt)
+        let arms: Vec<(Option<Node<'a>>, Node<'a>, bool)> = super::control::branch_chain(self.source, cond_stmt)
             .into_iter()
             .map(|arm| (arm.cond, arm.block, arm.enter))
             .collect();
 
+        let mut subjects = Vec::new();
         for k in 0..arms.len() {
             let (own_cond, blk, enter) = arms[k];
             // Record the arm's own guard once (not the priors re-walked
             // for cumulative negation) — D3/D4 want each condition once.
             if let Some(c) = own_cond {
-                self.record_guard_sites(c);
+                self.record_guard_sites(c, None);
             }
-            self.narrow_chain_arm(own_cond.map(|c| (c, enter)), &arms[..k], node_to_span(blk));
-        }
-        let mut falling: Vec<Option<usize>> =
-            (0..arms.len()).filter(|&k| !block_leaves(arms[k].1, self.source)).map(Some).collect();
-        if arms.last().is_some_and(|arm| arm.0.is_some()) {
-            falling.push(None);
-        }
-        if let [arm] = falling[..] {
-            let (own, priors) = match arm {
-                Some(k) => (arms[k].0.map(|c| (c, arms[k].2)), &arms[..k]),
-                None => (None, &arms[..]),
-            };
-            if let Some(region) = self.block_remainder(cond_stmt) {
-                self.narrow_chain_arm(own, priors, region);
+            let region = node_to_span(blk);
+            for (subject, op, read) in self.chain_arm_facts(own_cond.map(|c| (c, enter)), &arms[..k]) {
+                self.note_narrowed_arm(&subject, &op, region);
+                subjects.push(subject.clone());
+                self.emit_narrowing_fact(&subject, op, read, region);
             }
         }
+        // The implicit `else` belongs to the last arm's own construct (the
+        // final `elsif`, or the statement).
+        if let Some(&(Some(_), blk, _)) = arms.last() {
+            let of = self.syntax.parent(blk).map_or(node_to_span(cond_stmt), node_to_span);
+            for (subject, op, read) in self.chain_arm_facts(None, &arms[..]) {
+                subjects.push(subject.clone());
+                self.prove_untaken(subject, op, read, of);
+            }
+        }
+        self.seed_guard_joins(cond_stmt, subjects);
     }
 
-    /// Narrow `region`, which runs where the arm's own condition is as
-    /// given and every prior arm was not taken.
-    fn narrow_chain_arm(
-        &mut self,
+    /// What holds where the arm's own condition is as given and every
+    /// prior arm was not taken.
+    fn chain_arm_facts(
+        &self,
         own: Option<(Node<'a>, bool)>,
         priors: &[(Option<Node<'a>>, Node<'a>, bool)],
-        region: Span,
-    ) {
+    ) -> Vec<(NarrowSubject, NarrowOp, Node<'a>)> {
         // The arm's own guard is the more direct statement about a
         // subject; a prior arm's negation must not override it.
+        let mut out = Vec::new();
         let mut covered: Vec<Place> = Vec::new();
         if let Some((c, enter)) = own {
-            for (subject, op, read) in facts_for_region(self, c, enter) {
-                covered.push(subject.subject().clone());
-                self.emit_narrowing_fact(&subject, op, read, region);
+            for fact in facts_for_region(self, c, enter) {
+                covered.push(fact.0.subject().clone());
+                out.push(fact);
             }
         }
         for &(prior_cond, _, prior_enter) in priors {
             let Some(prior_cond) = prior_cond else { continue };
             // A prior arm not taken means its condition held at the
             // opposite of its enter polarity.
-            for (subject, op, read) in facts_for_region(self, prior_cond, !prior_enter) {
-                let key = subject.subject().clone();
+            for fact in facts_for_region(self, prior_cond, !prior_enter) {
+                let key = fact.0.subject().clone();
                 if covered.contains(&key) {
                     continue;
                 }
                 covered.push(key);
-                self.emit_narrowing_fact(&subject, op, read, region);
+                out.push(fact);
             }
+        }
+        out
+    }
+
+    /// What `subject` is on the path through the construct at `of` on which
+    /// no arm runs, for that construct's join.
+    fn prove_untaken(&mut self, subject: NarrowSubject, op: NarrowOp, read: Node<'a>, of: Span) {
+        if matches!(op, NarrowOp::Defined { .. }) {
+            self.emit_expr_witness(read);
+        }
+        if let (NarrowSubject::Place { place, .. }, Some(payload)) = (&subject, op.payload()) {
+            self.untaken_proofs.push(UntakenProof { of, place: place.clone(), payload });
+        }
+    }
+
+    /// A construct whose test proves something of `subjects` joins them
+    /// where an arm of it leaves (`assemble_joins`).
+    fn seed_guard_joins(&mut self, construct: Node<'a>, subjects: Vec<NarrowSubject>) {
+        self.seed_joins(construct, false, subjects);
+    }
+
+    fn seed_joins(&mut self, construct: Node<'a>, asserts: bool, subjects: Vec<NarrowSubject>) {
+        let mut places: Vec<(Place, Vec<String>)> = Vec::new();
+        for s in subjects {
+            if let NarrowSubject::Place { place, key_vars, .. } = s {
+                if !places.iter().any(|(p, _)| *p == place) {
+                    places.push((place, key_vars));
+                }
+            }
+        }
+        if !places.is_empty() {
+            self.guard_seeds.push(GuardSeed { construct, asserts, places, scope: self.current_scope() });
         }
     }
 
@@ -706,7 +697,7 @@ impl<'a> Builder<'a> {
     /// condition), and the point at which to read the subject's prior
     /// (un-narrowed) type (the condition's own location, before any
     /// narrowed region). Recognition is shared with emission.
-    fn record_guard_sites(&mut self, condition: Node<'a>) {
+    fn record_guard_sites(&mut self, condition: Node<'a>, exit: Option<Span>) {
         use crate::model::file_analysis::{GuardPredicate, GuardSite};
         let scope = self.current_scope();
         let before = condition.start_position();
@@ -728,6 +719,7 @@ impl<'a> Builder<'a> {
                 asserts_when_true: fact.asserts_when_true,
                 span: node_to_span(literal),
                 before_point: before,
+                exit,
             });
         }
     }
@@ -755,22 +747,24 @@ impl<'a> Builder<'a> {
         if is_loop && modified.kind() == "do_expression" {
             return;
         }
-        self.narrow_arm(condition, modified, runs_when_true);
-        if !is_loop
-            && is_exit_expression(modified, self.source)
-            && self.narrow_block_remainder(postfix, condition, !runs_when_true)
-        {
-            self.record_guard_sites(condition);
+        let mut subjects = self.narrow_arm(condition, modified, runs_when_true);
+        if is_loop {
+            return;
         }
+        let of = node_to_span(postfix);
+        for (subject, op, read) in facts_for_region(self, condition, !runs_when_true) {
+            subjects.push(subject.clone());
+            self.prove_untaken(subject, op, read, of);
+        }
+        self.seed_guard_joins(postfix, subjects);
+        self.record_guard_sites(condition, Some(node_to_span(modified)));
     }
 
     /// `while (G) BLOCK` / `for (…; G; …) BLOCK` — G is tested before every
     /// run of the body, so the body narrows by G (`until` by its negation),
-    /// and the rebind cutoff ends it at a write. A body that always leaves
-    /// never comes back to the test, so the loop is left only where its
-    /// first test fails, and the rest of the block narrows as after an `if`
-    /// with no `else`; any other body is left with G as the last test or a
-    /// `last` left it (`TODO(cfg-exit-join)`).
+    /// and the rebind cutoff ends it at a write. Past the loop, the paths
+    /// where G failed carry its negation; a `last` leaves with G unknown, so
+    /// where one can reach past the loop nothing narrows there.
     pub(super) fn narrow_loop(&mut self, stmt: Node<'a>) {
         let (Some(condition), Some(body)) = (stmt.child_by_field_name("condition"), stmt.child_by_field_name("block"))
         else {
@@ -785,13 +779,13 @@ impl<'a> Builder<'a> {
             _ => condition,
         };
         let enter = stmt.child(0).is_none_or(|k| k.kind() != "until");
-        self.narrow_arm(condition, body, enter);
-        if loop_block_leaves(body, self.source) {
-            if let Some(region) = self.rest_of_block(stmt) {
-                self.record_guard_sites(condition);
-                self.narrow_chain_arm(Some((condition, !enter)), &[], region);
-            }
+        let mut subjects = self.narrow_arm(condition, body, enter);
+        let of = node_to_span(stmt);
+        for (subject, op, read) in facts_for_region(self, condition, !enter) {
+            subjects.push(subject.clone());
+            self.prove_untaken(subject, op, read, of);
         }
+        self.seed_guard_joins(stmt, subjects);
     }
 
     /// `G ? A : B` — A runs where G holds, B where it fails.
@@ -813,36 +807,50 @@ impl<'a> Builder<'a> {
             Some(Logical::Or(l, r)) => (l, r, false),
             _ => return,
         };
-        self.narrow_arm(left, right, holds);
+        let mut subjects = self.narrow_arm(left, right, holds);
+        let of = node_to_span(expr);
+        for (subject, op, read) in facts_for_region(self, left, !holds) {
+            subjects.push(subject.clone());
+            self.prove_untaken(subject, op, read, of);
+        }
+        self.seed_guard_joins(expr, subjects);
     }
 
-    /// Narrow `arm`, which runs only where `condition` is `holds`.
-    fn narrow_arm(&mut self, condition: Node<'a>, arm: Node<'a>, holds: bool) {
+    /// Narrow `arm`, which runs only where `condition` is `holds`; the
+    /// subjects it narrows.
+    fn narrow_arm(&mut self, condition: Node<'a>, arm: Node<'a>, holds: bool) -> Vec<NarrowSubject> {
         let region = node_to_span(arm);
+        let mut subjects = Vec::new();
         for (subject, op, read) in facts_for_region(self, condition, holds) {
+            self.note_narrowed_arm(&subject, &op, region);
             self.emit_narrowing_fact(&subject, op, read, region);
+            subjects.push(subject);
+        }
+        subjects
+    }
+
+    /// The arm at `region` carries what its test proves of `subject`, for
+    /// the join past its construct.
+    fn note_narrowed_arm(&mut self, subject: &NarrowSubject, op: &NarrowOp, region: Span) {
+        if let (NarrowSubject::Place { place, .. }, false) = (subject, matches!(op, NarrowOp::TagEq(_))) {
+            self.narrowed_arms.insert((place.clone(), region));
         }
     }
 
-    /// `G or EXIT;` / `G and EXIT;` — the bare-logical early-exit idiom.
-    pub(super) fn narrow_logical_exit(&mut self, expr: Node<'a>) {
-        // `G or EXIT` → fall-through holds when G TRUE; `G and EXIT` → FALSE.
-        let (left, right, holds_when_true) = match logical_shape(expr, self.source) {
-            Some(Logical::Or(l, r)) => (l, r, true),
-            Some(Logical::And(l, r)) => (l, r, false),
+    /// `G or EXIT;` / `G and EXIT;` — the bare-logical early-exit idiom
+    /// states its guard for the D3/D4 diagnostics, which hold it to a right
+    /// side that does not come back.
+    pub(super) fn record_logical_exit_guard(&mut self, expr: Node<'a>) {
+        let (left, right) = match logical_shape(expr, self.source) {
+            Some(Logical::Or(l, r) | Logical::And(l, r)) => (l, r),
             _ => return,
         };
-        if !is_exit_expression(right, self.source) {
-            return;
-        }
-        if self.narrow_block_remainder(expr, left, holds_when_true) {
-            self.record_guard_sites(left);
-        }
+        self.record_guard_sites(left, Some(node_to_span(right)));
     }
 
     /// `assert_X($x);` / `$type->assert_valid($x);` — a statement that dies
-    /// unless its check passes is `die unless is_X($x)`: the rest of the
-    /// block runs where it held.
+    /// unless its check passes is `die unless is_X($x)`: the path that comes
+    /// back out of it is the one where the check held.
     pub(super) fn narrow_assertion(&mut self, call: Node<'a>) {
         if self.syntax.parent(call).is_none_or(|p| p.kind() != "expression_statement") {
             return;
@@ -850,44 +858,14 @@ impl<'a> Builder<'a> {
         if !recognize_type_check(self, call).is_some_and(|(_, asserts)| asserts) {
             return;
         }
-        if self.narrow_block_remainder(call, call, true) {
-            self.record_guard_sites(call);
+        let of = node_to_span(call);
+        let mut subjects = Vec::new();
+        for (subject, op, read) in facts_for_region(self, call, true) {
+            subjects.push(subject.clone());
+            self.prove_untaken(subject, op, read, of);
         }
-    }
-
-    /// Narrow `[statement end .. enclosing-block end]` for a statement-level
-    /// guard: the statement `node` is in leaves the block unless
-    /// `condition` is `holds_when_true`. False when that statement is no
-    /// block's; the caller records the guard's sites, once per condition.
-    fn narrow_block_remainder(
-        &mut self,
-        node: Node<'a>,
-        condition: Node<'a>,
-        holds_when_true: bool,
-    ) -> bool {
-        let Some(region) = self.block_remainder(node) else { return false };
-        for (subject, op, read) in facts_for_region(self, condition, holds_when_true) {
-            self.emit_narrowing_fact(&subject, op, read, region);
-        }
-        true
-    }
-
-    /// `[statement end .. enclosing-block end]` for the statement `node` is
-    /// in, when that statement is a block's.
-    fn block_remainder(&self, node: Node<'a>) -> Option<Span> {
-        let mut stmt = node;
-        while !matches!(stmt.kind(), "expression_statement" | "conditional_statement") {
-            stmt = self.syntax.parent(stmt)?;
-        }
-        self.rest_of_block(stmt)
-    }
-
-    /// `[stmt end .. block end]` when `stmt` is a statement of a block, a
-    /// bare block, or the file's top level.
-    // TODO(cfg-exit-join): narrowing past the enclosing block needs the CFG's block-exit join (docs/prompt-cfg-tier.md §3.5).
-    fn rest_of_block(&self, stmt: Node<'a>) -> Option<Span> {
-        let block = self.syntax.parent(stmt).filter(|b| matches!(b.kind(), "block" | "block_statement" | "source_file"))?;
-        Some(Span { start: stmt.end_position(), end: block.end_position() })
+        self.seed_joins(call, true, subjects);
+        self.record_guard_sites(call, None);
     }
 
     /// A deref observes its operand as the reference its sigil names:
@@ -912,7 +890,7 @@ impl<'a> Builder<'a> {
     /// Record what `operand`'s use at `context` reveals about it. A use
     /// says what the operand holds on the paths that reach it and no others:
     /// it holds from `context` to the end of the conditionally-run arm
-    /// around it (`cst::conditional_arm`), or else to the end of the block
+    /// around it (`control::arm_around`), or else to the end of the block
     /// it sits in, and like any narrowing it ends at the subject's next
     /// rebind. Past an arm the value is a join of the arm and its bypass,
     /// which `JoinFold` will answer; until then the arm says nothing
@@ -928,7 +906,7 @@ impl<'a> Builder<'a> {
             return;
         }
         let Some(subject) = self.narrow_subject_of(operand) else { return };
-        let extent = crate::cst::conditional_arm(self.syntax, context, crate::cst::ArmBound::Block)
+        let extent = super::control::arm_around(self.syntax, self.source, context, super::control::ArmBound::Block)
             .or_else(|| crate::cst::enclosing_block(self.syntax, context));
         let Some(extent) = extent else { return };
         let region = Span { start: context.start_position(), end: extent.end_position() };
@@ -1016,12 +994,16 @@ impl<'a> Builder<'a> {
     pub(super) fn apply_narrowing_cutoffs(&mut self) {
         use crate::model::witnesses::{Witness, WitnessPayload, WitnessSource};
         let pending = std::mem::take(&mut self.pending_narrowings);
+        let joined = self.guard_seeds.iter().flat_map(|g| g.places.iter().map(|(p, _)| p));
         let wanted: std::collections::HashSet<String> = pending
             .iter()
             .filter_map(|pn| match &pn.subject {
-                NarrowSubject::Place { place, .. } if !place.is_variable() => Some(self.binding_name(&place.root).to_string()),
-                NarrowSubject::Place { .. } | NarrowSubject::TagOf(_) => None,
+                NarrowSubject::Place { place, .. } => Some(place),
+                NarrowSubject::TagOf(_) => None,
             })
+            .chain(joined)
+            .filter(|place| !place.is_variable())
+            .map(|place| self.binding_name(&place.root).to_string())
             .collect();
         let places = if wanted.is_empty() {
             None
@@ -1089,6 +1071,7 @@ impl<'a> Builder<'a> {
         for w in facts {
             self.push_witness(w);
         }
+        self.place_disturbances = places;
     }
 
     /// Every FlowEdge target as a write of the whole variable it binds:
@@ -1180,9 +1163,7 @@ impl<'a> Builder<'a> {
                 let Some(read) = crate::cst::read_place(self.syntax, node, self.source, &mut binder) else { return };
                 let access = match kind {
                     "hash_element_expression" | "array_element_expression" => {
-                        let written = self.element_write_kind(node).is_some()
-                            || crate::cst::is_value_reset_target(self.syntax, node, self.source);
-                        if written { Access::Write } else { Access::Opaque }
+                        if self.element_write_kind(node).is_some() { Access::Write } else { Access::Opaque }
                     }
                     // A slice can write every slot it names, read or not.
                     "slice_expression" | "keyval_expression" => Access::Write,
@@ -1211,7 +1192,7 @@ impl<'a> Builder<'a> {
             None => self.collect_flow_matches(),
         };
         for caps in pending {
-            // Bind shapes: no inflowing value. A bare `my`/`local` CLEARS to
+            // Bind shapes: no inflowing value. A bare `my`, `local` or `undef` CLEARS to
             // undef (`Cleared`); a `foreach` var rebinds per element (`Rebind`,
             // type TBD). Both record the rebind for the narrowing cutoff.
             if let Some(bare) = caps.clear {
@@ -1288,12 +1269,12 @@ impl<'a> Builder<'a> {
                                 let scope = self.scope_at_point(elem.start_position());
                                 match (n.filter(|_| plain), &elem_nodes) {
                                     (Some(n), Some(nodes)) => {
-                                        self.record_key_write(elem, nodes.get(n).copied(), None, scope)
+                                        self.record_key_write(elem, nodes.get(n).copied(), None, true, scope)
                                     }
                                     (Some(n), None) => {
-                                        self.record_key_write(elem, Some(src), Some(n as i32), scope)
+                                        self.record_key_write(elem, Some(src), Some(n as i32), true, scope)
                                     }
-                                    (None, _) => self.record_key_write(elem, None, None, scope),
+                                    (None, _) => self.record_key_write(elem, None, None, false, scope),
                                 }
                                 continue;
                             }
@@ -1336,7 +1317,7 @@ impl<'a> Builder<'a> {
 
     /// The variable name(s) a clear (`@flow.clear`) targets — a
     /// `variable_declaration` (single or paren list) or a `localization`
-    /// scalar.
+    /// name.
     pub(super) fn bare_bind_names(&self, bare: Node<'a>) -> Vec<String> {
         if bare.kind() == "variable_declaration" {
             if let Some(targets) = self.lhs_list_targets(bare) {

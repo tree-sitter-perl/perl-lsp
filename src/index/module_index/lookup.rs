@@ -348,6 +348,14 @@ impl CrossFileLookup for ModuleIndex {
         self.core.flush_epoch.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    fn callable_ends(&self, name: &str) -> Option<crate::model::witnesses::Ends> {
+        self.core.edges.callable_ends(name)
+    }
+
+    fn member_ends(&self, class: &str, name: &str) -> crate::model::file_analysis::MemberEnds {
+        self.core.edges.member_ends(class, name)
+    }
+
     fn restamp_owed(&self, path: &std::path::Path, stamped_at: Option<u64>) -> bool {
         // Never stamped: owed, unconditionally. Every rehydrated copy reads
         // `None` (the field is `serde(skip)`), so this is the arm that keeps a
@@ -772,13 +780,7 @@ impl CrossFileLookup for ModuleIndex {
     fn def_candidates(&self, name: &str) -> Vec<Arc<CachedModule>> {
         match self.core.all_defs.get(name) {
             Some(cands) if !cands.is_empty() => {
-                // Path-ordered HERE, the one speller of candidate order —
-                // `all_defs` vecs are insertion-ordered (parallel indexing),
-                // and every consumer scan/union/tie-break leans on this
-                // being deterministic.
-                let mut v = cands.clone();
-                v.sort_by(|a, b| a.path.cmp(&b.path));
-                v
+                cands.to_vec()
             }
             // No workspace candidates: fall back to the name-slot winner.
             // The @INC tier lands here — single-provider by CURRENT
@@ -790,9 +792,7 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn leaf_def_candidates(&self, leaf: &str) -> Vec<Arc<CachedModule>> {
-        let mut v = self.core.leaf_defs.get(leaf).map(|c| c.clone()).unwrap_or_default();
-        v.sort_by(|a, b| a.path.cmp(&b.path));
-        v
+        self.core.leaf_defs.get(leaf).map(|c| c.to_vec()).unwrap_or_default()
     }
 
     fn for_each_workspace_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) {

@@ -415,6 +415,38 @@ fn inferred_type_has_no_production_caller() {
     );
 }
 
+/// `Never` is a projection of the effect lane, made where the registry
+/// answers an expression or a call and nowhere else (`docs/adr/cfg-tier.md`
+/// §Effects, §Unbinding). A builtin row, a declared type, a plugin override or a
+/// witness that wrote it would store what only the effect may say.
+/// Count-exact, shrink-only; patterns (`=>`, `matches!`, `| …`) don't count.
+#[test]
+fn never_is_made_only_by_the_registry() {
+    const SITES: &[(&str, usize, &str)] = &[
+        ("model/witnesses/registry.rs", 3, "an expression that states it leaves; a call whose callee cannot come back; a read of a name a write unbound"),
+        ("model/file_analysis/queries.rs", 1, "the call arms of `expr_type_at_span`, which read a call's return beside the registry"),
+    ];
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut found: Vec<(String, usize)> = Vec::new();
+    for (path, _layer, _stem) in source_files() {
+        let text = fs::read_to_string(&path).unwrap();
+        let n = text
+            .lines()
+            .map(str::trim_start)
+            .filter(|t| !t.starts_with("//") && t.contains("InferredType::Never"))
+            .filter(|t| !t.contains("=>") && !t.contains("matches!") && !t.starts_with('|'))
+            .count();
+        if n > 0 {
+            let rel = path.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
+            found.push((rel, n));
+        }
+    }
+    found.sort();
+    let mut want: Vec<(String, usize)> = SITES.iter().map(|(p, n, _)| (p.to_string(), *n)).collect();
+    want.sort();
+    assert_eq!(found, want, "`InferredType::Never` is constructed outside the registry's projection sites");
+}
+
 /// Human type labels read in the file's language: `FileAnalysis::render_type`
 /// / `display_type_of` carry the language's words (`type_label`), so an
 /// adapter or index site rendering with the vocabulary-free engine spelling
@@ -1857,16 +1889,18 @@ fn build_facts_are_not_keyed_by_position() {
         }
     }
     let allow: &[(&str, usize, &str)] = &[
-        ("build/builder/fold.rs", 2, "the hash-key fixup's per-pass snapshots of typed variables and write refs, by position"),
-        ("build/builder/mod.rs", 5, "slot-write RHS and anonymous-sub symbols by span; use, dispatch and method-call emissions deduplicated by span"),
+        ("build/builder/fold.rs", 1, "the hash-key fixup's per-pass snapshot of typed variables, by position"),
+        ("build/builder/joins.rs", 2, "a join minted once per place, construct and role: the construct's span is the `Join` attachment's own key; span-keyed joins move onto the tree together"),
+        ("build/builder/mod.rs", 6, "slot-write RHS and anonymous-sub symbols by span; use, dispatch and method-call emissions deduplicated by span; the arms a test narrows a place over, by the arm's span (a join's key: span-keyed joins move onto the tree together)"),
         ("build/builder/pattern_dispatch.rs", 3, "plugin matches deduplicated by span (walk and fold); a pattern's owner by pattern index, not a position"),
         ("build/cpp_reparse/defs.rs", 1, "a sorted keyword table, not a position"),
         ("build/cpp_reparse/mod.rs", 1, "the splice map: a transformed byte offset to the source's, a map between two texts"),
         ("build/language_driver.rs", 3, "the line index (a byte to its row, text not tree); macro expansion sites by span"),
         ("build/query_extract/extract/defs.rs", 2, "duplicate defs settled by their name's start"),
         ("build/query_extract/extract/flow.rs", 4, "reassigned names, declaration sites and constants by start point; member reads by span"),
+        ("build/query_extract/extract/narrowing.rs", 1, "how far past each construct a test's join holds, by the construct's span (a join's key: span-keyed joins move onto the tree together)"),
         ("build/query_extract/places.rs", 4, "the place a name or member read denotes, by the read's span"),
-        ("build/query_extract/skeleton.rs", 12, "the skeleton joins capture facts by span: callable owners, receiver classes, call arguments, read places, written and initialised sites, declaration names, claimed refs, settled writes"),
+        ("build/query_extract/skeleton.rs", 16, "the skeleton joins capture facts by span: callable owners, receiver classes, call arguments, read places, written and initialised sites, declaration names, claimed refs, settled writes, a readonly member's stored values and read tokens; how far past each construct a test's join holds (a join's key: span-keyed joins move onto the tree together)"),
     ];
     let drift = allowlist_drift("position-keyed side indexes", &seen, allow);
     assert!(
@@ -2014,12 +2048,12 @@ fn raw_scope_climbs_are_containment_only() {
         ("build/builder/infra.rs", 1, "package_for_node: the package of the innermost scope that names one"),
         ("cst/syntax.rs", 4, "the syntax tree's own node parents, not scopes"),
         ("build/builder/visit_use.rs", 2, "find_sub_symbol_for[_scope]: the Sub/Method body a scope sits in"),
-        ("build/query_extract/extract/mod.rs", 1, "def_scope: a hoisted def is filed in the scope around the one it is written in"),
         ("model/file_analysis/core_types.rs", 2, "scope_depth: nesting depth, the innermost-scope tie-break and the variable-completion rank; owning_callable: the first body up the tree that names its callable"),
         ("model/file_analysis/class_queries.rs", 3, "a member's declaring scope inside its class body; package_at's innermost scope that names a package; whether a member write sits inside a constructor body, its closures included"),
         ("model/file_analysis/invocants.rs", 4, "the enclosing class or package of a scope (x2), the body that elides its receiver, a symbol's class-span containment"),
         ("model/file_analysis/outline.rs", 1, "scope_within_sub_body: whether a scope sits inside a callable"),
         ("model/file_analysis/queries.rs", 3, "the `scope_chain` wrapper itself; move-after-use: is the move inside a callable; declaration_required_at: the strict rule in force is the innermost enclosing block that switches it, a lexical pragma, not a name"),
+        ("model/file_analysis/control.rs", 3, "Reach::of: a write's or a test's scopes out to its binding, where each join lands and which blocks the write leaves; bodies_around: the later-running bodies a read or write sits in, out to its binding's scope; callable_around: the body a member write or a return runs in"),
     ];
     let drift = allowlist_drift("raw scope climbs (a lookup takes LookupChain)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));

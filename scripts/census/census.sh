@@ -7,7 +7,8 @@
 # Env: PERL_CORPORA (default ~/perl-corpora), CENSUS_OUT (default
 # ./census-<stamp>), CENSUS_FILES (files sampled per corpus, default 15),
 # CENSUS_PER_FILE (positions per file, default 40), CENSUS_VERBS (default
-# hover,definition).
+# hover,definition), CENSUS_LANG (a pack language the binaries serve:
+# php, python; default Perl).
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 base_bin=$1 head_bin=$2; shift 2
@@ -23,7 +24,7 @@ for c in "${names[@]}"; do
     root=$corpora/bulk/$c
     [ -d "$root" ] || { echo "census: skip $c (missing)" >&2; continue; }
     pl=""; [ -d "$corpora/deps/$c/lib/perl5" ] && pl=$corpora/deps/$c/lib/perl5
-    python3 "$here/probes.py" "$root" --files "${CENSUS_FILES:-15}" --per-file "${CENSUS_PER_FILE:-40}" --verbs "${CENSUS_VERBS:-hover,definition}" >"$out/$c.probes.jsonl"
+    python3 "$here/probes.py" "$root" --files "${CENSUS_FILES:-15}" --per-file "${CENSUS_PER_FILE:-40}" --verbs "${CENSUS_VERBS:-hover,definition}" --lang "${CENSUS_LANG:-perl}" >"$out/$c.probes.jsonl"
     for side in base head; do
         bin=$base_bin; [ $side = head ] && bin=$head_bin
         echo "census: $c [$side]" >&2

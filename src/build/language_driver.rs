@@ -937,6 +937,7 @@ fn inject_member_blocks(
                 owner_stated: false,
                 flags: Default::default(),
                 member_space: None,
+                never_returns: false,
             });
             // The role member states the SAME declared bound an expanded field
             // does: the `TypeName` edge is canonical (the hover leaf and the
@@ -1105,6 +1106,9 @@ fn remap_spans(
         place_narrowings,
         place_writes,
         variable_regions,
+        control,
+        guards,
+        control_bounds,
         // scope-keyed — no spans to fix.
         class_scopes: _,
     } = skel;
@@ -1129,6 +1133,7 @@ fn remap_spans(
             owner_stated: _,
             flags: _,
             member_space: _,
+            never_returns: _,
         } = s;
         *start = r(*start);
         *end = r(*end);
@@ -1205,9 +1210,10 @@ fn remap_spans(
     // Member writes settle through `expr_type_at_span` on the receiver and an
     // edge to the value's `Expr`, both of which speak original coords.
     for w in member_writes.iter_mut() {
-        let crate::build::query_extract::MemberWrite { receiver, member: _, spaces: _, value } = w;
+        let crate::build::query_extract::MemberWrite { receiver, member: _, spaces: _, value, place } = w;
         *receiver = rspan(*receiver);
         *value = rspan(*value);
+        *place = rspan(*place);
     }
     for (w, lands) in place_writes.iter_mut() {
         *w = rspan(*w);
@@ -1245,7 +1251,9 @@ fn remap_spans(
     // span-bearing shape fails to compile here until it is remapped.
     use crate::model::witnesses::WitnessAttachment;
     let mut remap_att = |a: &mut WitnessAttachment| match a {
-        WitnessAttachment::Expr(sp) | WitnessAttachment::BranchArm(sp) => *sp = rspan(*sp),
+        WitnessAttachment::Expr(sp)
+        | WitnessAttachment::BranchArm(sp)
+        | WitnessAttachment::Join { of: sp, .. } => *sp = rspan(*sp),
         WitnessAttachment::Variable { .. }
         | WitnessAttachment::Expression(_)
         | WitnessAttachment::Symbol(_)
@@ -1254,6 +1262,8 @@ fn remap_spans(
         | WitnessAttachment::SymbolReturnArm(_)
         | WitnessAttachment::TypeName(_)
         | WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Holds, .. }
+        | WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Effects, .. }
+        | WitnessAttachment::SymbolEffects(_)
         | WitnessAttachment::Param { .. }
         | WitnessAttachment::Place(_)
         | WitnessAttachment::SlotWrites { .. } => {}
@@ -1274,6 +1284,17 @@ fn remap_spans(
         refined.for_each_attachment_mut(&mut remap_att);
         *region = rspan(*region);
     }
+    for g in guards.iter_mut() {
+        let crate::build::query_extract::GuardRecord { subject, variable: _, scope: _, of, fact } = g;
+        *subject = rspan(*subject);
+        *of = rspan(*of);
+        match fact {
+            crate::build::query_extract::GuardFact::Seed => {}
+            crate::build::query_extract::GuardFact::Untaken(payload) => payload.for_each_attachment_mut(&mut remap_att),
+            crate::build::query_extract::GuardFact::Narrowed(arm) => *arm = rspan(*arm),
+        }
+    }
+    *control_bounds = std::mem::take(control_bounds).into_iter().map(|(of, end)| (rspan(of), r(end))).collect();
     // Value-flow edges (the provenance tier above the bag) + label/goto refs +
     // moved-from sites + domain-typing sites all carry transformed spans too.
     for fe in flow_edges.iter_mut() {
@@ -1302,6 +1323,19 @@ fn remap_spans(
     }
     for span in control_regions.iter_mut() {
         *span = rspan(*span);
+    }
+    for c in control.constructs.iter_mut() {
+        let crate::model::file_analysis::Construct { span, kind: _, cond, arms, label: _ } = c;
+        *span = rspan(*span);
+        if let Some(cond) = cond {
+            *cond = rspan(*cond);
+        }
+        for a in arms {
+            a.span = rspan(a.span);
+        }
+    }
+    for l in control.leaves.iter_mut() {
+        l.span = rspan(l.span);
     }
     for span in param_regions.iter_mut() {
         *span = rspan(*span);

@@ -42,6 +42,8 @@ mod deferral;
 pub use deferral::*;
 mod place;
 pub use place::*;
+mod control;
+pub use control::*;
 mod queries;
 pub use queries::{hint_in, vivify_dies_in};
 mod enrichment;
@@ -483,6 +485,18 @@ pub trait LocalParents {
     /// that outlives one query keys on it. A store that cannot change while
     /// it is read answers a constant.
     fn generation(&self) -> u64;
+    /// The packages here naming `parent` as a parent, sorted.
+    fn local_children(&self, parent: &str) -> Vec<String>;
+    /// Whether `package`'s parents are set at run time beyond those named.
+    fn has_dynamic_parents(&self, _package: &str) -> bool {
+        false
+    }
+}
+
+fn children_in<'a, V: 'a>(map: impl Iterator<Item = (&'a String, &'a V)>, parents: impl Fn(&V) -> &[String], parent: &str) -> Vec<String> {
+    let mut out: Vec<String> = map.filter(|(_, v)| parents(v).iter().any(|p| p == parent)).map(|(k, _)| k.clone()).collect();
+    out.sort();
+    out
 }
 
 impl LocalParents for HashMap<String, Vec<String>> {
@@ -491,6 +505,9 @@ impl LocalParents for HashMap<String, Vec<String>> {
     }
     fn generation(&self) -> u64 {
         0
+    }
+    fn local_children(&self, parent: &str) -> Vec<String> {
+        children_in(self.iter(), |v| v.as_slice(), parent)
     }
 }
 
@@ -501,6 +518,12 @@ impl LocalParents for HashMap<String, PackageFacts> {
     fn generation(&self) -> u64 {
         0
     }
+    fn local_children(&self, parent: &str) -> Vec<String> {
+        children_in(self.iter(), |f| f.parents.as_slice(), parent)
+    }
+    fn has_dynamic_parents(&self, package: &str) -> bool {
+        self.get(package).is_some_and(|f| f.dynamic_parents)
+    }
 }
 
 /// The builder's parent graph while the walk and plugins still extend it.
@@ -510,6 +533,7 @@ impl LocalParents for HashMap<String, PackageFacts> {
 #[derive(Debug, Default)]
 pub struct PackageParents {
     parents: HashMap<String, Vec<String>>,
+    dynamic: HashSet<String>,
     generation: u64,
 }
 
@@ -539,6 +563,19 @@ impl PackageParents {
         self.parents.entry(package).or_default().extend(parents);
     }
 
+    /// A parent that never folded to a name: the package's ancestry is
+    /// not the list it names.
+    pub fn mark_dynamic(&mut self, package: String) {
+        if !self.dynamic.contains(&package) {
+            self.generation = crate::model::witnesses::next_generation();
+            self.dynamic.insert(package);
+        }
+    }
+
+    pub fn dynamic(&self) -> &HashSet<String> {
+        &self.dynamic
+    }
+
     /// `@ISA = (...)` replaces rather than appends.
     pub fn replace(&mut self, package: String, parents: Vec<String>) {
         self.generation = crate::model::witnesses::next_generation();
@@ -552,6 +589,12 @@ impl LocalParents for PackageParents {
     }
     fn generation(&self) -> u64 {
         self.generation
+    }
+    fn local_children(&self, parent: &str) -> Vec<String> {
+        self.parents.local_children(parent)
+    }
+    fn has_dynamic_parents(&self, package: &str) -> bool {
+        self.dynamic.contains(package)
     }
 }
 

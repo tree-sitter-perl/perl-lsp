@@ -131,7 +131,8 @@ fn registry_with_bar_override() -> Arc<PluginRegistry> {
                 class: "Foo".into(),
                 name: "bar".into(),
             },
-            return_type: crate::build::plugin::OverrideReturn::Type(InferredType::ClassName("Baz".into())),
+            return_type: Some(crate::build::plugin::OverrideReturn::Type(InferredType::ClassName("Baz".into()))),
+            ends: None,
             reason: "test fixture: pin Foo::bar to Baz".into(),
         }],
     }));
@@ -423,4 +424,187 @@ fn fold_converges_on_self_recursive_call_binding() {
         fa_twice.sub_return_type_at_arity("fetch_object", Some(2)),
         "settled answer changed under an extra fold pass"
     );
+}
+
+// ---- Effects: a plugin states how a call ends ------------------------------
+
+fn registry_with_fail_unwinding() -> Arc<PluginRegistry> {
+    let mut reg = PluginRegistry::new();
+    reg.register(Box::new(OverrideOnlyPlugin {
+        id: "test-effects",
+        triggers: vec![Trigger::Always],
+        overrides: vec![TypeOverride {
+            target: OverrideTarget::Method { class: "Foo".into(), name: "fail".into() },
+            return_type: None,
+            ends: Some(vec![crate::build::plugin::OverrideEnds::Unwinds]),
+            reason: "test fixture: Foo::fail throws".into(),
+        }],
+    }));
+    Arc::new(reg)
+}
+
+/// An override that states only how a call ends reaches the callable and
+/// its class, is inherited by a subclass that does not define the method,
+/// and is NOT inherited by one that does: an override that states nothing
+/// is no evidence, never its parent's answer. Its return type is left to
+/// inference.
+#[test]
+fn plugin_stated_ends_reach_the_callable_and_its_heirs() {
+    use crate::model::witnesses::{query_ends, Ends, WitnessAttachment};
+    let source = r#"
+        package Foo;
+        sub fail { return 1 }
+        package Heir;
+        our @ISA = ('Foo');
+        package Own;
+        our @ISA = ('Foo');
+        sub fail { return 2 }
+    "#;
+    let fa = build_with(source, registry_with_fail_unwinding());
+    let fail = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "fail" && s.package.as_deref() == Some("Foo"))
+        .expect("Foo::fail");
+    assert_eq!(fa.symbol_ends(fail.id), Ends::UNWINDS);
+    assert!(
+        !matches!(fa.return_type_provenance(fail.id), TypeProvenance::PluginOverride { .. }),
+        "an ends-only override states no return type"
+    );
+    let ctx = fa.bag_context(None);
+    let ends_of = |class: &str| query_ends(&fa.witnesses, &WitnessAttachment::effects_of(class, "fail"), Some(&ctx));
+    assert_eq!(ends_of("Foo"), Ends::UNWINDS);
+    assert_eq!(ends_of("Heir"), Ends::UNWINDS, "inherited");
+    assert_eq!(ends_of("Own"), Ends::COMPLETES, "an own definition answers from its own body, never its parent's");
+    let own = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "fail" && s.package.as_deref() == Some("Own"))
+        .expect("Own::fail");
+    assert_eq!(fa.symbol_ends(own.id), Ends::COMPLETES);
+}
+
+/// A local jump ends no way the effect lane counts: `return`, `next`,
+/// `last`, `redo` and `goto` state the empty set on themselves, and the
+/// value a `return` carries is untouched.
+#[test]
+fn local_jumps_state_that_evaluation_ends_there() {
+    use crate::model::witnesses::{Effect, Ends, WitnessAttachment, WitnessPayload};
+    let source = "sub f { for (1) { next; last; redo } goto &g; return 1 }\n";
+    let fa = build_with(source, Arc::new(PluginRegistry::new()));
+    let mut leaves: Vec<String> = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter(|w| matches!(w.payload, WitnessPayload::Effect(Effect::Ends(e)) if e == Ends::empty()))
+        .filter_map(|w| match w.attachment {
+            WitnessAttachment::Expr(sp) => Some(source[sp.start.column..sp.end.column].to_string()),
+            _ => None,
+        })
+        .collect();
+    leaves.sort();
+    assert_eq!(leaves, vec!["goto &g", "last", "next", "redo", "return 1"]);
+    assert_eq!(fa.sub_return_type_at_arity("f", None), Some(InferredType::Numeric));
+}
+
+/// `exec` replaces the process, or returns false where the command could
+/// not start: it may exit and may come back.
+#[test]
+fn exec_may_come_back() {
+    use crate::model::witnesses::{query_expr_ends, Ends, WitnessAttachment};
+    let fa = build_with("exec 'ls';\n", registry_with_fail_unwinding());
+    let ctx = fa.bag_context(None);
+    let span = crate::model::file_analysis::Span {
+        start: tree_sitter::Point { row: 0, column: 0 },
+        end: tree_sitter::Point { row: 0, column: 9 },
+    };
+    assert_eq!(query_expr_ends(&fa.witnesses, &WitnessAttachment::Expr(span), Some(&ctx)), Ends::EXITS | Ends::COMPLETES);
+}
+
+/// How a call ends is read through the call: a builtin states it on
+/// itself, a call the file can pin to its definition reads that
+/// definition's answer, and a call it cannot pin is the top.
+#[test]
+fn a_call_ends_the_way_the_definitions_it_runs_end() {
+    use crate::model::witnesses::{query_expr_ends, Ends, WitnessAttachment};
+    let source = "package Foo;\nsub fail { return 1 }\nsub plain { 1 }\npackage main;\ndie 'x';\nexit 1;\nFoo::fail();\nFoo->fail;\nFoo->plain;\nmy $o = bless {}, 'Foo';\n$o->fail;\nunknown();\npackage Foo;\nmy $r = fail();\n";
+    let fa = build_with(source, registry_with_fail_unwinding());
+    let ctx = fa.bag_context(None);
+    let line = |row: usize| -> String { source.lines().nth(row).unwrap().trim_end_matches(';').to_string() };
+    let ends_on = |row: usize| -> Ends {
+        let text = line(row);
+        let point = |column| tree_sitter::Point { row, column };
+        let span = crate::model::file_analysis::Span { start: point(0), end: point(text.len()) };
+        query_expr_ends(&fa.witnesses, &WitnessAttachment::Expr(span), Some(&ctx))
+    };
+    assert_eq!(ends_on(4), Ends::UNWINDS, "die");
+    assert_eq!(ends_on(5), Ends::EXITS, "exit");
+    // `Foo->m` dispatches on its receiver like `$o->m`: every class the
+    // receiver may be joins, and no subclass of Foo overrides `fail`.
+    assert_eq!(ends_on(7), Ends::UNWINDS, "Foo's own, no override");
+    assert_eq!(ends_on(8), Ends::all(), "a member that states nothing");
+    assert_eq!(ends_on(10), Ends::UNWINDS, "Foo's own, no override");
+    assert_eq!(ends_on(11), Ends::all(), "nothing defines it");
+    let pinned = crate::model::file_analysis::Span {
+        start: tree_sitter::Point { row: 13, column: 8 },
+        end: tree_sitter::Point { row: 13, column: 14 },
+    };
+    assert_eq!(
+        query_expr_ends(&fa.witnesses, &WitnessAttachment::Expr(pinned), Some(&ctx)),
+        Ends::UNWINDS,
+        "a call the file pins to its definition"
+    );
+    let fail = fa.symbols().iter().find(|s| s.name == "fail").expect("fail");
+    let plain = fa.symbols().iter().find(|s| s.name == "plain").expect("plain");
+    assert_eq!(fa.symbol_ends(fail.id), Ends::UNWINDS);
+    assert_eq!(fa.symbol_ends(plain.id), Ends::COMPLETES, "a definition whose body comes back");
+}
+
+/// `Never` is how a value fold sees an expression that does not complete:
+/// it answers where the expression states it leaves or calls a callee that
+/// never comes back, and the join drops it, so an arm that leaves is no
+/// arm. A callable whose every arm leaves yields no value.
+#[test]
+fn an_arm_that_never_comes_back_drops_out_of_the_value() {
+    let source = "package Foo;\nsub fail { return 1 }\nsub dies { die 'x' }\nsub maybe { return 1 if $_[0]; die 'x' }\nmy $a = die 'x';\nmy $b = fail();\nmy $c = $_[0] ? 'v' : die 'x';\nmy $d = $_[1] // fail();\nmy $s = 'a';\nmy $e = $s // fail();\n";
+    let fa = build_with(source, registry_with_fail_unwinding());
+    let type_of = |row: usize, from: &str| -> Option<InferredType> {
+        let line = source.lines().nth(row).unwrap();
+        let start = line.find(from).unwrap();
+        let end = line.len() - 1;
+        let point = |column| tree_sitter::Point { row, column };
+        fa.expr_type_at_span(crate::model::file_analysis::Span { start: point(start), end: point(end) }, None)
+    };
+    assert_eq!(type_of(4, "die"), Some(InferredType::Never), "a builtin that dies");
+    assert_eq!(type_of(5, "fail"), Some(InferredType::Never), "a call whose callee never comes back");
+    assert_eq!(type_of(6, "$_[0]"), Some(InferredType::String), "the arm that leaves drops out");
+    assert_eq!(type_of(7, "$_[1]"), None, "nothing is known of the left");
+    assert_eq!(type_of(9, "$s"), Some(InferredType::String), "a fallback that leaves leaves the left");
+    assert_eq!(fa.sub_return_type_at_arity("dies", None), None, "no arm comes back");
+    assert_eq!(fa.sub_return_type_at_arity("maybe", None), Some(InferredType::Numeric));
+}
+
+/// `SUPER::` runs the first parent in MRO order that defines the method.
+/// A parent this file does not declare may define it, so a later parent's
+/// answer is not the one that runs: the call is the top. A parent the file
+/// declares whole, and which defines nothing, is passed over.
+#[test]
+fn super_passes_only_a_parent_the_file_can_vouch_for() {
+    use crate::model::witnesses::{query_expr_ends, Ends, WitnessAttachment};
+    let ends_of_super = |first_parent_here: bool| -> Ends {
+        let decl = if first_parent_here { "package Remote;\nsub other { 1 }\n" } else { "" };
+        let source = format!(
+            "{decl}package Foo;\nsub fail {{ return 1 }}\npackage Bar;\nuse parent -norequire, 'Remote', 'Foo';\nsub fail {{ my $self = shift;\n$self->SUPER::fail;\n}}\n"
+        );
+        let fa = build_with(&source, registry_with_fail_unwinding());
+        let ctx = fa.bag_context(None);
+        let row = source.lines().position(|l| l.starts_with("$self->SUPER")).unwrap();
+        let span = crate::model::file_analysis::Span {
+            start: tree_sitter::Point { row, column: 0 },
+            end: tree_sitter::Point { row, column: "$self->SUPER::fail".len() },
+        };
+        query_expr_ends(&fa.witnesses, &WitnessAttachment::Expr(span), Some(&ctx))
+    };
+    assert_eq!(ends_of_super(false), Ends::all(), "an undeclared parent may define it");
+    assert_eq!(ends_of_super(true), Ends::UNWINDS, "a declared parent that lacks it is passed over");
 }

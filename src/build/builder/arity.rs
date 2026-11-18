@@ -55,7 +55,7 @@ pub(super) fn classify_bare_return_or_if_arm<'t>(
             // the union's `Any` arm.
             // `unless (COND) { return X }` fires when COND fails, so the
             // statement's own keyword decides, as for the postfix form.
-            let lead = crate::cst::conditional_arms(outer).into_iter().next()?;
+            let lead = super::control::branch_chain(source, outer).into_iter().next()?;
             let keyword = if lead.enter { "if" } else { "unless" };
             classify_arity_condition(lead.cond?, source, keyword).or(Some(ArityBranch::Default))
         }

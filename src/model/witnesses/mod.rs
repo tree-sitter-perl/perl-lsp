@@ -53,7 +53,7 @@ pub use closedness::*;
 pub struct WitnessBag {
     witnesses: Vec<Witness>,
     #[serde(skip)]
-    index: HashMap<WitnessAttachment, Vec<usize>>,
+    index: QueryMap<WitnessAttachment, Vec<usize>>,
     /// Every scope a variable name has witnesses on: the one variable's
     /// facts, wherever its writes were made.
     #[serde(skip)]
@@ -64,12 +64,16 @@ pub struct WitnessBag {
     /// more: below that the whole read is as cheap as the window, and the
     /// order would be memory every small variable pays.
     #[serde(skip)]
-    spans: HashMap<WitnessAttachment, SpanOrder>,
+    spans: QueryMap<WitnessAttachment, SpanOrder>,
+    /// Each place's `MayBe` witnesses, which every read of it past their
+    /// site joins in, so a read finds them without walking the rest.
+    #[serde(skip)]
+    may_be: QueryMap<WitnessAttachment, Vec<usize>>,
     /// The `Bound` witnesses of each attachment that has any, so the
     /// registry's cap step (`cap_by_bound`) costs one probe of an empty map
     /// on a bag with no declarations.
     #[serde(skip)]
-    bounds: HashMap<WitnessAttachment, Vec<usize>>,
+    bounds: QueryMap<WitnessAttachment, Vec<usize>>,
     /// Names this bag's content: every mutation draws a fresh value from
     /// [`next_generation`], so a memo that outlives one query can tell
     /// whether the bag it answered from is still the bag being asked.
@@ -80,6 +84,12 @@ pub struct WitnessBag {
     #[serde(skip)]
     content: Option<u64>,
 }
+
+/// The map the bag's indexes and a query's tables are keyed in. A read
+/// hashes a whole attachment several times, and under std's SipHash that
+/// was 15% of one; this hasher is seeded per process, so the keys a source
+/// file chooses still cannot aim at a bucket.
+pub(crate) type QueryMap<K, V> = HashMap<K, V, ahash::RandomState>;
 
 /// One process-wide counter for every generation stamp, so two stamped
 /// stores never share a value unless their content is the same.
@@ -309,10 +319,11 @@ impl<'de> Deserialize<'de> for WitnessBag {
         let on_disk = WitnessBagOnDisk::deserialize(deserializer)?;
         let mut bag = WitnessBag {
             witnesses: on_disk.witnesses,
-            index: HashMap::new(),
-            var_scopes: HashMap::new(),
-            spans: HashMap::new(),
-            bounds: HashMap::new(),
+            index: Default::default(),
+            var_scopes: Default::default(),
+            spans: Default::default(),
+            may_be: Default::default(),
+            bounds: Default::default(),
             generation: 0,
             content: None,
         };
@@ -392,6 +403,10 @@ impl WitnessBag {
     }
 
     pub fn push(&mut self, w: Witness) -> usize {
+        debug_assert!(
+            !matches!(&w.payload, WitnessPayload::InferredType(t) if t.is_never()),
+            "`Never` is a projection of the effect lane and is never stored: {w:?}"
+        );
         self.generation = next_generation();
         let idx = self.witnesses.len();
         let slot = self.index.entry(w.attachment.clone()).or_default();
@@ -402,6 +417,9 @@ impl WitnessBag {
         }
         slot.push(idx);
         let ordered = (w.attachment.is_temporal() && slot.len() >= SPAN_ORDER_MIN).then(|| w.attachment.clone());
+        if matches!(w.payload, WitnessPayload::MayBe(_)) {
+            self.may_be.entry(w.attachment.clone()).or_default().push(idx);
+        }
         if let Some(c) = &mut self.content {
             *c = c.wrapping_add(witness_hash(&w));
         }
@@ -446,6 +464,11 @@ impl WitnessBag {
         self.index.get(att).into_iter().flatten().map(|&i| (i, &self.witnesses[i]))
     }
 
+    /// The `MayBe` witnesses on `att`.
+    pub fn may_be<'b>(&'b self, att: &WitnessAttachment) -> impl Iterator<Item = &'b Witness> + 'b {
+        self.may_be.get(att).into_iter().flatten().map(|&i| &self.witnesses[i])
+    }
+
     /// The scopes `name` has witnesses on.
     pub fn variable_scopes(&self, name: &str) -> &[crate::model::file_analysis::ScopeId] {
         self.var_scopes.get(name).map(Vec::as_slice).unwrap_or(&[])
@@ -471,8 +494,12 @@ impl WitnessBag {
         self.index.clear();
         self.var_scopes.clear();
         self.spans.clear();
+        self.may_be.clear();
         self.bounds.clear();
         for (i, w) in self.witnesses.iter().enumerate() {
+            if matches!(w.payload, WitnessPayload::MayBe(_)) {
+                self.may_be.entry(w.attachment.clone()).or_default().push(i);
+            }
             let slot = self.index.entry(w.attachment.clone()).or_default();
             if slot.is_empty() {
                 if let WitnessAttachment::Variable { name, scope } = &w.attachment {
@@ -530,6 +557,36 @@ impl WitnessBag {
     /// Rewrite every witness in place, keeping push order.
     pub fn rewrite(&mut self, mut f: impl FnMut(&mut Witness)) {
         self.witnesses.iter_mut().for_each(&mut f);
+        if self.content.is_some() {
+            self.track_content();
+        }
+        self.rebuild_index();
+    }
+
+    /// Confine the writes made inside a later-running body to it: each
+    /// write marker and written value at `(attachment, site)` holds from
+    /// the site to the body's end, and one the body ends on (`None`) holds
+    /// nowhere in it and is dropped. Past the body the variable reads the
+    /// write through the body's `MayBe` (`docs/adr/cfg-tier.md`
+    /// §Later-running bodies).
+    pub fn confine_writes(&mut self, sites: &std::collections::HashMap<(WitnessAttachment, Point), Option<Point>>) {
+        if sites.is_empty() {
+            return;
+        }
+        let end = |w: &Witness| {
+            let write = w.span.start == w.span.end
+                && matches!(w.payload, WitnessPayload::Reset | WitnessPayload::Edge(WitnessAttachment::Expr(_)));
+            match write {
+                true => sites.get(&(w.attachment.clone(), w.span.start)).copied(),
+                false => None,
+            }
+        };
+        self.retain_witnesses(|w| !matches!(end(w), Some(None)));
+        for i in 0..self.witnesses.len() {
+            if let Some(Some(e)) = end(&self.witnesses[i]) {
+                self.witnesses[i].span.end = e;
+            }
+        }
         if self.content.is_some() {
             self.track_content();
         }
@@ -661,3 +718,8 @@ mod tests;
 
 #[cfg(test)]
 mod live_window_tests;
+
+#[cfg(test)]
+mod join_tests;
+#[cfg(test)]
+mod effect_tests;

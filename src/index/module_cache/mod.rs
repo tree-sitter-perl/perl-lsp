@@ -12,7 +12,7 @@ use dashmap::DashMap;
 use rusqlite::{params, Connection};
 
 use crate::model::file_analysis::FileAnalysis;
-use crate::index::module_index::CachedModule;
+use crate::index::module_index::{CachedModule, DefCandidates};
 
 /// The `source` tag for name-keyed rows — the @INC provider tier, whoever
 /// resolved it. The resolver thread and the one-shot CLI share one pool:

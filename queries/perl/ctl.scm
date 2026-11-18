@@ -1,0 +1,89 @@
+; Perl control structure, in the `@ctl.*` vocabulary every language's
+; document speaks (`docs/adr/cfg-tier.md`, `query_extract::vocab::CtlCap`).
+; Read by `build::builder::control`, never stored.
+;
+;   @ctl.branch / @ctl.loop   the construct; `@ctl.loop.once` for a body
+;                             that runs before the first test
+;   @ctl.cond                 the condition its arms are taken on
+;   @ctl.then / @ctl.else     what runs where the condition holds / fails
+;   @ctl.loop.body            what a loop runs while its test holds
+;   @ctl.loop.step            what runs after each pass, before the next test
+;   @ctl.block.next           a block `last` and `next` leave, testing nothing
+;   @ctl.try / @ctl.try.quiet a body and what runs where it dies
+;   @ctl.try.body / .catch / .finally   its arms
+;   @ctl.raise    where a tried body may die
+;   @ctl.label                the name a construct carries, or a jump aims at
+;   @ctl.leave.<kind>         a statement that leaves its block
+;
+; Every arm pattern carries its construct, so arms group by construct node.
+; A condition, a loop list and a `for` initialiser run whenever their
+; construct does, so they are no arm.
+
+; ---- if / unless, elsif, else ----
+; `unless` runs its block where the condition fails, and its `elsif` /
+; `else` where it holds.
+(conditional_statement "if" condition: (_) @ctl.cond block: (_) @ctl.then) @ctl.branch
+(conditional_statement "if" condition: (_) @ctl.cond [(elsif) @ctl.else (else block: (_) @ctl.else)]) @ctl.branch
+(conditional_statement "unless" condition: (_) @ctl.cond block: (_) @ctl.else) @ctl.branch
+(conditional_statement "unless" condition: (_) @ctl.cond [(elsif) @ctl.then (else block: (_) @ctl.then)]) @ctl.branch
+(elsif condition: (_) @ctl.cond block: (_) @ctl.then) @ctl.branch
+(elsif condition: (_) @ctl.cond [(elsif) @ctl.else (else block: (_) @ctl.else)]) @ctl.branch
+
+; ---- statement modifiers ----
+(postfix_conditional_expression . (_) @ctl.then "if" condition: (_) @ctl.cond) @ctl.branch
+(postfix_conditional_expression . (_) @ctl.else "unless" condition: (_) @ctl.cond) @ctl.branch
+
+; ---- ?: and the short-circuits ----
+; `//`'s right runs where its left is undefined: the else of a definedness
+; test. `xor` evaluates both sides, so it decides nothing.
+(conditional_expression condition: (_) @ctl.cond consequent: (_) @ctl.then) @ctl.branch
+(conditional_expression condition: (_) @ctl.cond alternative: (_) @ctl.else) @ctl.branch
+(lowprec_logical_expression left: (_) @ctl.cond "and" right: (_) @ctl.then) @ctl.branch
+(lowprec_logical_expression left: (_) @ctl.cond "or" right: (_) @ctl.else) @ctl.branch
+(binary_expression left: (_) @ctl.cond "&&" right: (_) @ctl.then) @ctl.branch
+(binary_expression left: (_) @ctl.cond ["||" "//"] right: (_) @ctl.else) @ctl.branch
+
+; ---- loops ----
+; TODO(cfg-loop-polarity): an `until` body runs where its condition fails;
+; nothing reads a loop condition's polarity yet. Owner: the 0.11 CFG follow-up.
+(loop_statement condition: (_) @ctl.cond block: (_) @ctl.loop.body) @ctl.loop
+(loop_statement continue: (_) @ctl.loop.step) @ctl.loop
+(cstyle_for_statement block: (_) @ctl.loop.body) @ctl.loop
+(cstyle_for_statement condition: (_) @ctl.cond) @ctl.loop
+(cstyle_for_statement iterator: (_) @ctl.loop.step) @ctl.loop
+(for_statement block: (_) @ctl.loop.body) @ctl.loop
+; A `foreach` tests for a next item as it binds it.
+(for_statement variable: (_) @ctl.cond) @ctl.loop
+(postfix_loop_expression (do_expression) @ctl.loop.body condition: (_) @ctl.cond) @ctl.loop.once
+(postfix_loop_expression . (_) @ctl.loop.body condition: (_) @ctl.cond) @ctl.loop
+(postfix_for_expression . (_) @ctl.loop.body list: (_)) @ctl.loop
+(statement_label label: (_) @ctl.label statement: [(loop_statement) (cstyle_for_statement) (for_statement)] @ctl.loop)
+
+; A bare block is a loop that runs once: `last` and `next` leave it.
+(block_statement) @ctl.block.next
+
+; ---- try ----
+; `try` runs its block; where the block dies, its `catch`; past both, its
+; `finally`. An `eval` block catches every death and lands past itself.
+(try_statement try_block: (_) @ctl.try.body) @ctl.try
+(try_statement catch_block: (_) @ctl.try.catch) @ctl.try
+(try_statement finally_block: (_) @ctl.try.finally) @ctl.try
+(eval_expression (block) @ctl.try.body) @ctl.try.quiet
+
+; Where a tried block may die: a call of any kind (`die` among them), a
+; `require`, or a division, which dies on a zero divisor. A write nothing
+; here follows in the block reaches no `catch`.
+[(function_call_expression) (ambiguous_function_call_expression) (method_call_expression)
+ (func0op_call_expression) (func1op_call_expression) (coderef_call_expression)
+ (require_expression)] @ctl.raise
+(binary_expression ["/" "%"]) @ctl.raise
+(statement_label label: (_) @ctl.label statement: (block_statement) @ctl.block.next)
+
+; ---- leaving ----
+; `die` and `exit` are calls; how a call ends is the effect lane's
+; (`model/builtins.rs`). `redo` restarts the body without the test, a back
+; edge like `next`'s.
+(return_expression) @ctl.leave.return
+(loopex_expression "last" (label)? @ctl.label) @ctl.leave.break
+(loopex_expression ["next" "redo"] (label)? @ctl.label) @ctl.leave.continue
+(goto_expression) @ctl.leave.jump

@@ -34,7 +34,7 @@ measured scaling envelope, and both are properties of every seam.
 | 13 | [Pack-language ceiling](epics/13-pack-language-ceiling.md) | Calibration is the ship gate and nobody owns it; the framework tier rides the PHP arc after 0.10.0 |
 | 14 | [The per-file stall](epics/14-per-file-stall.md) | C/C++ is unusable at Godot size; nobody has profiled it yet |
 | 15 | [Query paths at scale](epics/15-query-paths-at-scale.md) | Storage holds at 122x; query paths break |
-| 16 | [The CFG tier](epics/16-cfg-tier.md) | UAM, the cpp D-codes and D9 are all parked on it |
+| 16 | [The CFG tier](epics/16-cfg-tier.md) | being built for 0.10.0 (`adr/cfg-tier.md`); UAM, the cpp D-codes and D9 follow it |
 | 17 | [Builder decomposition](epics/17-builder-decomposition.md) | Grab-bag parts hid a duplicated type table until it mistyped 12 Moose types |
 
 **Suggested order:** 1 first, then 14 and 15 — those two are where the
@@ -103,7 +103,8 @@ opportunistically; each is a commit, not an arc.
 ## Out of scope
 
 Multi-workspace/monorepo · cross-file rename of deps (read-only by
-`RoleMask::EDITABLE`) · effect facts · full dependent inference ·
+`RoleMask::EDITABLE`) · effects beyond how a call ends (argument
+effects wait on the parameter key, `docs/adr/cfg-tier.md`) · full dependent inference ·
 `wantarray` returns · cross-function scalar aliasing · runtime
 namespace extension (graph-gated).
 

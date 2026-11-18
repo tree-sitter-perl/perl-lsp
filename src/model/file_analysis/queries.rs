@@ -82,22 +82,29 @@ impl FileAnalysis {
 
     /// Whether completion offers `sym` at `point`. A local its first write
     /// declares (`SymbolFlags::SCOPE_WIDE`) binds from the top of its body,
-    /// but is offered only below that write in the body that writes it:
-    /// Perl's `my` rule. A body nested in it runs later, so there it is
-    /// offered wherever the write sits. Binding, goto-def and types keep
-    /// the scope-wide view.
-    ///
-    /// TODO(cfg-loop-locals): in a loop, a local read at the top and first
-    /// written further down is in force on the second pass but is not
-    /// offered above its write. Source order stands in for control flow
-    /// until the CFG work ("Model closures and scopes - with CFG next
-    /// version") gives reaching writes.
+    /// but is offered only where a write of it reaches: below that write in
+    /// the body that writes it (Perl's `my` rule), and in a loop whose head
+    /// carries it round from a later pass. A body nested in it runs later,
+    /// so there it is offered wherever the write sits. Binding, goto-def and
+    /// types keep the scope-wide view.
     pub fn in_completion_view(&self, sym: &Symbol, point: Point) -> bool {
         if !sym.flags.contains(SymbolFlags::SCOPE_WIDE) {
             return true;
         }
         let body = self.scope_at(point).and_then(|s| callable_reach(&self.scopes, s).last());
-        body != Some(sym.scope) || sym.selection_span.start < point
+        body != Some(sym.scope) || sym.selection_span.start < point || self.loop_carries(sym.id, point)
+    }
+
+    /// Whether a loop around `point` carries `sym` into its head: its value
+    /// on a later pass reaches the point.
+    fn loop_carries(&self, sym: SymbolId, point: Point) -> bool {
+        use crate::model::witnesses::{JoinRole, WitnessAttachment, WitnessPayload};
+        let place = WitnessAttachment::Place(Box::new(Place::variable(Binding::Lexical(sym))));
+        let within = |of: &Span| of.start <= point && point <= of.end;
+        self.witnesses.iter_attachment(&place).any(|w| {
+            w.span.start <= point
+                && matches!(&w.payload, WitnessPayload::Edge(WitnessAttachment::Join { role: JoinRole::Head, of, .. }) if within(of))
+        })
     }
 
     /// Get the scope struct by ID.
@@ -544,7 +551,7 @@ impl FileAnalysis {
         };
         let primary = match reg.query(&self.witnesses, &q) {
             ReducedValue::Type(t) => Some(t),
-            ReducedValue::FactMap(_) | ReducedValue::None => None,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
         };
         // Fallback for a chain receiver whose class the BUILDER couldn't
         // pin (so `emit_method_call_return_edges` never emitted the
@@ -577,7 +584,7 @@ impl FileAnalysis {
             };
             match reg.query(&self.witnesses, &mq) {
                 ReducedValue::Type(t) => Some(t),
-                ReducedValue::FactMap(_) | ReducedValue::None => None,
+                ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
             }
         });
         resolved.map(|t| {
@@ -621,7 +628,7 @@ impl FileAnalysis {
         };
         match reg.query(&self.witnesses, &q) {
             ReducedValue::Type(t) => Some(t),
-            ReducedValue::FactMap(_) | ReducedValue::None => None,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
         }
     }
 
@@ -690,6 +697,19 @@ impl FileAnalysis {
         // `$f->get_bar()->get_name()`" (the outer call's return) from
         // "the inner receiver `$f->get_bar()`" (which has its own,
         // narrower span).
+        // A call that cannot come back has no return to look up, whichever
+        // call arm below would read one.
+        if !self.refs.calls_starting_at(span.start).is_empty() {
+            let ctx = self.bag_context(module_index);
+            let ends = crate::model::witnesses::query_expr_ends(
+                &self.witnesses,
+                &crate::model::witnesses::WitnessAttachment::Expr(span),
+                Some(&ctx),
+            );
+            if !ends.completes() {
+                return Some(InferredType::Never);
+            }
+        }
         if let Some((recv_idx, kind)) =
             self.refs.call_spanning(span).map(|i| (i, &self.refs[i].kind))
         {
@@ -1242,6 +1262,49 @@ impl FileAnalysis {
     #[allow(dead_code)] // public type-query API; used by tooling/tests
     pub fn sub_return_type(&self, name: &str) -> Option<InferredType> {
         self.sub_return_type_at_arity(name, None)
+    }
+
+    /// How a call to this callable ends, as far as this file states
+    /// (`docs/adr/cfg-tier.md` §Effects). Nothing stated is the top.
+    pub fn symbol_ends(&self, sym_id: SymbolId) -> crate::model::witnesses::Ends {
+        let ctx = self.bag_context(None);
+        crate::model::witnesses::query_ends(
+            &self.witnesses,
+            &crate::model::witnesses::WitnessAttachment::SymbolEffects(sym_id),
+            Some(&ctx),
+        )
+    }
+
+    /// How a call to `sym_id` ends as far as this file alone can tell:
+    /// `None` where a path to one of its ends runs through a call to a
+    /// callable defined elsewhere, which that callable's own file decides.
+    pub fn local_ends(&self, sym_id: SymbolId) -> Option<crate::model::witnesses::Ends> {
+        crate::util::ghost_stats::timed("effect.local_ends", || self.local_ends_inner(sym_id))
+    }
+    fn local_ends_inner(&self, sym_id: SymbolId) -> Option<crate::model::witnesses::Ends> {
+        use crate::model::witnesses::{Callee, WitnessAttachment, WitnessPayload};
+        let mut seen: std::collections::HashSet<SymbolId> = std::collections::HashSet::new();
+        let mut work = vec![sym_id];
+        while let Some(sid) = work.pop() {
+            if !seen.insert(sid) {
+                continue;
+            }
+            for w in self.witnesses.for_attachment(&WitnessAttachment::SymbolEffects(sid)) {
+                let WitnessPayload::Gated { gates, .. } = &w.payload else { continue };
+                for g in gates {
+                    for call in self.witnesses.for_attachment(g) {
+                        match &call.payload {
+                            WitnessPayload::Invoke { callee: Callee::Function { local: Some(s), member_of: None, .. }, .. } => {
+                                work.push(*s)
+                            }
+                            WitnessPayload::Invoke { .. } => return None,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        Some(self.symbol_ends(sym_id))
     }
 
     /// Provenance of a symbol's return type — `Inferred` by default,

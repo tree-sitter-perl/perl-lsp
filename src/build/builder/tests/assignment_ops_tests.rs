@@ -306,3 +306,37 @@ fn a_nested_computed_key_write_types_the_slot_as_a_hash() {
         "{t:?}"
     );
 }
+
+// `delete`, `undef` and `local` leave what they act on without a value: the
+// write `= undef` makes, which no type names, so the place reads untyped
+// after it instead of keeping the value it held.
+#[test]
+fn a_reset_operator_writes_what_assigning_undef_writes() {
+    for target in ["$x", "$h->{k}", "$h{k}", "$a->[0]"] {
+        let decl = match target {
+            "$x" => "my $x = Bar->new;",
+            "$h{k}" => "my %h; $h{k} = Bar->new;",
+            "$a->[0]" => "my $a = [Bar->new];",
+            _ => "my $h = {}; $h->{k} = Bar->new;",
+        };
+        assert_eq!(class(returns(&format!("{decl} return {target};"))).as_deref(), Some("Bar"), "{target}");
+        for reset in [format!("{target} = undef;"), format!("undef {target};"), format!("undef({target});")]
+            .into_iter()
+            .chain((target != "$x").then(|| format!("delete {target};")))
+            .chain((target != "$x").then(|| format!("local {target};")))
+        {
+            let body = format!("{decl} {reset} return {target};");
+            assert_eq!(class(returns(&body)), None, "{body}");
+        }
+    }
+    // A write that does not store a value keeps the key's type.
+    assert_eq!(
+        class(returns("my $h = {}; $h->{k} = Bar->new; my $r = \\$h->{k}; return $h->{k};")).as_deref(),
+        Some("Bar"),
+    );
+    // A reset in a branch may not run, so it opens the shape, not empties the key.
+    assert_eq!(
+        class(returns("my $h = {}; $h->{k} = Bar->new; delete $h->{k} if $_[0]; return $h->{k};")).as_deref(),
+        Some("Bar"),
+    );
+}

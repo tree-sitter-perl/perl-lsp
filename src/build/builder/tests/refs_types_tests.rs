@@ -521,7 +521,166 @@ fn a_rebind_in_a_postfix_condition_is_unconditional() {
     );
     let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(4, 0));
     assert_eq!(at("$x"), Some(InferredType::String));
-    assert_eq!(at("$y"), Some(InferredType::Unknown), "the modified statement may not run");
+    let either = crate::model::file_analysis::join_all(&[InferredType::Numeric, InferredType::String], &crate::model::file_analysis::Unordered);
+    assert_eq!(at("$y"), either, "the modified statement may not run: old or new");
+}
+
+/// Past a branch, a rebound variable is what every arm left it: an `else`
+/// that writes too replaces the old value, an `elsif` chain without one
+/// keeps it as a path.
+#[test]
+fn a_branch_joins_what_its_arms_leave() {
+    let fa = build_fa(concat!(
+        "sub f {\n",
+        "my ($c, $d) = @_;\n",
+        "my $x = 1; my $y = 1; my $z = 1;\n",
+        "if ($c) { $x = 'a' } else { $x = 'b' }\n",
+        "if ($c) { $y = 'a' } elsif ($d) { $y = [] }\n",
+        "if ($c) { $z = 'a' }\n",
+        "return;\n",
+        "}\n",
+    ));
+    let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(6, 0));
+    assert_eq!(at("$x"), Some(InferredType::String), "both arms write a string");
+    let y = at("$y");
+    assert!(matches!(&y, Some(InferredType::Union(u)) if u.len() == 3), "string, array or the old number: {y:?}");
+    let z = at("$z");
+    assert!(matches!(&z, Some(InferredType::Union(u)) if u.len() == 2), "string or the old number: {z:?}");
+    // Inside an arm the arm's own value holds; the sibling arm never sees it.
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(3, 37)), Some(InferredType::String));
+}
+
+/// A loop's head is what enters it or what each pass leaves; past it, what
+/// its failed test or a `last` leaves. A write that reads its own old value
+/// (`$n = $n->parent`) adds nothing the entering value does not.
+#[test]
+fn a_loop_joins_its_entry_its_passes_and_its_exits() {
+    let fa = build_fa(concat!(
+        "package Foo; sub new { bless {}, shift } sub parent { $_[0] }
+",
+        "sub f {
+",
+        "my ($c, $d, @l) = @_;
+",
+        "my $x = Foo->new; my $n = Foo->new; my $y = 1;
+",
+        "while ($c) { my $r = $x; $x = 'a'; $n = $n->parent; }
+",
+        "for my $i (@l) { $y = 'a'; last if $d; $y = []; }
+",
+        "OUTER: for my $i (@l) { for my $j (@l) { $c = []; next OUTER; } }
+",
+        "return;
+",
+        "}
+",
+    ));
+    let union = |n: usize| move |t: &Option<InferredType>| matches!(t, Some(InferredType::Union(u)) if u.len() == n);
+    let head = fa.inferred_type_via_bag("$x", Point::new(4, 22));
+    assert!(union(2)(&head), "the first pass reads the entering Foo, a later one the string: {head:?}");
+    assert!(union(2)(&fa.inferred_type_via_bag("$x", Point::new(5, 0))), "past the loop: either");
+    assert_eq!(
+        fa.inferred_type_via_bag("$n", Point::new(5, 0)),
+        Some(InferredType::ClassName("Foo".into())),
+        "a write of the value's own successor adds nothing"
+    );
+    let y = fa.inferred_type_via_bag("$y", Point::new(6, 0));
+    assert!(union(3)(&y), "never ran (number), left at `last` (string), or ran out (array): {y:?}");
+    let c = fa.inferred_type_via_bag("$c", Point::new(7, 0));
+    assert!(union(2)(&c), "`next OUTER` carries the inner write out through the outer loop: {c:?}");
+}
+
+/// A recurrence that a pass round the loop leaves untyped (`$p = $p->{up}`)
+/// makes the loop's value untyped: the walk up may end at nothing.
+#[test]
+fn a_recurrence_one_pass_leaves_untyped_is_untyped() {
+    let fa = build_fa("package Foo; sub new { bless {}, shift }\nsub f {\nmy $p = Foo->new;\nwhile (defined $p) {\n$p = $p->{up};\n}\nreturn $p;\n}\n");
+    let t = fa.inferred_type_via_bag("$p", Point::new(6, 0));
+    assert!(!matches!(t, Some(InferredType::ClassName(_))), "{t:?}");
+}
+
+/// A state machine (a loop whose arms each step a recurrence) takes one
+/// pass per join, not a pass inside every pass: cost grows with the states,
+/// not exponentially in them.
+#[test]
+fn a_state_machine_loop_takes_one_pass_per_join() {
+    let src = |states: usize| {
+        let mut s = String::from("sub f {\nmy ($o) = @_;\nmy $t; my $u; my $skip; my $s = 0;\nwhile (defined(my $k = $o->next)) {\nif ($s == 0) { if ($k->a) { ++$s; $t = ''; } }\n");
+        for i in 1..states {
+            s.push_str(&format!("elsif ($s == {i}) {{ if ($k->b) {{ $t .= $k->c unless $skip; }} elsif ($k->d) {{ $skip = $k->e; }} elsif ($t eq 'x') {{ ++$s; $u = $t; }} else {{ --$s; $s = 0; }} }}\n"));
+        }
+        s + "}\nreturn $u;\n}\n"
+    };
+    let cost = |states| {
+        let before = crate::model::witnesses::query_rec_bodies();
+        let fa = build_fa(&src(states));
+        for v in ["$t", "$u", "$s", "$skip"] {
+            let _ = fa.inferred_type_via_bag(v, Point::new(states + 5, 0));
+        }
+        crate::model::witnesses::query_rec_bodies() - before
+    };
+        let (short, long) = (cost(4), cost(8));
+    assert!(long < short * 4, "4 states reduced {short} attachments, 8 reduced {long}: superlinear");
+}
+
+/// A loop left where its test fails reads past the test, not inside what
+/// the test proves where it holds.
+#[test]
+fn a_loop_exit_reads_past_its_failed_test() {
+    let fa = build_fa("sub f {\nmy ($h, $n) = @_;\nmy $b;\nwhile (!defined($b) and $n < 9) {\n$b = g($h);\n}\nreturn $b;\n}\n");
+    let t = fa.inferred_type_via_bag("$b", Point::new(6, 0));
+    assert!(!matches!(t, Some(InferredType::Undef)), "the read may have filled it: {t:?}");
+}
+
+/// A step written right after the test starts where "just past the test"
+/// lands: the failed test exits with the head's value, not the step's.
+#[test]
+fn a_loop_exit_reads_short_of_an_abutting_step() {
+    let fa = build_fa("sub f {\nmy ($n) = @_;\nmy $x = undef;\nfor (my $i=0;$i<$n;$i++) { $x = 'a'; }\nreturn $x;\n}\n");
+    let t = fa.inferred_type_via_bag("$x", Point::new(4, 0));
+    assert_ne!(t, Some(InferredType::String), "a loop that never ran leaves it undef: {t:?}");
+}
+
+/// A loop's head join lands where its test starts, and the test's first
+/// read is a use of the joined value, not of what came before it.
+#[test]
+fn a_loop_test_uses_the_value_its_head_joins() {
+    let fa = build_fa("sub f {\nmy ($h) = @_;\nmy $b = '';\nif ($h) { $b = $h->{p}; }\nwhile ($b !~ m/x/) {\nprint 1;\n$b .= 'x';\n}\nreturn;\n}\n");
+    assert_eq!(fa.inferred_type_via_bag("$b", Point::new(5, 0)), Some(InferredType::String));
+}
+
+/// A variable declared in a loop's test is bound afresh each pass, so no
+/// head join reads it from before its declaration; an inner loop's head
+/// join, untyped, yields to its test's use as an untyped write would.
+#[test]
+fn a_loop_test_declaration_is_bound_each_pass() {
+    let fa = build_fa("sub f {\nmy ($s) = @_;\nwhile (my ($a, $t) = $s->row()) {\nwhile ($t =~ /x(.*)/) {\nprint 1;\n$t = g();\n}\n}\n}\n");
+    assert_eq!(fa.inferred_type_via_bag("$t", Point::new(3, 0)), None, "nothing types the row's slot");
+    assert_eq!(fa.inferred_type_via_bag("$t", Point::new(4, 0)), Some(InferredType::String));
+}
+
+/// A ternary's arms are no scopes: the arm after the one that writes
+/// starts from the value entering the ternary.
+#[test]
+fn a_ternary_arm_never_sees_its_siblings_write() {
+    let fa = build_fa("sub f {\nmy ($c) = @_;\nmy $x = 1;\n$c ? ($x = 'a') : ($x + 0);\nreturn;\n}\n");
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(3, 21)), Some(InferredType::Numeric), "the else arm reads the entering value");
+    let past = fa.inferred_type_via_bag("$x", Point::new(4, 0));
+    assert!(matches!(&past, Some(InferredType::Union(u)) if u.len() == 2), "string or the old number: {past:?}");
+}
+
+/// A postfix test runs before the statement it guards, so it reads the
+/// value entering the statement, not the one the statement writes.
+#[test]
+fn a_postfix_test_reads_the_value_before_the_write() {
+    let fa = build_fa("sub f {\nmy $x = 1;\n$x = 'a' unless $x;\nreturn;\n}\n");
+    let x_ref = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "$x" && r.span.start.row == 2)
+        .max_by_key(|r| r.span.start.column)
+        .expect("the test's read");
+    assert_eq!(fa.inferred_type_via_bag("$x", x_ref.span.start), Some(InferredType::Numeric));
 }
 
 /// `&$x` / `&{$x}` call a code ref; `$$x` / `*{$x}` deref a scalar or glob

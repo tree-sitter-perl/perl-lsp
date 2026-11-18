@@ -49,6 +49,8 @@ pub use crate::build::plugin::default_plugin_registry;
 /// A child module so its `impl Builder` methods keep private-field access
 /// while the code lives in its own file (rule #1: still driven by `build()`).
 mod narrowing;
+pub(crate) mod control;
+mod joins;
 
 /// Query-declared plugin capture (`docs/adr/plugin-system.md`):
 /// runs plugin-declared tree-sitter patterns post-walk and dispatches
@@ -582,11 +584,6 @@ struct Builder<'a> {
     /// `FileAnalysis.role_requires`.
     role_requires: std::collections::HashMap<String, Vec<String>>,
 
-    /// Packages with at least one parent edge we could not fold to a
-    /// literal name (runtime-generated roles). Flushed into
-    /// `FileAnalysis.dynamic_parent_packages`.
-    dynamic_parent_packages: std::collections::HashSet<String>,
-
     /// Count of dynamic method-dispatch sites (`$obj->$method(...)`) whose
     /// method name is a scalar, not a bareword. Such a call never becomes a
     /// nameable `MethodCall` ref (the dispatched method is unknown at build
@@ -683,6 +680,15 @@ struct Builder<'a> {
     /// Every rebind, as a write of the whole variable it binds; built with
     /// the narrowing cutoffs, once the FlowEdges are minted.
     rebinds: crate::model::file_analysis::PlaceDisturbanceIndex,
+    /// Every disturbance of a narrowed place's root, from the same survey:
+    /// where a join for a place with steps stops holding.
+    place_disturbances: Option<crate::model::file_analysis::PlaceDisturbanceIndex>,
+    /// What each test proves on its construct's untaken path, and the
+    /// constructs whose tests prove something: read by `assemble_joins`.
+    untaken_proofs: Vec<narrowing::UntakenProof>,
+    guard_seeds: Vec<narrowing::GuardSeed<'a>>,
+    /// Each arm a test narrows, by the place it narrows there.
+    narrowed_arms: std::collections::HashSet<(Place, Span)>,
 
     /// Recognized guard conditions, for the redundant/contradictory-guard
     /// diagnostics (D3/D4). Recorded alongside narrowing emission; moved into

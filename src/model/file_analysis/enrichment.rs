@@ -59,7 +59,7 @@ impl FileAnalysis {
             // Every caller's shape, joined: keyed hashes keep every key any
             // caller passes. Callers that pass no one shape type nothing.
             let agreed = match crate::model::file_analysis::join_all(&shapes, &self.type_order(module_index)) {
-                Some(InferredType::Union(_) | InferredType::Unknown) | None => continue,
+                Some(InferredType::Union(_) | InferredType::Open(_) | InferredType::Unknown) | None => continue,
                 Some(t) => t,
             };
             // Anchored at the parameter's binding token (a write marker at
@@ -987,7 +987,19 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<GuardRedundancy> {
         let mut out = Vec::new();
+        let ctx = self.bag_context(module_index);
         for g in &self.guard_sites {
+            // A guard on a statement that comes back decides nothing past it.
+            if let Some(exit) = g.exit {
+                let ends = crate::model::witnesses::query_expr_ends(
+                    &self.witnesses,
+                    &crate::model::witnesses::WitnessAttachment::Expr(exit),
+                    Some(&ctx),
+                );
+                if ends.completes() {
+                    continue;
+                }
+            }
             let Some(prior) = self
                 .subject_type_at(&g.subject, crate::model::witnesses::ReadPoint::position(g.before_point), module_index)
                 .filter(InferredType::is_known)

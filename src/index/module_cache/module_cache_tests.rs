@@ -59,7 +59,7 @@ fn test_db_save_and_load_roundtrip() {
     save_to_db(&conn, "TestModule", &cached, "import");
 
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
+    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
     let (n, stale) = warm_cache(&conn, &cache, &all_defs, false);
     assert_eq!(n, 1);
     assert!(stale.is_empty());
@@ -100,7 +100,7 @@ fn warm_cache_shares_the_name_keyed_pool_and_excludes_path_keyed_rows() {
     save_to_db(&conn, &ws.to_string_lossy(), &ws_cached, "workspace");
 
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
+    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
     let (n, _stale) = warm_cache(&conn, &cache, &all_defs, false);
 
     assert_eq!(n, 1, "exactly the name-keyed row warms");
@@ -151,7 +151,7 @@ fn test_db_plugin_namespaces_roundtrip() {
     save_to_db(&conn, "TestMojoApp", &cached, "import");
 
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
+    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
     let (n, stale) = warm_cache(&conn, &cache, &all_defs, false);
     assert_eq!(n, 1);
     assert!(stale.is_empty(), "fresh insert should not be stale");
@@ -190,7 +190,7 @@ fn test_db_negative_result_roundtrip() {
     save_to_db(&conn, "Nonexistent::Module", &None, "import");
 
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
+    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
     let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
     assert_eq!(n, 1);
 
@@ -222,7 +222,7 @@ fn test_db_stale_entry_skipped() {
     .unwrap();
 
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
+    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
     let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
     assert_eq!(n, 0, "stale entry should not be loaded");
     assert!(!cache.contains_key("StaleModule"));
@@ -241,14 +241,14 @@ fn test_db_plugin_fingerprint_invalidation() {
     // Same fingerprint → cache survives.
     validate_plugin_fingerprint(&conn, "hash-A").unwrap();
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
+    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
     let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
     assert_eq!(n, 1, "cache should survive identical fingerprint");
 
     // Plugin set changed → cache cleared.
     validate_plugin_fingerprint(&conn, "hash-B").unwrap();
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
+    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
     let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
     assert_eq!(n, 0, "cache should be empty after plugin set change");
 
@@ -256,7 +256,7 @@ fn test_db_plugin_fingerprint_invalidation() {
     save_to_db(&conn, "Bar", &None, "import");
     validate_plugin_fingerprint(&conn, "hash-B").unwrap();
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
+    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
     let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
     assert_eq!(n, 1, "stamp should persist between same-fingerprint runs");
 }
@@ -275,7 +275,7 @@ fn test_db_inc_hash_invalidation() {
 
     validate_inc_paths(&conn, &paths2).unwrap();
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
+    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
     let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
     assert_eq!(n, 0, "cache should be empty after @INC change");
 }
@@ -293,7 +293,7 @@ fn test_db_schema_version_migration() {
 
     init_schema(&conn).unwrap();
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
+    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
     let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
     assert_eq!(n, 0, "old data should be gone after migration");
 }
@@ -359,7 +359,7 @@ fn test_full_file_analysis_survives_roundtrip() {
     save_to_db(&conn, "Fidelity", &Some(Arc::clone(&cached)), "import");
 
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
+    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
     let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
     assert_eq!(n, 1);
 
@@ -405,7 +405,7 @@ fn same_second_same_size_rewrite_invalidates_row() {
         // the regression under test — so retry those instead of asserting.
         if secs(s1) == secs(s2) && s1 != s2 {
             let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
+    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
             let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
             assert_eq!(n, 0, "same-second same-size rewrite must invalidate the row");
             let _ = std::fs::remove_file(&pm);
@@ -444,14 +444,14 @@ fn header_change_invalidates_consumer_row_via_deps_stamp() {
 
     // Unchanged closure → row warms.
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
+    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
     let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
     assert_eq!(n, 1, "row valid while the closure is unchanged");
 
     // Header changes; the consumer file itself does not.
     std::fs::write(&hdr, "#define LIMIT 5\n#define LIMIT2 7\n").unwrap();
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
+    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
     let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
     assert_eq!(n, 0, "header edit must invalidate the consumer's row");
 
@@ -496,13 +496,13 @@ fn input_fingerprint_change_clears_table() {
 
     validate_input_fingerprint(&conn, 0xA).unwrap();
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
+    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
     let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
     assert_eq!(n, 1, "same inputs: cache survives");
 
     validate_input_fingerprint(&conn, 0xB).unwrap();
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
+    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
     let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
     assert_eq!(n, 0, "changed inputs: table cleared");
 }

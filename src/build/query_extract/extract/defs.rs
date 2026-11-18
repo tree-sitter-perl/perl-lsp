@@ -78,7 +78,7 @@ pub(super) fn binding_scopes(st: &ExtractState, e: &Event) -> Vec<ScopeId> {
         .on(e)
         .filter(|t| t.match_id == e.match_id)
         .filter_map(|t| match t.cap {
-            Capture::Def { kind, part: DefPart::Name } => Some(st.def_scope(kind, e.match_id)),
+            Capture::Def { kind, part: DefPart::Name } => Some(st.def_scope(kind)),
             _ => None,
         })
         .collect();
@@ -119,7 +119,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         st.minted[n].declares = true;
     }
     let qualifier = mine(Capture::Qualifier);
-    let scope = st.def_scope(kind, e.match_id);
+    let scope = st.def_scope(kind);
     // The owner the syntax states: an out-of-line def's qualifier names its
     // owning class, overriding the enclosing-namespace context; a def in a
     // class's own scope is that class's, by the identity the member
@@ -222,6 +222,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             Capture::Space { id, .. } => Some(id),
             _ => None,
         }),
+        never_returns: on_name.iter().any(|t| t.cap == Capture::EndsNever),
     };
     match through {
         Some(receiver) => st.out.slot_writes.push(SlotWrite { symbol, receiver }),
@@ -271,11 +272,13 @@ pub(super) fn names_relative(ad: &Adorned, t: &Event) -> Option<RelativeClass> {
 /// a write declares its name only when no declaration the write reaches
 /// (`write_lookup_chain`) is in force there — a parameter, an earlier
 /// write, the variable around a closure that captures it. The declaration
-/// is its callable's (or, outside any callable, the file's), so every use
-/// in the body reaches it whatever the order. Every other write is a
-/// `var_writes` row of the declaration it reaches.
+/// is filed where the write chain ends: the write's callable (or, outside
+/// any callable, the file), or past it through a capture by reference
+/// (`use (&$x)` declares in the function around the closure, `global` in
+/// the file), so every use in the body reaches it whatever the order.
+/// Every other write is a `var_writes` row of the declaration it reaches.
 pub(super) fn unify_assigned(st: &mut ExtractState) {
-    use crate::model::file_analysis::{callable_reach, latest_in_force, write_lookup_chain, InView, ScopeId, SymKind, VariableDecl};
+    use crate::model::file_analysis::{latest_in_force, write_lookup_chain, InView, ScopeId, SymKind, VariableDecl};
     let out = &mut st.out;
     if !out.symbols.iter().any(|s| s.kind == DefCap::Assigned) {
         return;
@@ -306,7 +309,7 @@ pub(super) fn unify_assigned(st: &mut ExtractState) {
             keep[i] = false;
             out.var_writes.push((s.name.clone(), s.scope, Span { start: s.name_start, end: s.name_end }));
         } else {
-            let home = callable_reach(&out.scopes, s.scope).last().unwrap_or(s.scope);
+            let home = chain.scopes().last().unwrap_or(s.scope);
             decls.entry(s.name.clone()).or_default().push((home, decl(s.name_start, true)));
             out.symbols[i].scope = home;
         }

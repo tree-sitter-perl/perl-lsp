@@ -423,7 +423,13 @@ impl FileAnalysis {
         policy: ReceiverPolicy,
     ) -> ReceiverClasses {
         let (classes, source) = match r.frozen_receiver().filter(|f| f.answers_for(ReceiverView::of(module_index), policy)) {
-            Some(f) => (f.targets().iter().map(|t| t.invocant_class().to_string()).collect(), f.source),
+            Some(f) => {
+                let mut classes: ReceiverClasses = f.targets().iter().map(|t| t.invocant_class().to_string()).collect();
+                if f.is_open() {
+                    classes.mark_open();
+                }
+                (classes, f.source)
+            }
             None => self.resolve_receiver_shared(r, module_index),
         };
         match (policy, source) {
@@ -516,7 +522,12 @@ impl FileAnalysis {
         t: &InferredType,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> ReceiverClasses {
-        t.receiver_arms().iter().filter_map(|arm| self.dispatch_class_of(arm, module_index)).collect()
+        let mut classes: ReceiverClasses =
+            t.receiver_arms().iter().filter_map(|arm| self.dispatch_class_of(arm, module_index)).collect();
+        if t.is_open() {
+            classes.mark_open();
+        }
+        classes
     }
 
     /// Resolve a DBIC source moniker (`Artist`) to the FQ result class

@@ -144,6 +144,7 @@ fn narrow_looks_through_a_bare_block() {
     let narrows = [
         ("unless ($x->isa('Widget')) { warn 'x'; { return; } }", "a bare block that returns"),
         ("if ($x->isa('Widget')) { warn 'w'; } else { { { die 'n'; } } }", "nested bare blocks in an else"),
+        ("unless ($x->isa('Widget')) { { return; last; } }", "a `last` only reached past the leave"),
     ];
     for (chain, why) in narrows {
         let src = src_of(chain);
@@ -167,9 +168,9 @@ fn narrow_looks_through_a_bare_block() {
 
 #[test]
 fn narrow_after_a_loop_whose_body_always_leaves() {
-    // A body that always leaves never comes back to the test, so the loop
-    // is left only where its first test fails. A `last`, `next` or `redo`
-    // in it, or a body that falls through, says nothing after the loop.
+    // A loop is left where its test fails, and where a `last` aimed at it
+    // runs. With no such `last`, every way out is a failed test, whatever
+    // the body does: falls through, `next`s, or leaves.
     let widget = Some(InferredType::ClassName("Widget".into()));
     let src_of = |chain: &str| format!("package P;\nsub f {{\n    my ($x, $y) = @_;\n    {chain}\n    $x->layout;\n}}");
     let narrows = [
@@ -177,6 +178,10 @@ fn narrow_after_a_loop_whose_body_always_leaves() {
         ("until ($x->isa('Widget')) { warn 'x'; die 'n'; }", "until"),
         ("while (!$x->isa('Widget')) { if ($y) { return; } else { die 'y'; } }", "a chain whose every arm leaves"),
         ("for (; !$x->isa('Widget'); ) { return; }", "a C-style for"),
+        ("while (!$x->isa('Widget')) { warn 'x'; }", "a body that falls through"),
+        ("while (!$x->isa('Widget')) { next if $y; return; }", "a `next` goes back to the test"),
+        ("while (!$x->isa('Widget')) { for my $z (@$y) { last; } return; }", "a `last` an inner loop owns"),
+        ("L: while (!$x->isa('Widget')) { return; }", "a labelled loop"),
     ];
     for (chain, why) in narrows {
         let src = src_of(chain);
@@ -184,11 +189,8 @@ fn narrow_after_a_loop_whose_body_always_leaves() {
         assert_eq!(fa_type_at(&src, "$x", Point::new(row, 4)), widget, "{why}");
     }
     let nothing = [
-        ("while (!$x->isa('Widget')) { warn 'x'; }", "a body that falls through"),
         ("while (!$x->isa('Widget')) { last if $y; return; }", "a `last` before the exit"),
-        ("while (!$x->isa('Widget')) { next if $y; return; }", "a `next` before the exit"),
-        ("while (!$x->isa('Widget')) { for my $z (@$y) { last; } return; }", "a `last` an inner loop owns"),
-        ("L: while (!$x->isa('Widget')) { return; }", "a labelled loop"),
+        ("L: while (!$x->isa('Widget')) { for my $z (@$y) { last L; } }", "a `last` naming the loop"),
     ];
     for (chain, why) in nothing {
         let src = src_of(chain);
@@ -395,10 +397,13 @@ fn a_defined_region_is_an_edge_to_its_read() {
         .all()
         .iter()
         .find_map(|w| match (&w.attachment, &w.payload) {
-            (WitnessAttachment::Place(_), WitnessPayload::Projected { base: WitnessAttachment::Expr(read), step: ProjectionStep::Defined }) => Some(*read),
+            (
+                WitnessAttachment::Place(_) | WitnessAttachment::Join { .. },
+                WitnessPayload::Projected { base: WitnessAttachment::Expr(read), step: ProjectionStep::Defined },
+            ) => Some(*read),
             _ => None,
         })
-        .expect("the guard's region is a Defined projection");
+        .expect("what the guard proves past the exit is a Defined projection");
     assert_eq!((read.start.row, read.start.column), (4, 26), "its base is `$r` as `defined` reads it");
     assert!(
         fa.witnesses.for_attachment(&WitnessAttachment::Expr(read)).iter().next().is_some(),
@@ -466,12 +471,18 @@ fn a_postfix_condition_key_is_owned_by_the_value_it_reads() {
 
 #[test]
 fn a_callable_in_a_postfix_condition_runs_when_called() {
-    // The sub body runs when it is called, not before the statement, so its
-    // read is not skipped past the statement's write.
+    // The sub is made before the statement runs and its body runs when it
+    // is called: before the statement's write (`first` calls it at once) or
+    // after it (a callback kept for later).
     let fa = build_fa(
         "package P;\nsub u {\n    my $o = Foo->new;\n    $o = Bar->new if first(sub { $o->alive });\n}",
     );
-    assert_eq!(invocant_class_of(&fa, "alive").as_deref(), Some("Bar"));
+    let read = fa.inferred_type_via_bag("$o", Point::new(3, 33));
+    let names = |arms: &[InferredType]| arms.iter().filter_map(|a| a.class_name().map(str::to_string)).collect::<Vec<_>>();
+    assert!(
+        matches!(&read, Some(InferredType::Union(arms)) if names(arms) == ["Bar", "Foo"]),
+        "got {read:?}"
+    );
 }
 
 #[test]
@@ -1149,7 +1160,7 @@ fn a_write_inside_a_loop_body_widens_the_read_after_it() {
 #[test]
 fn a_typed_write_in_a_block_types_the_block_and_widens_what_follows() {
     // Inside the block, after the write, the value IS the RHS. Past the
-    // block it is old-or-new.
+    // `if` it is either: the join of the arm's Foo and the bypass's String.
     let fa = build_fa(
         "package P;\nsub m {\n  my $x = 'str';\n  if (c()) {\n    $x = Foo->new;\n    my $i = $x;\n  }\n  my $o = $x;\n}\n1;\n",
     );
@@ -1160,8 +1171,11 @@ fn a_typed_write_in_a_block_types_the_block_and_widens_what_follows() {
     );
     assert_eq!(
         fa.inferred_type_via_bag("$x", Point::new(7, 11)),
-        Some(InferredType::Unknown),
-        "a read past the block sees neither the stale String nor a Foo that may not have happened",
+        crate::model::file_analysis::join_all(
+            &[InferredType::ClassName("Foo".into()), InferredType::String],
+            &crate::model::file_analysis::Unordered,
+        ),
+        "a read past the `if` is the old String or the arm's Foo",
     );
 }
 
@@ -1400,6 +1414,172 @@ fn a_low_precedence_not_and_and_narrow_like_their_symbols() {
     assert_eq!(at(6, 4), foo, "`return if not` narrows the remainder");
 }
 
+/// What an exit leaves standing reaches past the block it sits in, one
+/// construct at a time: the branch around it joins only the arms that come
+/// out, and the top level of a file narrows like any block.
+#[test]
+fn an_exit_narrows_past_its_block_through_each_join() {
+    let maybe = "sub maybe { return undef unless 1; return Foo->new; }\n";
+    let foo = Some(InferredType::ClassName("Foo".into()));
+    let nested = format!(
+        "package P;\n{maybe}sub f {{\n    my ($c) = @_;\n    my $r = maybe();\n    if ($c) {{ return unless defined $r; }} else {{ die 'no'; }}\n    $r->go;\n}}"
+    );
+    assert_eq!(fa_type_at(&nested, "$r", Point::new(6, 4)), foo, "both ways out of the `if` leave $r defined");
+    let one_way = format!(
+        "package P;\n{maybe}sub f {{\n    my ($c) = @_;\n    my $r = maybe();\n    if ($c) {{ return unless defined $r; }}\n    $r->go;\n}}"
+    );
+    assert_ne!(fa_type_at(&one_way, "$r", Point::new(6, 4)), foo, "the untaken `if` keeps the undef");
+    let top = format!("package P;\n{maybe}my $r = maybe();\ndie 'no' unless defined $r;\n$r->go;\n");
+    assert_eq!(fa_type_at(&top, "$r", Point::new(4, 0)), foo, "a file's top level is a block like any other");
+}
+
+/// The path a statement modifier skips carries what its test proves, so
+/// a default written where the value is missing leaves no missing value.
+#[test]
+fn the_untaken_path_carries_what_the_test_proves() {
+    let fa = build_fa(
+        "package P;\nsub maybe { return undef unless 1; return Foo->new; }\nsub f {\n    my $r = maybe();\n    $r = Foo->new unless defined $r;\n    $r->go;\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$r", Point::new(5, 4)), Some(InferredType::ClassName("Foo".into())));
+}
+
+/// An arm that leaves is no way into the join past its branch.
+#[test]
+fn a_leaving_arm_is_no_arm_of_the_join() {
+    let fa = build_fa("sub f {\nmy ($c) = @_;\nmy $x = 1;\nif ($c) { $x = 'a' } else { return }\nreturn $x;\n}\n");
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 7)), Some(InferredType::String));
+    let fa = build_fa("sub f {\nmy ($c) = @_;\nmy $x = 1;\nif ($c) { $x = 'a' } elsif ($x) { die 'x' }\nreturn $x;\n}\n");
+    let x = fa.inferred_type_via_bag("$x", Point::new(4, 7));
+    assert!(matches!(&x, Some(InferredType::Union(u)) if u.len() == 2), "the implicit else still comes out: {x:?}");
+}
+
+/// A place's exit narrowing is a join too, and holds past the branch
+/// around it where every way out narrows it.
+#[test]
+fn a_place_narrows_past_its_block_through_each_join() {
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($self, $c) = @_;\n    if ($c) { return unless $self->{h}->isa('Foo'); } else { return; }\n    $self->{h}->go;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "go").as_deref(), Some("Foo"));
+}
+
+/// The test of `return … if G` runs before its arm, so it reads what the
+/// arm's own narrowing never reaches: the write ahead of the statement.
+#[test]
+fn a_postfix_guard_closing_an_arm_reads_the_write_before_it() {
+    let src = "package P;\nsub f {\n    my ($h) = @_;\n    my $buf;\n    if ($h) {\n        $buf = 1;\n    } else {\n        $buf = bar($h);\n        return 1 if !defined($buf);\n    }\n    $buf;\n}";
+    assert_ne!(fa_type_at(src, "$buf", Point::new(8, 29)), Some(InferredType::Undef));
+}
+
+/// An arm closed by `X = … if G` comes out written or untouched: where G
+/// fails, the value read is the one from before the statement.
+#[test]
+fn an_arm_closed_by_a_postfix_write_may_come_out_untouched() {
+    let src = "package P;\nsub f {\n    my ($c, $x, $y) = @_;\n    my $ret;\n    if ($c) {\n        $ret = 'a' if $x;\n    } else {\n        $ret = 'b' if $y;\n    }\n    $ret;\n}";
+    assert_ne!(fa_type_at(src, "$ret", Point::new(9, 4)), Some(InferredType::String));
+}
+
+/// A path where `defined` failed carries the value the test read, though
+/// nothing says what it is: the join is then no type, never the other arm.
+#[test]
+fn a_defined_path_of_an_untyped_value_keeps_the_join_untyped() {
+    let src = "package P;\nsub f {\n    my ($s) = @_;\n    my $j = $s->read;\n    if (!defined $j) {\n        $j = undef if $s;\n    }\n    $j;\n}";
+    assert_ne!(fa_type_at(src, "$j", Point::new(7, 4)), Some(InferredType::Undef));
+}
+
+/// A write in one arm of a chain never reaches a later arm, whatever closes
+/// the arm it sits in.
+#[test]
+fn a_write_in_an_arm_closed_by_a_branch_stays_out_of_later_arms() {
+    let src = "package P;\nsub f {\n  my ($name, $v) = @_;\n  if ($name eq 'a') {\n    $v = '' if !defined($v);\n    if ($v eq '1') {\n      foo(1);\n    } else {\n      foo(2);\n    }\n  } elsif ($name eq 'b') {\n    if (defined $v) {\n        foo(3);\n    }\n  }\n  return;\n}";
+    assert_ne!(fa_type_at(src, "$v", Point::new(11, 8)), Some(InferredType::String));
+}
+
+/// A bare call word still holds what it calls: `\&{"$m\::f"}` reads `$m`.
+#[test]
+fn a_bare_call_word_keeps_the_refs_inside_it() {
+    let fa = build_fa("sub s {\n my $module = shift;\n *{\"JSON::is_bool\"} = \\&{\"$module\\::is_bool\"};\n}\n");
+    assert!(fa.refs().iter().any(|r| r.span.start == Point::new(2, 26)), "the `$module` inside the code deref has a ref");
+}
+
+
+/// A body that runs later reads a captured variable as it may stand when
+/// it runs: the narrowing at its creation is one path, a later write another.
+#[test]
+fn a_closure_read_sees_writes_after_its_creation() {
+    let src = "package P;\nsub f {\n    my ($p) = @_;\n    if (ref $p eq 'HASH') {\n        my $c = sub { $p };\n        $p = [];\n        $c->();\n    }\n}";
+    let t = fa_type_at(src, "$p", Point::new(4, 22));
+    assert_ne!(t, Some(InferredType::HashRef), "{t:?}");
+}
+
+#[test]
+fn a_closure_read_sees_a_rebinding_after_its_creation() {
+    let src = "package P;\nsub f {\n    my $x = 'a';\n    my $c = sub { $x };\n    $x = 42;\n    $c->();\n}";
+    let t = fa_type_at(src, "$x", Point::new(3, 18));
+    assert_ne!(t, Some(InferredType::String), "{t:?}");
+    assert!(t.is_some(), "both paths are typed: {t:?}");
+}
+
+/// Nothing can change a capture nobody writes after the body is made, so
+/// the body reads it as it stood, narrowing included.
+#[test]
+fn a_closure_read_of_an_unwritten_capture_keeps_its_narrowing() {
+    let src = "package P;\nsub f {\n    my ($p) = @_;\n    if (ref $p eq 'HASH') {\n        my $c = sub { $p };\n        $c->();\n    }\n}";
+    assert_eq!(fa_type_at(src, "$p", Point::new(4, 22)), Some(InferredType::HashRef));
+}
+
+/// A closure's write reaches the variable wherever the closure is called,
+/// so past its making the variable may hold either value, never no type.
+#[test]
+fn a_closure_write_joins_the_outer_value() {
+    let src = "package P;\nsub f {\n    my $x = 'a';\n    my $c = sub { $x = 42 };\n    $c->();\n    my $y = $x;\n}";
+    let t = fa_type_at(src, "$x", Point::new(5, 13));
+    assert!(matches!(t, Some(InferredType::Union(_))), "{t:?}");
+    // Before the closure is made nothing can have run it.
+    assert_eq!(fa_type_at(src, "$x", Point::new(3, 4)), Some(InferredType::String));
+}
+
+/// Inside the body its own writes stand in order.
+#[test]
+fn a_closure_reads_its_own_write() {
+    let src = "package P;\nsub f {\n    my $x = 'a';\n    my $c = sub { $x = 42; my $z = $x; };\n    $c->();\n}";
+    assert_eq!(fa_type_at(src, "$x", Point::new(3, 35)), Some(InferredType::Numeric));
+}
+
+/// A named sub exists before its text runs: its writes reach the variable
+/// from the binding on, and it reads every write.
+#[test]
+fn a_named_sub_reaches_its_variable_from_the_binding() {
+    let src = "package P;\nmy $x = 'a';\nmy $y = $x;\nsub set { $x = 42 }\nsub get { return $x }\n1;";
+    let t = fa_type_at(src, "$x", Point::new(2, 8));
+    assert!(matches!(t, Some(InferredType::Union(_))), "read before the sub's text: {t:?}");
+    let t = fa_type_at(src, "$x", Point::new(4, 17));
+    assert!(matches!(t, Some(InferredType::Union(_))), "read in another sub: {t:?}");
+}
+
+/// A value a loop changes on every pass is every value the passes reach,
+/// not only the first pass's: `$n = $n->next` round a cycle of three
+/// classes holds all three past the loop.
+#[test]
+fn a_loop_carried_value_reaches_its_fixed_point() {
+    let src = "package A;\nsub new { bless {}, shift }\nsub next { return B->new }\npackage B;\nsub new { bless {}, shift }\nsub next { return C->new }\npackage C;\nsub new { bless {}, shift }\nsub next { return A->new }\npackage P;\nsub f {\n    my ($k) = @_;\n    my $n = A->new;\n    while ($k--) {\n        $n = $n->next;\n    }\n    return $n;\n}\n";
+    let t = fa_type_at(src, "$n", Point::new(16, 11));
+    let InferredType::Union(arms) = t.clone().expect("typed") else { panic!("{t:?}") };
+    let names: Vec<_> = arms.iter().filter_map(|a| a.class_name().map(str::to_string)).collect();
+    assert!(["A", "B", "C"].iter().all(|c| names.iter().any(|n| n == c)), "{t:?}");
+}
+
+/// A read inside the loop that the recurrence runs through reaches the
+/// same fixed point as a read past it.
+#[test]
+fn a_read_inside_a_loop_reaches_the_fixed_point() {
+    let src = "package A;\nsub new { bless {}, shift }\nsub next { return B->new }\npackage B;\nsub new { bless {}, shift }\nsub next { return C->new }\npackage C;\nsub new { bless {}, shift }\nsub next { return A->new }\npackage P;\nsub f {\n    my ($k) = @_;\n    my $n = A->new;\n    while ($k--) {\n        my $m = $n->next;\n        $n = $m;\n    }\n    return $n;\n}\n";
+    let t = fa_type_at(src, "$m", Point::new(15, 13));
+    let InferredType::Union(arms) = t.clone().expect("typed") else { panic!("{t:?}") };
+    let names: Vec<_> = arms.iter().filter_map(|a| a.class_name().map(str::to_string)).collect();
+    assert!(["A", "B", "C"].iter().all(|c| names.iter().any(|n| n == c)), "{t:?}");
+}
+
 // ── Type::Tiny check functions (frameworks/type-tiny.rhai `type_check_functions`) ──
 
 #[test]
@@ -1578,4 +1758,13 @@ fn assert_valid_narrows_the_rest_of_the_block() {
         "package P;\nuse Types::Standard qw(Str);\nsub f {\n    my ($x) = @_;\n    Str->assert_valid($x);\n    my $v = $x;\n}",
     );
     assert_eq!(fa.inferred_type_via_bag("$x", Point::new(5, 13)), Some(InferredType::String));
+}
+
+/// A join where one path holds a value nothing names keeps what the other
+/// path holds as a possibility (`String|…`), never the whole answer and
+/// never nothing at all.
+#[test]
+fn a_join_with_an_untyped_path_keeps_the_typed_one_open() {
+    let src = "package P;\nsub f {\n    my ($s) = @_;\n    my $x = 'a';\n    if ($s) {\n        $x = $s->read;\n    }\n    $x;\n}";
+    assert_eq!(fa_type_at(src, "$x", Point::new(7, 4)), Some(InferredType::Open(Box::new(InferredType::String))));
 }

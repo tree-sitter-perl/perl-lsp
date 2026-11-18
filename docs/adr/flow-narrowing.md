@@ -112,31 +112,43 @@ the scope walk stops on it (a shadowed inner `$x` with its belief gone
 never answers with the outer's), and consumers ask the value
 (`InferredType::is_known()`) rather than matching the variant.
 
-A rebind that may not run is old-or-new no matter what its RHS is, and
-lands as `Unknown` outright. "May not run" is asked at two granularities,
-both spelled once in `cst.rs` (`cst::conditional_arm`, one climb, two
-`ArmBound`s). The climb is exact: a condition, a loop list, a `for`
-initialiser and a short-circuit's left operand run whenever their construct
-does, so only the arm that may be skipped counts.
+A rebind that may not run leaves its variable old-or-new where the paths
+rejoin, and a join says exactly that: past a branch whose arm writes it, the
+variable holds the join of what every path left it (`docs/adr/cfg-tier.md`).
+Every language mints the joins once, from its control document and its
+bound writes: the Perl builder (`Builder::assemble_joins`, over
+`queries/perl/ctl.scm`) and a pack's assembled analysis
+(`FileAnalysis::assemble_joins`, over the `@ctl` captures of its skeleton
+document, after its facts are bound). Both read one plan of the document
+(`JoinPlan`), so a branch means the same in every language:
 
-- **Relative to the block the witness lands on**
-  (`ArmBound::Block`): a statement modifier, a
-  ternary arm, a short-circuit. `$x = undef if COND` anchors at the
-  statement start, so the guard's own condition reads no value the write
-  has not produced, and the successor reads no value it may never
-  produce. The block's own `if`/loop does not count — inside the block,
-  the block has run, so `if (…) { $x = Foo->new; $x->m }` still types
-  the call.
-- **Relative to the variable's binding scope.** A write inside a nested
-  block sits on the block's scope, which a read after the block never
-  walks through, so that read would keep the pre-block belief. The honest
-  answer there is `old ⊔ new`, and no reducer can compute it: a reducer
-  sees ONE attachment, and the write landed on the block's. So the fold
-  stands in for the join and puts a reset marker on the binding scope —
-  the one every later read in the variable's extent walks through.
-  **This is an approximation of a join and is deleted when Epic 16's
-  `JoinFold` lands** (`docs/epics/16-cfg-tier.md`, Phase C); its anchor
-  is in that epic's table.
+- **Past the construct**, a `Reset` and an `Edge(Join)` on the variable, held
+  to the scope the construct sits in. Each arm that falls through is one
+  `Edge(Place)` read where the arm leaves; a construct with no arm for one
+  side of its test adds the bypass, read where the construct is entered. An
+  `elsif` chain is one construct, and so is a branch that closes an arm (the
+  last statement of a python block). `JoinFold` joins the arms, and one arm
+  the chase cannot type leaves the join untyped (`Unknown`).
+- **Each arm begins from the value entering its construct**
+  (`JoinRole::ArmStart`): read past the test, or at the construct's start when
+  the test runs after what it guards (`$x = f() unless $x`, whose test sees
+  the entering value too). The first arm to run needs no entry, since the
+  test leaves the variable as it entered; an entry is a reset, and a reset
+  to an untyped value outranks a later use's evidence. So a sibling arm never sees a write, whether or
+  not the language makes an arm a scope (Python's and PHP's do not, nor does
+  any language's ternary or short circuit).
+- A path on which the variable is not yet bound (a python name first
+  assigned in one arm) reaches no read of it: it adds no bypass and no entry.
+- Inside an arm the arm has run, so `if (…) { $x = Foo->new; $x->m }` still
+  types the call.
+
+A loop joins its entry and each pass at its head, and past it where its
+test fails and each `break` (`docs/adr/cfg-tier.md` §Loops). Two cases
+still stand in a reset marker (an untyped join) where their joins are not
+built yet: a block no construct runs conditionally (a bare block, `eval`, a
+`map` callback). A write inside a callable to a variable outside it
+reaches the variable past the callable's making as a `MayBe`
+(`docs/adr/cfg-tier.md` §Later-running bodies).
 
 An **observation** is the other half of the same question: a use of a
 variable or place that reveals what it holds — any deref (`@$x`, `$$x{k}`,
@@ -146,13 +158,13 @@ what the subject holds on the paths that reach it. Every use reaches the
 bag through one producer, `Builder::observe`, as a `TypeObservation` —
 evidence, which a value and a class identity outrank, never a proof. Its
 region is the narrowing rule's: from the use to the end of the
-conditionally-run arm around it (`cst::conditional_arm`: the statement a
-postfix modifier guards, a ternary branch, a short-circuit RHS), else to
+conditionally-run arm around it (`control::arm_around`, the arms
+`queries/perl/ctl.scm` declares: the statement a postfix modifier guards,
+a ternary branch, a short-circuit RHS), else to
 the end of its block, cut at the subject's next rebind
 (`RegionFact::Observe`, sharing `PendingNarrow`'s cutoffs, place subjects
-included). Past an arm the value is a join of the arm and its bypass,
-which `JoinFold` will answer; until then the arm says nothing outside
-itself.
+included). Past an arm an observation says nothing: unlike a write, it
+mints no join.
 
 Declarations do not mint a marker, and that is placement rather than
 principle: a declaration's companions may legitimately sit before it (a
@@ -252,14 +264,8 @@ the same way once its analysis is assembled and bound
 bindings to key them by.
 
 **A fact made in a nested block is a region.** It holds from where it is made
-to the end of the block it was made in, so the else arm never sees the then
-arm's write, and past the `if` the write is gone. What the variable holds
-after the `if` is the join of "the write ran" and "it did not": a write in a
-nested block also mints a reset marker on each enclosing level, at the end
-of the statement holding that level, up to the binding. With no join of
-values, that marker reads `Unknown` after a write that may have run, the
-same answer the flat walk gave. A join that keeps the value both arms agree
-on is `JoinFold`'s job (`docs/prompt-cfg-tier.md`).
+to the end of the block it was made in, so past the block only a join (or a
+reset marker, where none is built yet) speaks for it.
 
 A key write (`$h->{k} = …`) in a nested block extends the shape on the
 binding with no end: it opens the shape instead (`mutation_extension`), which
@@ -303,46 +309,32 @@ by G TRUE and B by G FALSE, `G && R` / `G and R` narrow R by G TRUE, and
 A loop tests its condition before every run of its body, so the body is
 an arm too: `while (G)`, `STMT while G` and a C-style `for (…; G; …)`
 narrow by G TRUE, `until` by G FALSE. `do BLOCK while G` is the one
-exception — perlsyn runs the block once before the first test. A loop
-whose block always leaves never comes back to its test, so it is left only
-where its first test fails, and the rest of the enclosing block narrows as
-after an `if` with no `else` (`while (!$x->isa('Foo')) { return }`). Any
-other loop narrows nothing after it: a `last` leaves with G unchanged, and
-a body that falls through leaves G as its last test found it, which is the
-CFG's loop join (`TODO(cfg-exit-join)`). When STMT is an exit, the
-rest of the block is the fall-through and takes the opposite polarity.
-Only the fall-through records a `GuardSite`, so the D3/D4 redundancy
-diagnostics see each statement-level guard once.
+exception — perlsyn runs the block once before the first test. Nothing
+narrows after a loop, since `last` leaves with G unchanged.
 
-"Falls through" is a fact about statements. A block leaves when any of
-its statements leaves, wherever that statement sits, and what follows it
-there is dead: a statement leaves when it is an exit, or when it is an
-`if`/`unless` chain with an `else` whose every arm leaves, or a bare
-block that leaves (`block_leaves`). A bare block is a loop that runs once
-(perlsyn), so it leaves only where no `last`/`next`/`redo` in it can reach
-it, the same test a loop's block takes (`loop_block_leaves`, conservative:
-loop control anywhere inside counts, even one an inner loop owns). A chain
-with no `else` has an implicit one, which falls through. The block a
-statement-level guard narrows the rest of is the statement's own: a sub's
-or a construct's block, a bare block, or the file's top level, so a
-script's `die unless $cfg;` narrows the rest of the script. After a chain whose arms all leave but one, the rest of the
-enclosing block runs where that arm does, through the same
-`narrow_block_remainder`, narrowed as that arm's block is: the first
-arm where its block is entered, an `elsif` where its own guard holds and
-every earlier arm was not entered, the `else` where no earlier arm was
-(`unless ($x->isa('Foo')) { return }`, `if ($x->isa('Foo')) { … } else
-{ die }`, `if (!defined $x) { die; warn … }`). Each arm's guard is recorded once,
-as the arm's. Where no arm falls through, the rest of the block never
-runs and nothing narrows it; where two or more do, the rest runs where
-any of them does, and nothing narrows past the enclosing block either:
-both are the CFG's block-exit join (`docs/prompt-cfg-tier.md` §3.5,
-`TODO(cfg-exit-join)`). An exit is a word read by its spelling
-(`is_exit_expression`'s table: `return`, `die`, `exit`, `croak`,
-`confess`, `last`, `next`, `redo`, `goto`), so a file's own sub named
-`croak` counts as one, and so does a `goto` whose label lies in the rest
-of the block; a callee that never returns is an effect on the callee,
-which replaces the table once effects and the CFG exist
-(`TODO(noreturn-callee)`).
+What a test proves reaches past its construct through the construct's
+join (`docs/adr/cfg-tier.md`), never through a region of its own. An arm
+control never comes out of is no way into the join: one holding a
+statement that leaves with no arm between them (`@ctl.leave.*`, or a call
+the effect lane says does not come back), or one holding a chain with an
+`else` whose every arm leaves. The path on which no arm runs (the implicit `else`, the
+statement a modifier skips, the right side a short-circuit skips) carries
+what the test proves there, sited where the test leaves control: the
+first arm where its block is entered, an `elsif` where its own guard
+holds and every earlier arm was not entered, the implicit `else` where no
+arm was. So `return unless $x->isa('Foo')`, `if ($x->isa('Foo')) { … }
+else { die }` and `$x = Foo->new unless defined $x` all leave `$x` a
+`Foo`. A test writes nothing, so its join holds as a region from past the
+construct to the end of the scope around it, cut at the subject's next
+rebind or disturbance, and where it answers nothing the value coming in
+still stands. It is minted only where some path is gone and every path
+out carries a proof (an arm the test narrows, a proved untaken path, or an
+arm holding a construct already joined for the place), so each branch
+around it carries the narrowing on out where every way out of that branch
+does too, and the top level of a file narrows like any block. Only an
+exit guard records a `GuardSite` for a statement modifier or a bare
+logical, so the D3/D4 redundancy diagnostics see each statement-level
+guard once.
 
 A pack's document states its guards in three parts, and the extractor
 (`query_extract/extract/narrowing.rs`) joins them by containment, the
@@ -352,45 +344,30 @@ its subject (`@narrow.var`) and what it proves on the atom's node:
 it fails), `@narrow.set` (a value where it holds, the null value where it
 fails) or `@narrow.unset` (the swap). A **connective** is a node marked
 `@narrow.not`, `@narrow.and`, `@narrow.or` or `@narrow.group` (a
-parenthesis). A **position** match marks a condition `@narrow.cond` and
-what it decides: `@narrow.then` runs where it holds, `@narrow.else` where
+parenthesis). A **position** match marks a condition `@ctl.cond` and
+what it decides: `@ctl.then` runs where it holds, `@ctl.else` where
 it fails. An `else` arm is the statement it holds, so a later clause of
 the chain (`elseif`, `elif`, C++'s `else if`) is the else arm of the
-condition before it. `@narrow.loop` marks a position's construct that
-tests its condition again after each run of its arm (the `while` of PHP,
-Python and C++): its implicit `else` is where a test fails, and its arm
-leaves only where it leaves and no `@flow.to_loop` statement in it
-(`break`, `continue`) can go to the loop. That is checked conservatively,
-by containment alone, so one an inner loop or a C++ `switch` owns counts
-too. So a loop whose body always leaves narrows the rest of the block by
-its condition failing, and any other narrows nothing after it. A
-`@flow.block` statement (PHP's and C++'s bare `{ … }`) runs its
-statements in sequence where it stands, so an arm looks through it for
-one that leaves. A short-circuit written as a statement (PHP's `G ||
-throw …`, `G or die`) decides only the arm on its right; a match naming
-the expression statement around it `@narrow.stmt` makes that statement
-the chain's, and a condition with no `then` arm has an implicit one where
-it holds, as one with no `else` has one where it fails. The fall-through
-derivation, `@narrow.loop` and `@flow.to_loop` are a single-block
-stand-in for CFG reachability and retire with it (`TODO(cfg-exit-join)`). Apart from guards, each document marks every
-statement that leaves its block unconditionally `@flow.leaves` (return,
-throw or raise, `break`, `continue`, C++'s `co_return`, PHP's `die` and
-`exit`, which the language reserves, so their spelling names them, and
-PHP's leaving right side of a short-circuit), and
-the extractor derives the rest by containment, the Perl rule above: a
-condition's statement is the node holding it and its then arm; a chain
-is that statement with every condition whose statement is an else arm of
-the chain; its arms are the narrowest regions its conditions decide, each
-known by every condition deciding a region around it. An arm leaves when
-it, or one of the statements it runs in sequence (its named children
-outside every field: a loop's body is a part of the loop, not a
-statement of the arm), is marked `@flow.leaves` or is a chain that
-leaves. Where exactly one arm falls through, the rest of the block holding
-the chain runs where that arm does, a region of every condition that
-decides it. A comment is no statement, so where it sits does not matter. A
+condition before it. A loop (`@ctl.loop`, its `@ctl.loop.body` and
+`@ctl.loop.step`) decides no position: what follows it is its exit join's
+(`docs/adr/cfg-tier.md` §Loops). Apart from
+guards, each document marks every statement that leaves its block
+unconditionally `@ctl.leave.<kind>` (return, throw or raise, `break`,
+`continue`, C++'s `co_return`, PHP's `die` and `exit`, which the language
+reserves, so their spelling names them). A leave counts only where it is
+an arm or one of the statements an arm runs in sequence (its named
+children outside every field: a loop's body is a part of the loop, not a
+statement of the arm, and so is an `except` clause), and the join plan
+the Perl rule above uses decides from there which arms leave. Each test
+records, per construct it decides, the arms it narrows and what it proves
+on a path no arm runs; assembly roots the subject as a place (a member
+through `PackPlaces`, a variable through its binding at the test) and
+mints the same region joins as Perl (`JoinPlan::guard_joins`), each held
+no further than the end of the node the construct runs in, so a test in
+a loop's body or a `try` says nothing past it. A comment is no statement, so where it sits does not matter. A
 call that never returns by its callee's nature (`sys.exit()`,
 `std::abort()`, `[[noreturn]]`) is an effect on the callee, to mark once
-effects and the CFG exist (`TODO(noreturn-callee)`). An
+the pack's runtime-function document exists (`TODO(noreturn-callee)`). An
 atom climbs to each condition above it through connectives alone (an
 atom inside a call argument is no part of the condition), and the
 connectives on the way decide its value in each of the condition's

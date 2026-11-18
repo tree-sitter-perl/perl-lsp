@@ -304,7 +304,7 @@ fn insert_sentinel_guarded(
 pub fn warm_cache(
     conn: &Connection,
     cache: &DashMap<String, Option<Arc<CachedModule>>>,
-    all_defs: &DashMap<String, Vec<Arc<CachedModule>>>,
+    all_defs: &DashMap<String, DefCandidates>,
     strip: bool,
 ) -> (usize, Vec<String>) {
     // Name-keyed warm serves the @INC tier only; 'workspace' rows are
@@ -431,16 +431,13 @@ pub fn warm_cache(
 /// smallest path makes repeat warms byte-identical.
 fn adopt_warm_provider(
     cache: &DashMap<String, Option<Arc<CachedModule>>>,
-    all_defs: &DashMap<String, Vec<Arc<CachedModule>>>,
+    all_defs: &DashMap<String, DefCandidates>,
     module_name: &str,
     cand: Arc<CachedModule>,
 ) {
     let mut v = all_defs.entry(module_name.to_string()).or_default();
-    match v.iter().position(|c| c.path == cand.path) {
-        Some(i) => v[i] = cand.clone(),
-        None => v.push(cand.clone()),
-    }
-    let winner = v.iter().min_by(|a, b| a.path.cmp(&b.path)).cloned();
+    v.upsert(cand.clone());
+    let winner = v.first().cloned();
     drop(v);
     if let Some(w) = winner {
         cache.insert(module_name.to_string(), Some(w));

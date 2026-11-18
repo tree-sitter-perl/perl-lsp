@@ -31,7 +31,7 @@ use super::*;
 type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>, Option<ReadPoint>);
 /// Each on-path key with its position on the path (`QueryState::path_len`
 /// when it entered), so a cut can say which frame it closed at.
-type VisitedSet = std::collections::HashMap<VisitedKey, u32>;
+type VisitedSet = super::QueryMap<VisitedKey, u32>;
 /// What a cross-file fan-out asks the files of: a class-keyed attachment's
 /// candidate files (`class_candidates_node`), or a free name's exporters
 /// and linkage-visible definitions (`free_name_cross_file`).
@@ -105,6 +105,12 @@ struct ClassLadder<'a> {
     /// arms, so it rides the hops; a slot, a parameter or a type has none.
     /// A callable is also what a plugin bridge can supply.
     callable: Option<&'a str>,
+    /// Does the walk enter other files (the class's candidate files, plugin
+    /// bridges)? An effect question never chases another file's bag: a
+    /// rehydrated copy has a new address, so the cycle guard would miss a
+    /// call graph that loops back through it (`docs/adr/cfg-tier.md`
+    /// §Effects). Its cross-file answers come from the index instead.
+    cross_file: bool,
     /// The attachment re-keyed to a parent class; `None` when the
     /// attachment has no ancestry to walk.
     rekey: Option<fn(&WitnessAttachment, String) -> WitnessAttachment>,
@@ -129,10 +135,15 @@ impl<'a> ClassLadder<'a> {
         Some(match att {
             WitnessAttachment::Member { owner, name, aspect, .. } => {
                 let returns = *aspect == MemberAspect::Returns;
+                // How a member ends is a callable's question too, and a
+                // call dispatches to the nearest definition whatever it
+                // states, so it walks like `Returns`.
+                let callable = *aspect != MemberAspect::Holds;
                 ClassLadder {
                     owner,
-                    rows_member: Some((name, returns)),
-                    callable: returns.then_some(name.as_str()),
+                    rows_member: Some((name, callable)),
+                    callable: callable.then_some(name.as_str()),
+                    cross_file: *aspect != MemberAspect::Effects,
                     // A parent's member is the same member one class up:
                     // same namespace, same name, same question.
                     rekey: Some(|att, p| match att {
@@ -142,15 +153,24 @@ impl<'a> ClassLadder<'a> {
                         _ => unreachable!("rekey is minted from its own attachment"),
                     }),
                     rungs_on_parents: returns,
-                    untyped_settles: returns,
-                    site: if returns { "moc_primary" } else { "field" },
-                    fetch_tag: if returns { "mocsite.primary" } else { "mocsite.field" },
+                    untyped_settles: callable,
+                    site: match aspect {
+                        MemberAspect::Returns => "moc_primary",
+                        MemberAspect::Holds => "field",
+                        MemberAspect::Effects => "effects",
+                    },
+                    fetch_tag: match aspect {
+                        MemberAspect::Returns => "mocsite.primary",
+                        MemberAspect::Holds => "mocsite.field",
+                        MemberAspect::Effects => "mocsite.effects",
+                    },
                 }
             }
             WitnessAttachment::Param { package, .. } => ClassLadder {
                 owner: package,
                 rows_member: None,
                 callable: None,
+                cross_file: true,
                 rekey: Some(|att, p| match att {
                     WitnessAttachment::Param { name, index, .. } => {
                         WitnessAttachment::Param { package: p, name: name.clone(), index: *index }
@@ -166,6 +186,7 @@ impl<'a> ClassLadder<'a> {
                 owner: name,
                 rows_member: None,
                 callable: None,
+                cross_file: true,
                 // An alias names one type; the alias graph has no ancestry.
                 rekey: None,
                 rungs_on_parents: false,
@@ -182,9 +203,11 @@ impl<'a> ClassLadder<'a> {
     }
 
     /// Does a rung's answer end the walk? Any answer does, except an
-    /// untyped one where the ladder walks on past it (`untyped_settles`).
+    /// untyped or open one (`X | …` leaves part of the value to name) where
+    /// the ladder walks on past it (`untyped_settles`).
     fn settles(&self, v: &ReducedValue) -> bool {
-        self.untyped_settles || !matches!(v, ReducedValue::Type(InferredType::Unknown))
+        self.untyped_settles
+            || !matches!(v, ReducedValue::Type(InferredType::Unknown | InferredType::Open(_)))
     }
 }
 
@@ -226,7 +249,7 @@ fn visited_key(bag: &WitnessBag, q: &ReducerQuery) -> VisitedKey {
 }
 
 /// `(value, effect, taint)` — see `QueryState::memo`.
-type MemoEntry = (std::sync::Arc<ReducedValue>, std::sync::Arc<Effect>, u32);
+type MemoEntry = (std::sync::Arc<ReducedValue>, std::sync::Arc<ChaseTrace>, u32);
 
 /// What a subtree's chase leaves for the bake: the ladder rungs it recorded at
 /// its own opaque depth, first occurrence first, and whether anything beneath
@@ -236,12 +259,12 @@ type MemoEntry = (std::sync::Arc<ReducedValue>, std::sync::Arc<Effect>, u32);
 /// (`QueryState::replay`) and a chase served from a memo records exactly what
 /// recomputing would.
 #[derive(Debug, Default, Clone, PartialEq)]
-pub(super) struct Effect {
+pub(super) struct ChaseTrace {
     rungs: Vec<super::ConclusionKey>,
     poison: bool,
 }
 
-impl Effect {
+impl ChaseTrace {
     fn is_empty(&self) -> bool {
         self.rungs.is_empty() && !self.poison
     }
@@ -252,14 +275,14 @@ struct EffectFrame {
     /// `QueryState::opaque_frames` when the frame entered. A rung recorded
     /// deeper sits under a combining frame between it and this one.
     depth: u32,
-    effect: Effect,
+    effect: ChaseTrace,
     /// Membership for `effect.rungs` once it outgrows a scan.
     seen: Option<std::collections::HashSet<super::ConclusionKey>>,
 }
 
 impl EffectFrame {
     fn new(depth: u32) -> Self {
-        EffectFrame { depth, effect: Effect::default(), seen: None }
+        EffectFrame { depth, effect: ChaseTrace::default(), seen: None }
     }
 
     fn add_rung(&mut self, k: &super::ConclusionKey) {
@@ -282,7 +305,7 @@ impl EffectFrame {
     /// Fold in an effect recorded at opaque depth `at` (a closed child frame,
     /// or a memo hit's replay). Below a combining frame a rung is poison, as a
     /// rung recorded there directly is.
-    fn absorb(&mut self, at: u32, e: &Effect) {
+    fn absorb(&mut self, at: u32, e: &ChaseTrace) {
         if at > self.depth {
             if !e.is_empty() {
                 crate::util::ghost_stats::count("residual.under_opaque");
@@ -342,7 +365,7 @@ struct FoldMemo {
     /// query that can reach an index. `Some`: a pass's, which admits exactly
     /// one bag under exactly one lookup (`FoldMemoScope::for_pass`).
     owner: Option<PassOwner>,
-    answers: std::collections::HashMap<FoldMemoKey, (MemoAnswer, std::sync::Arc<Effect>)>,
+    answers: super::QueryMap<FoldMemoKey, (MemoAnswer, std::sync::Arc<ChaseTrace>)>,
     /// Estimated bytes `answers` holds (`fold_memo_entry_bytes`).
     bytes: usize,
     /// Keys whose root query is being computed beneath the current one: a
@@ -361,7 +384,7 @@ enum MemoAnswer {
 /// A rough charge for one fold-memo entry: the table's slot, the shared
 /// value, and the effect's rungs. The cap bounds the order of magnitude, not
 /// the byte.
-fn fold_memo_entry_bytes(fk: &FoldMemoKey, answer: &MemoAnswer, effect: &Effect) -> usize {
+fn fold_memo_entry_bytes(fk: &FoldMemoKey, answer: &MemoAnswer, effect: &ChaseTrace) -> usize {
     const SLOT: usize = std::mem::size_of::<FoldMemoKey>() + 2 * std::mem::size_of::<usize>();
     const VALUE: usize = 128;
     const RUNG: usize = 96;
@@ -664,7 +687,7 @@ fn fold_memo_store(
     fk: Box<(FoldMemoStamp, FoldMemoKey)>,
     q: &ReducerQuery,
     result: &std::sync::Arc<ReducedValue>,
-    effect: &std::sync::Arc<Effect>,
+    effect: &std::sync::Arc<ChaseTrace>,
 ) {
     // A walk out of consult budget answers from what it already had, which
     // no cut records; the budget never comes back within a walk, so "still
@@ -680,7 +703,7 @@ fn fold_memo_store(
     fold_memo_insert(&stamp, fk, MemoAnswer::Reduced(std::sync::Arc::clone(result)), effect);
 }
 
-fn fold_memo_insert(stamp: &FoldMemoStamp, fk: FoldMemoKey, answer: MemoAnswer, effect: &std::sync::Arc<Effect>) {
+fn fold_memo_insert(stamp: &FoldMemoStamp, fk: FoldMemoKey, answer: MemoAnswer, effect: &std::sync::Arc<ChaseTrace>) {
     FOLD_MEMO.with(|m| {
         if let Some(memo) = m.borrow_mut().as_mut().filter(|memo| stamp.matches(memo)) {
             let charge = fold_memo_entry_bytes(&fk, &answer, effect);
@@ -706,7 +729,7 @@ struct SlotOwnerIndex {
 
 /// How a read finds its bucket's owner index in the open memo.
 enum SlotOwnersLookup {
-    Hit(std::sync::Arc<SlotOwnerIndex>, std::sync::Arc<Effect>),
+    Hit(std::sync::Arc<SlotOwnerIndex>, std::sync::Arc<ChaseTrace>),
     /// Not held yet: build it and file it under this key.
     Miss(FoldMemoStamp, FoldMemoKey),
     /// Being built beneath this read: the bucket's own objects read the key.
@@ -767,6 +790,23 @@ fn slot_owners_building<T>(fk: &FoldMemoKey, build: impl FnOnce() -> T) -> T {
     build()
 }
 
+/// A frame's computed subtree (`QueryState::frame`).
+struct Framed<T> {
+    value: T,
+    effect: std::sync::Arc<ChaseTrace>,
+    /// The taint the answer carries (`QueryState::leave_frame`).
+    taint: u32,
+    /// The outermost frame a cut beneath it closed at.
+    cut: u32,
+}
+
+/// Remembered answers a recurring arm's pass sets aside
+/// (`QueryState::set_aside_answers_through`).
+struct PathAnswers {
+    memo: Vec<(VisitedKey, MemoEntry)>,
+    fan_outs: Vec<(FanOutKey, MemoEntry)>,
+}
+
 /// Per-top-level-`query` traversal state: the cycle guard plus a result
 /// memo. The bag forms a DAG of edges; without memoization a diamond
 /// (two paths reaching one shared sub-attachment) re-chases the shared
@@ -787,8 +827,8 @@ pub(super) struct QueryState {
     /// The cross-file fan-outs on the current path, and the answers of those
     /// already walked this query (`fan_out_node`). The bag-free twins of
     /// `visited` and `memo`.
-    fan_outs: std::collections::HashMap<FanOutKey, u32>,
-    fan_out_memo: std::collections::HashMap<FanOutKey, (std::sync::Arc<ReducedValue>, std::sync::Arc<Effect>, u32)>,
+    fan_outs: super::QueryMap<FanOutKey, u32>,
+    fan_out_memo: super::QueryMap<FanOutKey, (std::sync::Arc<ReducedValue>, std::sync::Arc<ChaseTrace>, u32)>,
     /// Enriched copies consulted during this query — pinned so memo
     /// entries keyed on their bag ADDRESSES stay valid even if the
     /// overlay's eviction drops its own reference mid-query.
@@ -807,7 +847,7 @@ pub(super) struct QueryState {
     /// computes. Any other value depends on the path it was reached from, so
     /// it may be reused inside this query (the memo always has) but never by
     /// another one.
-    memo: std::collections::HashMap<VisitedKey, MemoEntry>,
+    memo: super::QueryMap<VisitedKey, MemoEntry>,
     /// Frames on the current path: the next frame's position. Starts at 1, so
     /// the root is position 1 and 0 lies above every frame.
     path_len: u32,
@@ -842,6 +882,21 @@ pub(super) struct QueryState {
     /// site is the innermost one — it has to know whether ANY ancestor is
     /// opaque, not whether its immediate parent is.
     opaque_frames: u32,
+    /// The path positions of the `Join` frames open on it. A cut closing at
+    /// one is a loop's recurrence on itself (`docs/adr/cfg-tier.md` §Loops).
+    open_joins: Vec<u32>,
+    /// What an open join answers to a recurring arm chased again
+    /// (`rechase_recurring`), by its path position.
+    join_seeds: std::collections::HashMap<u32, InferredType>,
+    /// Frames a cycle closed at after running through a join opened above
+    /// them: a read inside a loop that the loop's recurrence runs through.
+    recurs_at: std::collections::HashSet<u32>,
+    /// What such a frame answers to its own recurrence while it is asked
+    /// again (`query_rec`'s pass), by its path position.
+    frame_seeds: std::collections::HashMap<u32, InferredType>,
+    /// Effect answers memoized while a frame on the path was assumed to have
+    /// no way of ending, with that frame's position (`forget_assumed`).
+    assumed: Vec<(u32, VisitedKey)>,
 }
 
 impl QueryState {
@@ -862,24 +917,24 @@ impl QueryState {
             self.replay_hit(&effect, taint);
             return (*v != ReducedValue::None).then(|| (*v).clone());
         }
-        let (v, effect, taint) = self.frame(|s| &mut s.fan_outs, &key, |s, _| walk(s))?;
+        let Framed { value: v, effect, taint, .. } = self.frame(|s| &mut s.fan_outs, &key, |s, _| walk(s)).ok()?;
         self.fan_out_memo
             .insert(key, (std::sync::Arc::new(v.clone().unwrap_or(ReducedValue::None)), effect, taint));
         v
     }
 
     /// Compute the subtree of the frame `key` names, or close a cut at it when
-    /// it is already on the path (`None`). `path` is the frame family's
-    /// on-path table. Returns the answer, the subtree's effect and the taint the answer carries.
+    /// it is already on the path (`Err` with its path position). `path` is the frame family's
+    /// on-path table.
     fn frame<K: std::hash::Hash + Eq + Clone, T>(
         &mut self,
-        path: fn(&mut Self) -> &mut std::collections::HashMap<K, u32>,
+        path: fn(&mut Self) -> &mut super::QueryMap<K, u32>,
         key: &K,
         body: impl FnOnce(&mut Self, u32) -> T,
-    ) -> Option<(T, std::sync::Arc<Effect>, u32)> {
+    ) -> Result<Framed<T>, u32> {
         if let Some(&at) = path(self).get(key) {
             self.close_cut_at(at);
-            return None;
+            return Err(at);
         }
         let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
         let (pos, outer_low) = self.enter_frame();
@@ -888,17 +943,51 @@ impl QueryState {
         let v = body(self, pos);
         let effect = self.pop_effect();
         path(self).remove(key);
-        let taint = self.leave_frame(pos, outer_low, truncations_before);
-        Some((v, effect, taint))
+        let (taint, cut) = self.leave_frame(pos, outer_low, truncations_before);
+        self.forget_assumed(pos);
+        Ok(Framed { value: v, effect, taint, cut })
     }
 
     /// A memoized subtree reached again: its taint joins the open mark, and
     /// its effect is recorded at the depth it is re-reached from — under a
     /// combining frame its rungs poison, however transparent the first reach
     /// was.
-    fn replay_hit(&mut self, effect: &Effect, taint: u32) {
+    fn replay_hit(&mut self, effect: &ChaseTrace, taint: u32) {
         self.low_cut = self.low_cut.min(taint);
         self.replay(effect);
+    }
+
+    /// Set aside every remembered answer that depends on the path at or
+    /// above position `at`, for a recurring arm chased again
+    /// (`rechase_recurring`): what it said held for the path as it stood,
+    /// and the pass changes what the frame at `at` answers.
+    fn set_aside_answers_through(&mut self, at: u32) -> PathAnswers {
+        let memo = self.memo.extract_if(|_, (_, _, taint)| *taint <= at).collect();
+        let fan_outs = self.fan_out_memo.extract_if(|_, (_, _, taint)| *taint <= at).collect();
+        PathAnswers { memo, fan_outs }
+    }
+
+    /// Drop what the pass remembered through `at`, and take back what
+    /// `set_aside_answers_through` set aside.
+    fn restore_answers_through(&mut self, at: u32, aside: PathAnswers) {
+        self.memo.retain(|_, (_, _, taint)| *taint > at);
+        self.fan_out_memo.retain(|_, (_, _, taint)| *taint > at);
+        self.memo.extend(aside.memo);
+        self.fan_out_memo.extend(aside.fan_outs);
+    }
+
+    /// A pass refused for depth: what the frame answers then depends on the
+    /// passes open around it, so its answer is cut at the outermost of them
+    /// and never remembered as the key's own.
+    fn refuse_pass(&mut self) {
+        if let Some(&outermost) = self.join_seeds.keys().chain(self.frame_seeds.keys()).min() {
+            self.close_cut_at(outermost);
+        }
+    }
+
+    /// How many passes round a loop are open on the path.
+    fn passes_open(&self) -> usize {
+        self.join_seeds.len() + self.frame_seeds.len()
     }
 
     /// A cycle guard returned for the frame at path position `at`.
@@ -919,30 +1008,54 @@ impl QueryState {
     /// fresh query of this frame's key computes (the subtree reached nothing
     /// above it); `PATH` when a cut closed above it; `TRUNCATED` when the
     /// depth cap fired anywhere beneath it, in this state or a nested one.
-    fn leave_frame(&mut self, pos: u32, outer_low: u32, truncations_before: u64) -> u32 {
+    /// Also returns the outermost frame a cut beneath it closed at.
+    fn leave_frame(&mut self, pos: u32, outer_low: u32, truncations_before: u64) -> (u32, u32) {
         self.path_len -= 1;
         let low = self.low_cut;
         self.low_cut = outer_low.min(low);
-        if low == Taint::TRUNCATED || QUERY_REC_TRUNCATIONS.with(|c| c.get()) > truncations_before {
+        let taint = if low == Taint::TRUNCATED || QUERY_REC_TRUNCATIONS.with(|c| c.get()) > truncations_before {
             Taint::TRUNCATED
         } else if low < pos {
             Taint::PATH
         } else {
             Taint::CLEAN
+        };
+        (taint, low)
+    }
+
+    /// The frame at `pos` has closed: an effect answer computed assuming it
+    /// had no way of ending is no answer once it has one, so it leaves the
+    /// memo (a type answer cut there is only short, and stays).
+    fn forget_assumed(&mut self, pos: u32) {
+        if self.assumed.is_empty() {
+            return;
         }
+        let memo = &mut self.memo;
+        self.assumed.retain(|(cut, key)| {
+            let live = *cut < pos;
+            if !live {
+                memo.remove(key);
+            }
+            live
+        });
     }
 
     pub(super) fn new() -> Self {
         QueryState {
-            visited: std::collections::HashMap::new(),
-            fan_outs: std::collections::HashMap::new(),
-            fan_out_memo: std::collections::HashMap::new(),
+            visited: Default::default(),
+            fan_outs: Default::default(),
+            fan_out_memo: Default::default(),
             pins: Vec::new(),
-            memo: std::collections::HashMap::new(),
+            memo: Default::default(),
             path_len: 1,
             low_cut: Taint::CLEAN,
             effects: vec![EffectFrame::new(0)],
             opaque_frames: 0,
+            open_joins: Vec::new(),
+            join_seeds: std::collections::HashMap::new(),
+            recurs_at: std::collections::HashSet::new(),
+            frame_seeds: std::collections::HashMap::new(),
+            assumed: Vec::new(),
         }
     }
 
@@ -962,7 +1075,7 @@ impl QueryState {
             // chase does not.
             Some(k) => {
                 let at = self.opaque_frames;
-                self.open_effect().absorb(at, &Effect { rungs: vec![k], ..Effect::default() });
+                self.open_effect().absorb(at, &ChaseTrace { rungs: vec![k], ..ChaseTrace::default() });
             }
             None => self.poison(),
         }
@@ -984,20 +1097,20 @@ impl QueryState {
     }
 
     /// Close the innermost frame's effect and fold it into its parent.
-    fn pop_effect(&mut self) -> std::sync::Arc<Effect> {
+    fn pop_effect(&mut self) -> std::sync::Arc<ChaseTrace> {
         let frame = self.effects.pop().expect("push_effect pairs with pop_effect");
         self.open_effect().absorb(frame.depth, &frame.effect);
         std::sync::Arc::new(frame.effect)
     }
 
     /// Record what a memoized subtree recorded when it was computed.
-    fn replay(&mut self, effect: &Effect) {
+    fn replay(&mut self, effect: &ChaseTrace) {
         let at = self.opaque_frames;
         self.open_effect().absorb(at, effect);
     }
 
     /// The whole query's effect: its own frame, with every closed frame folded in.
-    fn into_effect(mut self) -> Effect {
+    fn into_effect(mut self) -> ChaseTrace {
         debug_assert_eq!(self.effects.len(), 1, "an effect frame left open");
         std::mem::take(&mut self.effects[0].effect)
     }
@@ -1213,6 +1326,17 @@ fn is_subclass_of(child: &str, ancestor: &str, ctx: &BagContext) -> bool {
 /// thread's stack size or the build profile — one value serves both.
 const QUERY_REC_DEPTH_CAP: u32 = 512;
 
+/// What a question nothing answers gets: nothing, except a question of how
+/// something ends, whose "no evidence" is a value of its own, the top
+/// (`docs/adr/cfg-tier.md` §Effects: bottom and top are never conflated).
+fn no_answer(q: &ReducerQuery) -> ReducedValue {
+    if q.attachment.asks_effects() {
+        ReducedValue::Effects(super::types::Ends::all())
+    } else {
+        ReducedValue::None
+    }
+}
+
 /// Headroom a recursive resolver keeps before it switches to a fresh stack
 /// segment. One `query_rec` hop costs about 5 KiB in a debug build and under
 /// 1 KiB in release, so this is many hops of margin.
@@ -1283,6 +1407,12 @@ pub struct ReducerRegistry {
     reducers: Vec<Box<dyn WitnessReducer>>,
 }
 
+/// How many passes round a loop a recurring arm is chased at most.
+const MAX_LOOP_PASSES: u64 = 8;
+
+/// How many passes round loops may be open at once on one path.
+const MAX_PASS_NESTING: usize = 2;
+
 impl ReducerRegistry {
     pub fn new() -> Self {
         Self { reducers: Vec::new() }
@@ -1306,6 +1436,8 @@ impl ReducerRegistry {
         // overlap with the Variable/Expr folds below, so order here is
         // not load-bearing.
         r.register(Box::new(BranchArmFold));
+        // `Join{..}` is a disjoint attachment shape; order isn't load-bearing.
+        r.register(Box::new(JoinFold));
         r.register(Box::new(FrameworkAwareTypeFold));
         r.register(Box::new(ExprReturn));
         // Member primary-fallback after ReturnExprReducer so
@@ -1324,6 +1456,10 @@ impl ReducerRegistry {
         r.register(Box::new(DomainCoherenceFold));
         // `Param{..}` is a disjoint attachment shape; order isn't load-bearing.
         r.register(Box::new(ParamBindingReducer));
+        // The effect lane's attachments carry no type payload, so its fold
+        // is disjoint from every type fold; it answers only an effect
+        // question, whatever it claims.
+        r.register(Box::new(EffectFold));
         // Last — fallback for "this Symbol's stored return type".
         r.register(Box::new(SubReturnReducer));
         r
@@ -1376,7 +1512,7 @@ impl ReducerRegistry {
         self.query_effect(bag, q).0
     }
 
-    fn query_effect(&self, bag: &WitnessBag, q: &ReducerQuery) -> (ReducedValue, Effect) {
+    fn query_effect(&self, bag: &WitnessBag, q: &ReducerQuery) -> (ReducedValue, ChaseTrace) {
         // A query with no scope open answers through one of its own, so a
         // slot read resolves the bucket's owners by the same index a scoped
         // query does: an index-free answer does not depend on where it is asked.
@@ -1528,7 +1664,7 @@ impl ReducerRegistry {
                 }
             });
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
-            return std::sync::Arc::new(ReducedValue::None);
+            return std::sync::Arc::new(no_answer(q));
         }
         let key = visited_key(bag, q);
         // Memo hit: this key was fully resolved earlier in THIS query and
@@ -1546,15 +1682,48 @@ impl ReducerRegistry {
             }
             Err(fold_key) => fold_key,
         };
-        let Some((result, effect, taint)) =
-            state.frame(|s| &mut s.visited, &key, |state, pos| {
-                #[cfg(test)]
-                QUERY_REC_BODIES.with(|c| c.set(c.get() + 1));
-                std::sync::Arc::new(apply_brand_overlays(bag, q, self.query_rec_body(bag, q, pos, state)))
-            })
-        else {
-            QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
-            return std::sync::Arc::new(ReducedValue::None);
+        // A cut closing at an open join is a loop's recurrence on itself
+        // (`docs/adr/cfg-tier.md` §Loops).
+        let joined = matches!(q.attachment, WitnessAttachment::Join { .. });
+        let framed = state.frame(|s| &mut s.visited, &key, |state, pos| {
+            if joined {
+                state.open_joins.push(pos);
+            }
+            #[cfg(test)]
+            QUERY_REC_BODIES.with(|c| c.set(c.get() + 1));
+            let result = match apply_brand_overlays(bag, q, self.query_rec_body(bag, q, pos, state)) {
+                ReducedValue::None => no_answer(q),
+                v => v,
+            };
+            let result = self.pass_round_loop(bag, q, pos, result, state);
+            if joined {
+                state.open_joins.pop();
+            }
+            std::sync::Arc::new(result)
+        });
+        let Framed { value: result, effect, taint, cut } = match framed {
+            Ok(framed) => framed,
+            Err(at) => {
+                QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
+                // A join a recurring arm is chased again under answers what its
+                // other arms hold (`rechase_recurring`).
+                if let Some(seed) = state.join_seeds.get(&at).or_else(|| state.frame_seeds.get(&at)) {
+                    return std::sync::Arc::new(ReducedValue::Type(seed.clone()));
+                }
+                if state.open_joins.iter().any(|&j| j > at) {
+                    state.recurs_at.insert(at);
+                }
+                // "Can complete" is inductive: a smallest derivation never needs
+                // a callable as its own ancestor, so a callable on the path is
+                // assumed to have no way of ending, and the frame that started
+                // the question gets the exact least fixed point. What the frames
+                // between computed under the assumption is forgotten when it
+                // closes (`forget_assumed`).
+                if q.attachment.asks_effects() {
+                    return std::sync::Arc::new(ReducedValue::Effects(super::types::Ends::empty()));
+                }
+                return std::sync::Arc::new(ReducedValue::None);
+            }
         };
         // A cycle closed at this frame or beneath it is part of this key's
         // own answer: a fresh query of the key cuts in the same place.
@@ -1564,9 +1733,53 @@ impl ReducerRegistry {
         // Cache the off-path resolution. The query depends only on
         // `(bag, attachment, receiver-class, arity)` (all in `key`) plus
         // the static context, which is fixed for one top-level query.
+        if taint == Taint::PATH && q.attachment.asks_effects() {
+            state.assumed.push((cut, key.clone()));
+        }
         state.memo.insert(key, (std::sync::Arc::clone(&result), effect, taint));
         QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
         result
+    }
+
+    /// A frame a loop's recurrence ran through from inside the loop (a read
+    /// in the body that a later write there depends on) is asked again,
+    /// seeded with its own last answer, until a pass adds nothing: its fixed
+    /// point, as `rechase_recurring` reaches the join's. Passes nest
+    /// `MAX_PASS_NESTING` deep (a loop in a loop); past that the first
+    /// answer dropped a path, so the frame answers nothing, which is sound
+    /// and bounds the work.
+    fn pass_round_loop(&self, bag: &WitnessBag, q: &ReducerQuery, pos: u32, first: ReducedValue, state: &mut QueryState) -> ReducedValue {
+        if !state.recurs_at.remove(&pos) {
+            return first;
+        }
+        if state.passes_open() >= MAX_PASS_NESTING {
+            crate::util::ghost_stats::count("frame.recurrence_too_deep");
+            state.refuse_pass();
+            return no_answer(q);
+        }
+        let ReducedValue::Type(mut seed) = first else { return first };
+        let order = super::reducers::class_order(q);
+        let mut rounds = 1;
+        while rounds < MAX_LOOP_PASSES {
+            rounds += 1;
+            let aside = state.set_aside_answers_through(pos);
+            state.frame_seeds.insert(pos, seed.clone());
+            let next = apply_brand_overlays(bag, q, self.query_rec_body(bag, q, pos, state));
+            state.frame_seeds.remove(&pos);
+            state.restore_answers_through(pos, aside);
+            state.recurs_at.remove(&pos);
+            let ReducedValue::Type(t) = next else {
+                crate::util::ghost_stats::count_by("frame.recurrence_passes", rounds);
+                return next;
+            };
+            let joined = crate::model::file_analysis::join(&seed, &t, order);
+            if joined == seed {
+                break;
+            }
+            seed = joined;
+        }
+        crate::util::ghost_stats::count_by("frame.recurrence_passes", rounds);
+        ReducedValue::Type(seed)
     }
 
     fn query_rec_body(
@@ -1576,9 +1789,55 @@ impl ReducerRegistry {
         pos: u32,
         state: &mut QueryState,
     ) -> ReducedValue {
+        // An expression that states it does not complete (a local jump, a
+        // builtin that dies) has the value of one that never comes back,
+        // whatever else it would type to.
+        if matches!(q.attachment, WitnessAttachment::Expr(_)) && stated_never_completes(bag, q.attachment) {
+            return ReducedValue::Type(InferredType::Never);
+        }
+        // A read whose latest write unbound the name raises: the path it is
+        // on never comes back, so it has a slot's one `Never`.
+        if unbound_at(bag, q) {
+            return ReducedValue::Type(InferredType::Never);
+        }
         let materialized = self.materialize(bag, q, state);
         let v = self.reduce_materialized(&materialized, q);
+
+        // An arm that came back untyped (a return arm, a member's write) is
+        // an arm of the value like any other: what the typed arms fold to
+        // stays open beside it (`X|…`, the join with `Unknown`). An `Undef` that flowed in says only that
+        // the value may be absent, so beside it it is no answer to what the
+        // value is. One stated here (a guard's) stands where the read sees
+        // it, and a declared bound still caps what is left.
+        let untyped_arm = materialized
+            .iter()
+            .any(|w| matches!(&w.payload, WitnessPayload::Fact { family, .. } if family == super::tags::FACT_UNTYPED_ARM));
+        let v = match v {
+            ReducedValue::Type(InferredType::Undef)
+                if untyped_arm
+                    && !bag.iter_attachment(q.attachment).any(|w| {
+                        matches!(&w.payload, WitnessPayload::InferredType(InferredType::Undef))
+                            && q.point.filter(|_| q.attachment.is_temporal()).is_none_or(|p| p.reaches(w.span.start))
+                    }) =>
+            {
+                ReducedValue::None
+            }
+            // A place's arms are its writes, and which write a read sees is
+            // the window's to say; the flow joins already keep what an
+            // untyped path leaves open there.
+            ReducedValue::Type(t) if untyped_arm && !t.is_never() && !q.attachment.is_temporal() => {
+                ReducedValue::Type(crate::model::file_analysis::join(&t, &InferredType::Unknown, class_order(q)))
+            }
+            v => v,
+        };
         let v = self.cap_by_bound(bag, q, state, &materialized, v);
+        // `Never` types an evaluation, never a slot: a callable whose every
+        // arm leaves yields no value (its effect says why), and a place or a
+        // member written only by expressions that leave holds none. So it
+        // never reaches a return type, a conclusion or the Surface.
+        if matches!(&v, ReducedValue::Type(InferredType::Never)) && !q.attachment.is_evaluation() {
+            return ReducedValue::None;
+        }
         let ladder = ClassLadder::of(q.attachment);
         if v != ReducedValue::None && ladder.as_ref().is_none_or(|l| l.settles(&v)) {
             return v;
@@ -1614,6 +1873,14 @@ impl ReducerRegistry {
         {
             return ReducedValue::Type(InferredType::Unknown);
         }
+        // A member this file defines answers how it ends from its own
+        // definition: a child's override that states nothing is no evidence
+        // (the top), never its parent's answer.
+        if let WitnessAttachment::Member { owner, space, name, aspect: MemberAspect::Effects } = q.attachment {
+            if v == ReducedValue::None && defines_member_here(bag, owner, *space, name) {
+                return ReducedValue::Effects(super::types::Ends::all());
+            }
+        }
         if let Some(ladder) = &ladder {
             if let Some(found) = self.class_fallback(bag, q, state, ladder) {
                 return found;
@@ -1630,7 +1897,9 @@ impl ReducerRegistry {
             // that cycle, which the frame it started from folds.
             if !ladder.untyped_settles && !bag.for_attachment(q.attachment).is_empty() {
                 let complete = state.low_cut >= pos;
-                return if complete { ReducedValue::Type(InferredType::Unknown) } else { v };
+                // What the local fold knew of it stands (`X | …`).
+                let open = matches!(v, ReducedValue::Type(InferredType::Open(_)));
+                return if complete && !open { ReducedValue::Type(InferredType::Unknown) } else { v };
             }
         }
 
@@ -1713,7 +1982,7 @@ impl ReducerRegistry {
             ReducedValue::Type(_) | ReducedValue::None => {
                 return resolve(state).map_or(value, ReducedValue::Type);
             }
-            ReducedValue::FactMap(_) => return value,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) => return value,
         };
         let order = class_order(q);
         let mut fit = |state: &mut QueryState| match resolve(state) {
@@ -1755,7 +2024,7 @@ impl ReducerRegistry {
                 // own value, so no exit key names it.
                 match &*state.in_opaque_frame(|state| self.query_rec(bag, &sub_q, state)) {
                     ReducedValue::Type(t) => Some(t.clone()),
-                    ReducedValue::FactMap(_) | ReducedValue::None => None,
+                    ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
                 }
             }
         }
@@ -1787,6 +2056,7 @@ impl ReducerRegistry {
         let ctx = q.context?;
         let mut rungs = RungAnswers::default();
         match ctx.module_index {
+            _ if !ladder.cross_file => {}
             Some(idx) => {
                 if let Some(v) = self.class_candidates_node(bag, q, state, ctx, idx, ladder) {
                     if let Some(v) = rungs.offer(ladder, v) {
@@ -1813,7 +2083,7 @@ impl ReducerRegistry {
                 }
             }
         }
-        Self::class_bridges(ctx, ladder).or_else(|| rungs.rest())
+        ladder.cross_file.then(|| Self::class_bridges(ctx, ladder)).flatten().or_else(|| rungs.rest())
     }
 
     /// Hop (1) of `class_fallback` as a fan-out node (`fan_out_node`). Only
@@ -2757,7 +3027,7 @@ impl ReducerRegistry {
         bag: &WitnessBag,
         q: &ReducerQuery,
         bucket_att: &WitnessAttachment,
-    ) -> (std::sync::Arc<SlotOwnerIndex>, std::sync::Arc<Effect>, bool) {
+    ) -> (std::sync::Arc<SlotOwnerIndex>, std::sync::Arc<ChaseTrace>, bool) {
         let bucket_q = ReducerQuery {
             attachment: bucket_att,
             point: None,
@@ -2795,7 +3065,7 @@ impl ReducerRegistry {
                 });
             }
         }
-        let taint = state.leave_frame(pos, outer_low, truncations_before);
+        let (taint, _) = state.leave_frame(pos, outer_low, truncations_before);
         (std::sync::Arc::new(index), std::sync::Arc::new(state.into_effect()), taint == Taint::CLEAN)
     }
 
@@ -2922,10 +3192,12 @@ impl ReducerRegistry {
                 continue;
             };
             let changed = if temporal {
-                super::extend_in_place(base, &x.hops, x.value.as_ref(), x.widen)
+                super::extend_in_place(base, &x.hops, x.value.as_ref(), x.replaces, x.widen)
             } else {
                 let mut next = base.clone();
-                super::extend_in_place(&mut next, &x.hops, x.value.as_ref(), x.widen) && {
+                // A slot's writes are arms of one value: an arm no type names says
+                // nothing about the others.
+                super::extend_in_place(&mut next, &x.hops, x.value.as_ref(), false, x.widen) && {
                     *base = crate::model::file_analysis::join(base, &next, class_order(q));
                     true
                 }
@@ -3010,7 +3282,7 @@ impl ReducerRegistry {
         };
         match answer? {
             ReducedValue::Type(t) => Some(t),
-            ReducedValue::FactMap(_) | ReducedValue::None => None,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
         }
     }
 
@@ -3029,6 +3301,120 @@ impl ReducerRegistry {
         ReducedValue::None
     }
 
+    /// What an edge of the witness `w` resolves to, as `q` reached it.
+    #[allow(clippy::too_many_arguments)]
+    fn chase_edge(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        w: &Witness,
+        target: &WitnessAttachment,
+        read: Option<ReadPoint>,
+        sole_witness: bool,
+        state: &mut QueryState,
+    ) -> Option<InferredType> {
+        match (target, q.context) {
+            (
+                WitnessAttachment::Variable { name, scope },
+                Some(ctx),
+            ) => state.in_opaque_frame(|state| {
+                // Narrowing point: an edge reached FROM a positioned
+                // expression (a variable read recorded at `Expr(span)`)
+                // resolves the slot at the read's own location, so a
+                // flow-sensitive guard refines it only inside the
+                // guard's region (docs/adr/flow-narrowing.md). Other
+                // edge sources have no read position; the scope end is
+                // the standing temporal approximation.
+                let point = read.unwrap_or_else(|| ReadPoint::position(scope_point(ctx.scopes, *scope)));
+                // Opaque: the read's point picks the binding and the
+                // regions that hold there, so the answer is not the
+                // edge target's alone.
+                self.query_variable_with_visited(
+                    bag, ctx, name, *scope, point,
+                    q.receiver.as_ref(), state,
+                )
+            }),
+            (WitnessAttachment::Place(place), Some(ctx)) if place.is_variable() => {
+                state.in_opaque_frame(|state| {
+                    // A read recorded at `Expr(span)` holds what the
+                    // variable holds at the read.
+                    let point = match q.attachment {
+                        // A join's arm holds what the place holds
+                        // where the arm leaves.
+                        WitnessAttachment::Join { .. } => Some(ReadPoint::position(w.span.start)),
+                        _ => read.or_else(|| binding_scope_end(ctx, &place.root).map(ReadPoint::position)),
+                    };
+                    self.query_variable_place(bag, ctx, place, point, q.receiver.as_ref(), state)
+                })
+            }
+            _ => {
+                // A `Member{package,..}` reached through an edge is
+                // a fresh method dispatch: its receiver is that call's
+                // invocant (`class`), so a fluent `ReturnExpr(Receiver)`
+                // substitutes the dispatch class — not whatever the outer
+                // query carried. Mirrors `query_sub_return_type`'s
+                // `effective_receiver`. The exception is an inheritance
+                // hop (`Member{child} → Edge(Member{parent})`):
+                // there the source is itself a `Member`, and the
+                // child's receiver must carry through so an inherited fluent
+                // accessor returns the child, not where `has` was declared.
+                let redispatched = matches!(
+                    target,
+                    WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. }
+                ) && !matches!(
+                    q.attachment,
+                    WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. }
+                );
+                let receiver = match target {
+                    WitnessAttachment::Member { owner: package, aspect: crate::model::witnesses::MemberAspect::Returns, .. }
+                        if redispatched =>
+                    {
+                        fresh_dispatch_receiver(&q.receiver, package, q.context)
+                    }
+                    _ => q.receiver.clone(),
+                };
+                // A join's arm holds what the place holds where
+                // the arm leaves, a part of a variable as much as
+                // the variable.
+                let point = match (q.attachment, target) {
+                    (WitnessAttachment::Join { .. }, WitnessAttachment::Place(_)) => {
+                        Some(ReadPoint::position(w.span.start))
+                    }
+                    _ => q.point,
+                };
+                let sub_q = ReducerQuery {
+                    attachment: target,
+                    point,
+                    framework: q.framework,
+                    arity_hint: q.arity_hint,
+                    receiver,
+                    args: q.args.clone(),
+                    context: q.context,
+                };
+                // The ONE transparent frame in `materialize`: a lone
+                // edge, chased under the query it was reached with,
+                // whose answer this frame returns unchanged. A
+                // re-dispatch substitutes a different receiver, and
+                // a `ReturnExpr::Receiver` at the far end then
+                // answers about that receiver rather than the one a
+                // `Link` follow would thread.
+                let transparent = sole_witness && !redispatched;
+                let chase = |state: &mut QueryState| {
+                    match &*self.query_rec(bag, &sub_q, state) {
+                        ReducedValue::Type(t) => Some(t.clone()),
+                        ReducedValue::FactMap(_) | ReducedValue::Effects(_)
+                        | ReducedValue::None => None,
+                    }
+                };
+                if transparent {
+                    chase(state)
+                } else {
+                    state.in_opaque_frame(chase)
+                }
+            }
+        }
+    }
+
     /// `sole_witness`: is this attachment's value a pass-through of ONE
     /// sub-chase, or a fold over several? With siblings present, whatever a
     /// sub-chase answers is combined with them before this frame returns, so
@@ -3045,6 +3431,34 @@ impl ReducerRegistry {
         crate::util::ghost_stats::count_by("materialize.witnesses_read", raw.len() as u64);
         #[cfg(test)]
         MATERIALIZE_READS.with(|c| c.set(c.get() + raw.len() as u64));
+        // A gated witness holds only where control comes back from each of
+        // its gates: dropped where one does not, else read as its arm. An
+        // effect arm a gate closes ends the way that gate's call does: the
+        // callable was looked at, so never no evidence; a path its join
+        // speaks for nothing on, reached, silences the join.
+        let gated = raw.iter().any(|w| matches!(w.payload, WitnessPayload::Gated { .. }));
+        let mut opened: Vec<Option<Witness>> = Vec::with_capacity(if gated { raw.len() } else { 0 });
+        let mut dropped = vec![false; if gated { raw.len() } else { 0 }];
+        for (i, w) in raw.iter().enumerate().take_while(|_| gated) {
+            let WitnessPayload::Gated { gates, arm } = &w.payload else {
+                opened.push(None);
+                continue;
+            };
+            let payload = match (self.closed_gate(bag, q, state, gates), arm) {
+                (None, Some(a)) => Some((**a).clone()),
+                (None, None) => return Vec::new(),
+                (Some(ends), Some(a)) if matches!(**a, WitnessPayload::Effect(_)) => Some(WitnessPayload::Effect(super::types::Effect::Ends(ends))),
+                (Some(_), _) => None,
+            };
+            dropped[i] = payload.is_none();
+            opened.push(payload.map(|payload| Witness { attachment: w.attachment.clone(), source: w.source.clone(), payload, span: w.span }));
+        }
+        // Most attachments hold no gated witness; they skip the rebuild.
+        let raw: Vec<&Witness> = if gated {
+            raw.iter().enumerate().filter(|(i, _)| !dropped[*i]).map(|(i, w)| opened[i].as_ref().unwrap_or(w)).collect()
+        } else {
+            raw
+        };
         let window = super::reducers::LiveWindow::at(&raw, q);
         // A variable read recorded at `Expr(span)` asks at its own site,
         // less the statement the builder says it is evaluated before.
@@ -3059,103 +3473,115 @@ impl ReducerRegistry {
             _ => None,
         };
         let mut out: Vec<Witness> = Vec::with_capacity(raw.len());
+        let mut silent_joins: Vec<Point> = Vec::new();
+        let mut recurring: Vec<(&Witness, &WitnessAttachment, u32)> = Vec::new();
         for &w in raw.iter() {
             if window.edge_is_dead(&raw, w) {
                 continue;
             }
             match &w.payload {
-                WitnessPayload::Edge(target) => {
-                    let resolved = match (target, q.context) {
-                        (
-                            WitnessAttachment::Variable { name, scope },
-                            Some(ctx),
-                        ) => state.in_opaque_frame(|state| {
-                            // Narrowing point: an edge reached FROM a positioned
-                            // expression (a variable read recorded at `Expr(span)`)
-                            // resolves the slot at the read's own location, so a
-                            // flow-sensitive guard refines it only inside the
-                            // guard's region (docs/adr/flow-narrowing.md). Other
-                            // edge sources have no read position; the scope end is
-                            // the standing temporal approximation.
-                            let point = read.unwrap_or_else(|| ReadPoint::position(scope_point(ctx.scopes, *scope)));
-                            // Opaque: the read's point picks the binding and the
-                            // regions that hold there, so the answer is not the
-                            // edge target's alone.
-                            self.query_variable_with_visited(
-                                bag, ctx, name, *scope, point,
-                                q.receiver.as_ref(), state,
-                            )
-                        }),
-                        (WitnessAttachment::Place(place), Some(ctx)) if place.is_variable() => {
-                            state.in_opaque_frame(|state| {
-                                // A read recorded at `Expr(span)` holds what the
-                                // variable holds at the read.
-                                let point = read.or_else(|| binding_scope_end(ctx, &place.root).map(ReadPoint::position));
-                                self.query_variable_place(bag, ctx, place, point, q.receiver.as_ref(), state)
-                            })
-                        }
-                        _ => {
-                            // A `Member{package,..}` reached through an edge is
-                            // a fresh method dispatch: its receiver is that call's
-                            // invocant (`class`), so a fluent `ReturnExpr(Receiver)`
-                            // substitutes the dispatch class — not whatever the outer
-                            // query carried. Mirrors `query_sub_return_type`'s
-                            // `effective_receiver`. The exception is an inheritance
-                            // hop (`Member{child} → Edge(Member{parent})`):
-                            // there the source is itself a `Member`, and the
-                            // child's receiver must carry through so an inherited fluent
-                            // accessor returns the child, not where `has` was declared.
-                            let redispatched = matches!(
-                                target,
-                                WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. }
-                            ) && !matches!(
-                                q.attachment,
-                                WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. }
-                            );
-                            let receiver = match target {
-                                WitnessAttachment::Member { owner: package, aspect: crate::model::witnesses::MemberAspect::Returns, .. }
-                                    if redispatched =>
-                                {
-                                    fresh_dispatch_receiver(&q.receiver, package, q.context)
-                                }
-                                _ => q.receiver.clone(),
-                            };
-                            let sub_q = ReducerQuery {
-                                attachment: target,
-                                point: q.point,
-                                framework: q.framework,
-                                arity_hint: q.arity_hint,
-                                receiver,
-                                args: q.args.clone(),
-                                context: q.context,
-                            };
-                            // The ONE transparent frame in `materialize`: a lone
-                            // edge, chased under the query it was reached with,
-                            // whose answer this frame returns unchanged. A
-                            // re-dispatch substitutes a different receiver, and
-                            // a `ReturnExpr::Receiver` at the far end then
-                            // answers about that receiver rather than the one a
-                            // `Link` follow would thread.
-                            let transparent = sole_witness && !redispatched;
-                            let chase = |state: &mut QueryState| {
-                                match &*self.query_rec(bag, &sub_q, state) {
-                                    ReducedValue::Type(t) => Some(t.clone()),
-                                    ReducedValue::FactMap(_)
-                                    | ReducedValue::None => None,
-                                }
-                            };
-                            if transparent {
-                                chase(state)
-                            } else {
-                                state.in_opaque_frame(chase)
-                            }
-                        }
+                // An edge into the effect lane carries how its target ends,
+                // never a type (the `Member{.., Effects}` mirror, an
+                // inheritance hop).
+                WitnessPayload::Edge(target) if target.asks_effects() => {
+                    let sub_q = ReducerQuery {
+                        attachment: target,
+                        point: q.point,
+                        framework: q.framework,
+                        arity_hint: q.arity_hint,
+                        receiver: q.receiver.clone(),
+                        args: q.args.clone(),
+                        context: q.context,
                     };
+                    let ends = state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
+                        ReducedValue::Effects(e) => Some(*e),
+                        ReducedValue::Type(_) | ReducedValue::FactMap(_) | ReducedValue::None => None,
+                    });
+                    if let Some(e) = ends {
+                        out.push(Witness {
+                            attachment: w.attachment.clone(),
+                            source: w.source.clone(),
+                            payload: WitnessPayload::Effect(super::types::Effect::Ends(e)),
+                            span: w.span,
+                        });
+                    }
+                }
+                WitnessPayload::Edge(target) => {
+                    // An arm of a join is chased with the cut mark cleared, so
+                    // the mark it comes back with is its own.
+                    let joined = matches!(q.attachment, WitnessAttachment::Join { .. });
+                    let counted = q.attachment.counts_untyped_arms() && !q.attachment.is_temporal();
+                    let outer_low =
+                        (joined || counted).then(|| std::mem::replace(&mut state.low_cut, Taint::CLEAN));
+                    let resolved = self.chase_edge(bag, q, w, target, read, sole_witness, state);
+                    // An arm of a counted fold (a return arm, a member write)
+                    // that a cycle guard cut came back through the fold itself
+                    // (`return __SUB__->($n - 1)`): it adds nothing the other
+                    // arms do not, so it is no untyped arm.
+                    let mut recurrent = false;
+                    if let (false, Some(outer_low)) = (joined, outer_low) {
+                        let cut = state.low_cut;
+                        state.low_cut = outer_low.min(cut);
+                        recurrent = cut != Taint::CLEAN && cut != Taint::TRUNCATED;
+                    }
+                    if let (true, Some(outer_low)) = (joined, outer_low) {
+                        let cut = state.low_cut;
+                        state.low_cut = outer_low.min(cut);
+                        // An arm whose chase closed at this join or at a frame
+                        // still open above it, and came back untyped, is a
+                        // recurrence through the join (`$n = $n->parent` in a
+                        // loop). Closed at the join itself, it is chased again
+                        // below, once the other arms say what the join holds.
+                        // Closed above it (a read inside the loop asked first),
+                        // it drops out of this pass rather than making the join
+                        // untyped; the frame it closed at is then asked again
+                        // round the loop (`pass_round_loop`), where it types.
+                        // One that came back typed (`$s = $s . 'x'`) says what
+                        // it adds.
+                        let untyped = matches!(resolved, None | Some(InferredType::Unknown));
+                        let join = state.open_joins.last().copied().filter(|_| cut != Taint::TRUNCATED);
+                        if untyped && join.is_some_and(|join| cut < join) {
+                            crate::util::ghost_stats::count("join.recurrence_dropped");
+                            continue;
+                        }
+                        if untyped && join == Some(cut) {
+                            // What the first chase cut is superseded by the
+                            // pass, which marks what it depends on itself.
+                            state.low_cut = outer_low;
+                            recurring.push((w, target, cut));
+                            continue;
+                        }
+                    }
                     match resolved {
                         Some(t) => out.push(Witness {
                             attachment: w.attachment.clone(),
                             source: w.source.clone(),
                             payload: WitnessPayload::InferredType(t),
+                            span: w.span,
+                        }),
+                        // An arm of a value that every arm makes up is
+                        // still a way in: untyped, it makes the whole
+                        // untyped, rather than leaving the others to speak
+                        // for it. A lone arm is the whole: what it lacks,
+                        // the value lacks.
+                        None if q.attachment.folds_every_arm() && !sole_witness => out.push(Witness {
+                            attachment: w.attachment.clone(),
+                            source: w.source.clone(),
+                            payload: WitnessPayload::InferredType(InferredType::Unknown),
+                            span: w.span,
+                        }),
+                        // A join no path into carries a value replaces
+                        // nothing: the value coming in stands, as for a
+                        // region that answers nothing.
+                        None if target.folds_every_arm() => silent_joins.push(w.span.start),
+                        None if q.attachment.counts_untyped_arms() && !recurrent => out.push(Witness {
+                            attachment: w.attachment.clone(),
+                            source: w.source.clone(),
+                            payload: WitnessPayload::Fact {
+                                family: super::tags::FACT_UNTYPED_ARM.into(),
+                                key: String::new(),
+                                value: super::types::FactValue::Bool(true),
+                            },
                             span: w.span,
                         }),
                         // An edge that didn't resolve drops out — same as a
@@ -3200,7 +3626,7 @@ impl ReducerRegistry {
                             };
                             match &*self.query_rec(bag, &sub_q, state) {
                                 ReducedValue::Type(t) => Some(t.clone()),
-                                ReducedValue::FactMap(_)
+                                ReducedValue::FactMap(_) | ReducedValue::Effects(_)
                                 | ReducedValue::None => None,
                             }
                         }
@@ -3232,7 +3658,7 @@ impl ReducerRegistry {
                                         state.in_opaque_frame(|state| {
                                             match &*self.query_rec(bag, &sub_q, state) {
                                                 ReducedValue::Type(t) => Some(t.clone()),
-                                                ReducedValue::FactMap(_)
+                                                ReducedValue::FactMap(_) | ReducedValue::Effects(_)
                                                 | ReducedValue::None => None,
                                             }
                                         })
@@ -3296,7 +3722,7 @@ impl ReducerRegistry {
                                         state.in_opaque_frame(|state| {
                                             match &*self.query_rec(bag, &sub_q, state) {
                                                 ReducedValue::Type(t) => Some(t.clone()),
-                                                ReducedValue::FactMap(_)
+                                                ReducedValue::FactMap(_) | ReducedValue::Effects(_)
                                                 | ReducedValue::None => None,
                                             }
                                         })
@@ -3333,7 +3759,7 @@ impl ReducerRegistry {
                                         state.in_opaque_frame(|state| {
                                             match &*self.query_rec(bag, &sub_q, state) {
                                                 ReducedValue::Type(t) => Some(t.clone()),
-                                                ReducedValue::FactMap(_)
+                                                ReducedValue::FactMap(_) | ReducedValue::Effects(_)
                                                 | ReducedValue::None => None,
                                             }
                                         })
@@ -3343,9 +3769,10 @@ impl ReducerRegistry {
                         };
                         // The base projects on each value it may be. A value
                         // that is never unset is no evidence for `Defined`:
-                        // the read keeps whatever else it knows.
+                        // the read keeps whatever else it knows. An arm of a
+                        // join knows nothing else, so there it is the value.
                         let projected = match step {
-                            ProjectionStep::Defined if !base_ty.may_be_undef() => None,
+                            ProjectionStep::Defined if !base_ty.may_be_undef() && !matches!(q.attachment, WitnessAttachment::Join { .. }) => None,
                             // What a constraint admits is a proof, and a
                             // value that may be no constraint proves nothing.
                             ProjectionStep::ConstrainedInner => {
@@ -3381,7 +3808,7 @@ impl ReducerRegistry {
                         let t = state.in_opaque_frame(|state| {
                             match &*self.query_rec(bag, &sub_q, state) {
                                 ReducedValue::Type(t) => Some(t.clone()),
-                                ReducedValue::FactMap(_) | ReducedValue::None => None,
+                                ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
                             }
                         });
                         match t {
@@ -3410,7 +3837,7 @@ impl ReducerRegistry {
                         let sub_q = ReducerQuery { attachment: att, ..q.clone() };
                         state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
                             ReducedValue::Type(t) => Some(t.clone()),
-                            ReducedValue::FactMap(_) | ReducedValue::None => None,
+                            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
                         })
                     });
                     out.push(Witness {
@@ -3462,7 +3889,7 @@ impl ReducerRegistry {
                     let names = state
                         .in_opaque_frame(|state| match &*self.query_rec(bag, &of_q, state) {
                             ReducedValue::Type(t) => Some(t.clone()),
-                            ReducedValue::FactMap(_) | ReducedValue::None => None,
+                            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
                         })
                         .and_then(|t| match t.receiver_arms() {
                             [one] => one.class_name().map(str::to_string),
@@ -3484,7 +3911,107 @@ impl ReducerRegistry {
                 _ => out.push(w.clone()),
             }
         }
+        if !recurring.is_empty() {
+            self.rechase_recurring(bag, q, state, recurring, read, sole_witness, &mut out);
+        }
+        if !silent_joins.is_empty() {
+            out.retain(|w| !(matches!(w.payload, WitnessPayload::Reset) && silent_joins.contains(&w.span.start)));
+        }
         out
+    }
+
+    /// The arms of a join that came back untyped through a recurrence on
+    /// the join, chased again with the join answering what its other arms
+    /// hold: a pass round the loop. An arm that types then says what
+    /// a pass adds (`$n = $n->parent` keeps the class); one that still does
+    /// not (`$p = $p->{up}`) makes the join untyped, as any untyped arm does.
+    /// Anything the pass answers depends on the seed and is cut at the
+    /// join, so it is set aside with what the first chase remembered there.
+    /// Passes repeat, each seeded with the join of the last, until one adds
+    /// nothing: the loop's fixed point.
+    fn rechase_recurring(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        recurring: Vec<(&Witness, &WitnessAttachment, u32)>,
+        read: Option<ReadPoint>,
+        sole_witness: bool,
+        out: &mut Vec<Witness>,
+    ) {
+        let others: Vec<InferredType> = out
+            .iter()
+            .filter_map(|w| match &w.payload {
+                WitnessPayload::InferredType(t) if t.is_known() => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        let join = state.open_joins.last().copied();
+        let seed = (!others.is_empty())
+            .then(|| crate::model::file_analysis::join_all(&others, &crate::model::file_analysis::Unordered))
+            .flatten();
+        // Passes nest `MAX_PASS_NESTING` deep (a loop in a loop); a deeper
+        // one is not taken: the arm stays untyped, which is sound and bounds
+        // the work.
+        let pass = match (join, seed) {
+            (Some(join), Some(seed)) if state.passes_open() < MAX_PASS_NESTING => Some((join, seed)),
+            _ => None,
+        };
+        let resolved: Vec<Option<InferredType>> = match pass {
+            None => {
+                for &(_, _, cut) in &recurring {
+                    state.close_cut_at(cut);
+                }
+                if state.passes_open() >= MAX_PASS_NESTING {
+                    state.refuse_pass();
+                }
+                recurring.iter().map(|_| None).collect()
+            }
+            Some((join, mut seed)) => {
+                let order = super::reducers::class_order(q);
+                let mut rounds = 0;
+                loop {
+                    rounds += 1;
+                    let aside = state.set_aside_answers_through(join);
+                    state.join_seeds.insert(join, seed.clone());
+                    let outer_low = std::mem::replace(&mut state.low_cut, Taint::CLEAN);
+                    let resolved: Vec<Option<InferredType>> = recurring
+                        .iter()
+                        .map(|&(w, target, _)| {
+                            crate::util::ghost_stats::count("join.recurrence_rechased");
+                            self.chase_edge(bag, q, w, target, read, sole_witness, state)
+                        })
+                        .collect();
+                    state.low_cut = outer_low.min(state.low_cut);
+                    state.join_seeds.remove(&join);
+                    state.restore_answers_through(join, aside);
+                    // A pass that leaves an arm untyped makes the join
+                    // untyped; one that adds nothing the seed holds is the
+                    // fixed point. The lattice is finite and a union widens
+                    // past its arm cap, so the passes end; the cap is the
+                    // dispatcher's guard, never reached on a sound lattice.
+                    let passed: Option<Vec<InferredType>> = resolved.iter().map(|r| r.clone().filter(InferredType::is_known)).collect();
+                    let next = passed.and_then(|ts| {
+                        crate::model::file_analysis::join_all(&[std::slice::from_ref(&seed), &ts].concat(), order)
+                    });
+                    match next {
+                        Some(next) if next != seed && rounds < MAX_LOOP_PASSES => seed = next,
+                        _ => {
+                            crate::util::ghost_stats::count_by("join.recurrence_passes", rounds);
+                            break resolved;
+                        }
+                    }
+                }
+            }
+        };
+        for ((w, _, _), resolved) in recurring.into_iter().zip(resolved) {
+            out.push(Witness {
+                attachment: w.attachment.clone(),
+                source: w.source.clone(),
+                payload: WitnessPayload::InferredType(resolved.unwrap_or(InferredType::Unknown)),
+                span: w.span,
+            });
+        }
     }
 
     /// Materialize `att` under `q`'s point and context, in an opaque frame:
@@ -3512,7 +4039,7 @@ impl ReducerRegistry {
         };
         state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
             ReducedValue::Type(t) => Some(t.clone()),
-            ReducedValue::FactMap(_) | ReducedValue::None => None,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
         })
     }
 
@@ -3530,6 +4057,10 @@ impl ReducerRegistry {
         receiver: Option<&WitnessAttachment>,
         args: Option<&[CallArg]>,
     ) -> Option<InferredType> {
+        // A call that cannot come back has no value to look up.
+        if self.invoke_ends(bag, q, state, site, callee, receiver).is_some_and(|e| !e.completes()) {
+            return Some(InferredType::Never);
+        }
         let recv = receiver.and_then(|r| self.operand_type(bag, q, state, site, r)).map(InferredType::into_invocant);
         // Positional argument types up to the first spread; an operand that
         // types nothing holds its position as `Unknown`.
@@ -3566,7 +4097,7 @@ impl ReducerRegistry {
             };
             let member = state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
                 ReducedValue::Type(t) => Some(t.clone()),
-                ReducedValue::FactMap(_) | ReducedValue::None => None,
+                ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
             });
             if member.is_some() {
                 return member;
@@ -3670,7 +4201,7 @@ impl ReducerRegistry {
             };
             state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
                 ReducedValue::Type(t) => Some(t.clone()),
-                ReducedValue::FactMap(_) | ReducedValue::None => None,
+                ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
             })
         });
         let constructs = matches!(callee, Callee::Method { constructs: true, .. });
@@ -3810,7 +4341,7 @@ impl ReducerRegistry {
             };
             match &*self.query_rec(&full.witnesses, &q, state) {
                 ReducedValue::Type(t) => Some(t.clone()),
-                ReducedValue::FactMap(_) | ReducedValue::None => None,
+                ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
             }
         };
         // Two passes so the R4 retry can never SHADOW a later exporter's raw
@@ -3915,6 +4446,228 @@ impl ReducerRegistry {
         declared.then_some(answer)
     }
 
+    /// How the first call in `gates` (each its `Expr`) that control does not
+    /// come back from ends, or `None` when it comes back from all of them:
+    /// no evidence about one is the top, which comes back.
+    fn closed_gate(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState, gates: &[WitnessAttachment]) -> Option<Ends> {
+        gates.iter().find_map(|g| {
+            crate::util::ghost_stats::count("effect.gate");
+            let ends = self.expr_ends(bag, q, state, g).filter(|e| !e.contains(super::types::Ends::COMPLETES));
+            if ends.is_some() {
+                crate::util::ghost_stats::count("effect.gate_closed");
+            }
+            ends
+        })
+    }
+
+    /// How evaluating the expression at `att` ends: what it states of itself
+    /// (a local jump, a builtin), and for a call, how its callee ends. `None`
+    /// is no evidence, the top.
+    pub(super) fn expr_ends(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        att: &WitnessAttachment,
+    ) -> Option<Ends> {
+        let mut stated: Option<Ends> = None;
+        let mut join = |e: Ends| stated = Some(stated.map_or(e, |s| s | e));
+        for w in bag.iter_attachment(att) {
+            match &w.payload {
+                WitnessPayload::Effect(Effect::Ends(e)) => join(*e),
+                WitnessPayload::Invoke { callee, receiver, .. } => {
+                    join(self.invoke_ends(bag, q, state, w.span.start, callee, receiver.as_ref())?)
+                }
+                // A call reached through its ref (`Expr(call) → Expression`).
+                WitnessPayload::Edge(t @ (WitnessAttachment::Expr(_) | WitnessAttachment::Expression(_))) => {
+                    join(self.expr_ends(bag, q, state, t)?)
+                }
+                _ => {}
+            }
+        }
+        stated
+    }
+
+    /// How a call to `callee` ends: its definition's answer, joined over
+    /// every definition the call may run. A callee the call cannot pin to
+    /// the definitions it runs is an open set, so the top.
+    #[allow(clippy::too_many_arguments)]
+    fn invoke_ends(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        site: Point,
+        callee: &Callee,
+        receiver: Option<&WitnessAttachment>,
+    ) -> Option<Ends> {
+        let ask = |state: &mut QueryState, att: WitnessAttachment| self.ask_ends(bag, q, state, att);
+        match callee {
+            Callee::Function { name, local, member_of, .. } => {
+                // A class member the eliding body names hides every free
+                // function of the name, as it does for the value.
+                if let Some(class) = member_of {
+                    if let Some(e) = ask(state, WitnessAttachment::effects_of(class.clone(), name.clone())) {
+                        return Some(e);
+                    }
+                }
+                match local {
+                    Some(sid) => ask(state, WitnessAttachment::SymbolEffects(*sid)),
+                    // One defined elsewhere answers from the index's resident
+                    // table, never by chasing that file's bag: a name no
+                    // indexed callable is known not to come back from passes
+                    // unresolved. One whose answer runs through its own
+                    // callees elsewhere is the top until the whole-program
+                    // engine carries it (`TODO(effect-wrappers)`).
+                    None => q.context?.module_index?.callable_ends(name),
+                }
+            }
+            // A class the call names runs that class's resolution of the
+            // name, whatever subclasses exist.
+            Callee::Method { name, lookup: Lookup::Named(class), .. } => {
+                ask(state, WitnessAttachment::effects_of(class.clone(), name.clone()))
+            }
+            Callee::Method { name, lookup: Lookup::Super { writer }, .. } => {
+                let ctx = q.context?;
+                let parents = crate::model::file_analysis::parents_of(
+                    writer,
+                    ctx.package_parents,
+                    ctx.module_index,
+                    ctx.app_surface_consumers,
+                );
+                // The first parent in MRO order that defines it is the one
+                // Perl runs. Only a parent this file shows lacks it is passed
+                // over: any other may define it, and then its answer, even
+                // none, is the call's.
+                let p = parents.into_iter().find(|p| !file_shows_absent(bag, ctx, p, name))?;
+                ask(state, WitnessAttachment::effects_of(p, name.clone()))
+            }
+            // A receiver may be any subclass of its class, so the call runs
+            // that class's resolution or any descendant's override: all of
+            // them join. A name nothing known may fail to come back from
+            // passes without resolving the receiver.
+            Callee::Method { name, lookup: Lookup::Receiver, .. } => {
+                if !self.name_may_not_complete(bag, q, state, name) {
+                    return None;
+                }
+                let t = self.operand_type(bag, q, state, site, receiver?)?;
+                self.receiver_ends(bag, q, state, name, &t)
+            }
+            // A constructor's effect and a code reference's target are not
+            // pinned by the call.
+            Callee::Construct { .. } | Callee::Value(_) => None,
+        }
+    }
+
+    /// Whether some callable named `name` is known that may not come back:
+    /// one another file defines (the index's resident rows) or one of this
+    /// file. Only skips work; a name it misses answers the top.
+    fn name_may_not_complete(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState, name: &str) -> bool {
+        let Some(ctx) = q.context else { return false };
+        if ctx.module_index.is_some_and(|idx| idx.callable_ends(name).is_some()) {
+            return true;
+        }
+        ctx.symbols
+            .iter()
+            .filter(|s| s.name == name && matches!(s.kind, crate::model::file_analysis::SymKind::Sub | crate::model::file_analysis::SymKind::Method))
+            .any(|s| self.ask_ends(bag, q, state, WitnessAttachment::SymbolEffects(s.id)).is_some_and(|e| !e.completes()))
+    }
+
+    /// How a call ends whose receiver holds `t`: joined over every class
+    /// an arm may be and every descendant of it, each by its own
+    /// resolution of `name`. An arm that names no class is an open set.
+    fn receiver_ends(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState, name: &str, t: &InferredType) -> Option<Ends> {
+        const FAMILY_CAP: usize = 64;
+        let ctx = q.context?;
+        let mut out: Option<Ends> = None;
+        for arm in t.receiver_arms() {
+            let class = arm.class_name()?;
+            let mut family: Vec<String> = vec![class.to_string()];
+            let mut i = 0;
+            while i < family.len() {
+                if family.len() > FAMILY_CAP {
+                    return None;
+                }
+                let current = family[i].clone();
+                let mut children = ctx.package_parents.local_children(&current);
+                if let Some(idx) = ctx.module_index {
+                    children.extend(idx.direct_children_of(&current).into_iter().map(|(pkg, _)| pkg));
+                }
+                for c in children {
+                    if !family.contains(&c) {
+                        family.push(c);
+                    }
+                }
+                i += 1;
+            }
+            for d in &family {
+                let e = self.resolved_member_ends(bag, q, state, d, name)?;
+                out = Some(out.map_or(e, |o| o | e));
+            }
+        }
+        out
+    }
+
+    /// How `class`'s resolution of `name` ends: the first class up its
+    /// MRO that defines it answers. Not found, or past a class whose
+    /// parents are set at run time or that nothing here or indexed holds,
+    /// it is the top (`AUTOLOAD` included).
+    fn resolved_member_ends(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState, class: &str, name: &str) -> Option<Ends> {
+        const MRO_CAP: usize = 64;
+        let ctx = q.context?;
+        let mut seen: Vec<String> = Vec::new();
+        let mut stack: Vec<String> = vec![class.to_string()];
+        while let Some(k) = stack.pop() {
+            if seen.contains(&k) {
+                continue;
+            }
+            if seen.len() >= MRO_CAP {
+                return None;
+            }
+            seen.push(k.clone());
+            let att = WitnessAttachment::effects_of(k.clone(), name.to_string());
+            let WitnessAttachment::Member { space, .. } = &att else { unreachable!("effects_of is a member") };
+            if bag.iter_attachment(&att).next().is_some() || defines_member_here(bag, &k, *space, name) {
+                return self.ask_ends(bag, q, state, att);
+            }
+            let local = !ctx.package_parents.declared_parents(&k).is_empty();
+            match ctx.module_index.map(|idx| idx.member_ends(&k, name)) {
+                Some(crate::model::file_analysis::MemberEnds::Declared(e)) => return Some(e),
+                Some(crate::model::file_analysis::MemberEnds::Absent) => {}
+                Some(crate::model::file_analysis::MemberEnds::Unknown) | None if !local => return None,
+                _ => {}
+            }
+            let dynamic = ctx.package_parents.has_dynamic_parents(&k)
+                || ctx.module_index.is_some_and(|idx| idx.def_candidates(&k).iter().any(|c| c.analysis.has_dynamic_parents(&k)));
+            if dynamic {
+                return None;
+            }
+            let parents = crate::model::file_analysis::parents_of(&k, ctx.package_parents, ctx.module_index, ctx.app_surface_consumers);
+            // Depth first, left to right: Perl's default MRO.
+            stack.extend(parents.into_iter().rev());
+        }
+        None
+    }
+
+    /// The effect lane's answer on `att`. A callable on the path answers
+    /// no way of ending (the cycle cut, `query_rec`); a depth cap answers
+    /// nothing, the top.
+    fn ask_ends(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState, att: WitnessAttachment) -> Option<Ends> {
+        let sub_q = ReducerQuery {
+            attachment: &att,
+            point: q.point,
+            framework: q.framework,
+            arity_hint: None,
+            receiver: None,
+            args: Vec::new(),
+            context: q.context,
+        };
+        state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
+            ReducedValue::Effects(e) => Some(*e),
+            ReducedValue::Type(_) | ReducedValue::FactMap(_) | ReducedValue::None => None,
+        })
+    }
+
     /// Scope-chain variable lookup with an explicit visited set.
     /// `query_variable_type` is the public entry; this is the inner loop,
     /// factored out so callers already inside a `query_rec` recursion
@@ -3957,7 +4710,7 @@ impl ReducerRegistry {
         };
         match &*self.query_rec(bag, &q, state) {
             ReducedValue::Type(t) => Some(t.clone()),
-            ReducedValue::FactMap(_) | ReducedValue::None => None,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
         }
     }
 }
@@ -3987,11 +4740,111 @@ impl ReducerRegistry {
             args: Vec::new(),
             context: Some(ctx),
         };
-        match &*self.query_rec(bag, &q, state) {
+        let held = match &*self.query_rec(bag, &q, state) {
             ReducedValue::Type(t) => Some(t.clone()),
-            ReducedValue::FactMap(_) | ReducedValue::None => None,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
+        };
+        self.join_may_be(bag, &q, held, state)
+    }
+
+    /// `held`, joined with what every `MayBe` on the place standing at the
+    /// query point may leave it holding. One that holds no type leaves the
+    /// place untyped, as an untyped arm leaves a join.
+    fn join_may_be(&self, bag: &WitnessBag, q: &ReducerQuery, held: Option<InferredType>, state: &mut QueryState) -> Option<InferredType> {
+        let standing = |w: &&Witness| match (&w.payload, q.point) {
+            (WitnessPayload::MayBe(WitnessAttachment::Join { of, .. }), Some(p)) => p.reaches(w.span.start) && !(of.start <= p.at && p.at <= of.end),
+            (WitnessPayload::MayBe(_), _) => true,
+            _ => false,
+        };
+        let mut may = bag.may_be(q.attachment).filter(standing).peekable();
+        if may.peek().is_none() {
+            return held;
+        }
+        let mut t = held?;
+        for w in may {
+            let WitnessPayload::MayBe(target) = &w.payload else { continue };
+            let sub_q = ReducerQuery { attachment: target, point: None, args: Vec::new(), ..q.clone() };
+            let also = state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
+                ReducedValue::Type(t) => Some(t.clone()),
+                ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
+            })?;
+            t = crate::model::file_analysis::join(&t, &also, super::reducers::class_order(q));
+        }
+        Some(t)
+    }
+}
+
+/// Does this bag define callable `name` on `owner` itself? Any fact on the
+/// member's `Returns` attachment says so, except an edge to the same member
+/// one class up, which is how an inherited one is reached.
+fn defines_member_here(bag: &WitnessBag, owner: &str, space: crate::model::file_analysis::NamespaceId, name: &str) -> bool {
+    let returns = WitnessAttachment::Member { owner: owner.to_string(), space, name: name.to_string(), aspect: MemberAspect::Returns };
+    bag.iter_attachment(&returns).any(|w| {
+        !matches!(&w.payload, WitnessPayload::Edge(WitnessAttachment::Member { name: n, .. }) if n == name)
+    })
+}
+
+/// Whether the latest write before `q`'s point left its place bound to
+/// nothing (`WitnessPayload::Unbind`, pushed after its write's `Reset`).
+fn unbound_at(bag: &WitnessBag, q: &ReducerQuery) -> bool {
+    let Some(point) = q.point.filter(|_| q.attachment.is_temporal()) else { return false };
+    let mut latest: Option<(Point, bool)> = None;
+    for w in bag.iter_attachment(q.attachment).filter(|w| point.reaches(w.span.start)) {
+        let unbinds = match w.payload {
+            WitnessPayload::Unbind => true,
+            WitnessPayload::Reset => false,
+            _ => continue,
+        };
+        // Writes at one site stand in bag order: a join landing where an
+        // arm ends is pushed after the arm's own writes.
+        if latest.is_none_or(|(at, _)| at <= w.span.start) {
+            latest = Some((w.span.start, unbinds));
         }
     }
+    latest.is_some_and(|(_, u)| u)
+}
+
+/// Whether `att` states of itself an effect that never completes.
+fn stated_never_completes(bag: &WitnessBag, att: &WitnessAttachment) -> bool {
+    let mut stated: Option<super::types::Ends> = None;
+    for w in bag.iter_attachment(att) {
+        if let WitnessPayload::Effect(super::types::Effect::Ends(e)) = &w.payload {
+            stated = Some(stated.map_or(*e, |s| s | *e));
+        }
+    }
+    stated.is_some_and(|e| !e.completes())
+}
+
+/// Whether this file shows that neither `class` nor any ancestor of it
+/// defines callable `name`: each is a package the file declares, and none
+/// states anything of the member.
+fn file_shows_absent(bag: &WitnessBag, ctx: &BagContext, class: &str, name: &str) -> bool {
+    use crate::model::file_analysis::SymKind;
+    let declared = |c: &str| {
+        ctx.symbols.iter().any(|s| matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == c)
+    };
+    let defines = |c: &str| {
+        defines_member_here(bag, c, crate::model::file_analysis::NamespaceId::CALLABLES, name)
+            || bag.iter_attachment(&WitnessAttachment::effects_of(c, name)).next().is_some()
+    };
+    let mut seen: Vec<String> = Vec::new();
+    let mut todo = vec![class.to_string()];
+    while let Some(c) = todo.pop() {
+        if seen.contains(&c) {
+            continue;
+        }
+        if !declared(&c) || defines(&c) || seen.len() >= 20 {
+            return false;
+        }
+        todo.extend(crate::model::file_analysis::parents_of(
+            &c,
+            ctx.package_parents,
+            ctx.module_index,
+            ctx.app_surface_consumers,
+        ));
+        seen.push(c);
+    }
+    true
 }
 
 /// Where an edge with no read position asks a binding from: the end of the

@@ -106,9 +106,9 @@ Variable shape witnesses:
   drills back typed, and a typo beside it still hints.
 - **Dynamic key, conditional write, scope-crossing write, or slice
   write → OPEN.** Conditionality is syntactic
-  (`cst::conditional_arm` with `ArmBound::Sub`: if/unless bodies, loop
-  bodies, postfix modifiers, ternary branches, short-circuit right
-  operands) plus structural at the pass (the write's
+  (an arm of `queries/perl/ctl.scm` up to the sub, `control::arm_around`:
+  if/unless bodies, loop bodies, postfix modifiers, ternary branches,
+  short-circuit right operands) plus structural at the pass (the write's
   scope chain crossing any boundary before the attachment scope:
   nested block or closure, execution unknowable). Slice writes land
   several keys at once; all six spellings (`@h{…}`/`%h{k}`,

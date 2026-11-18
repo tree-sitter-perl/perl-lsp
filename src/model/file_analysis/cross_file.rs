@@ -424,6 +424,17 @@ pub mod path_intern {
     }
 }
 
+/// What the index can say of how a class's own member of a name ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberEnds {
+    /// Nothing indexed provides the class.
+    Unknown,
+    /// The class is indexed and none of its files declares the name.
+    Absent,
+    /// Some file of the class may declare it; joined over them.
+    Declared(crate::model::witnesses::Ends),
+}
+
 pub trait CrossFileLookup {
     /// Monotone validity counter for everything a cross-file walk reads —
     /// registrations, freshness records, cache-slot/loader-shape swaps.
@@ -540,6 +551,18 @@ pub trait CrossFileLookup {
         _path: &std::path::Path,
     ) -> Option<std::sync::Arc<crate::model::witnesses::ConclusionMap>> {
         None
+    }
+    /// How a call to a callable named `name` defined in another indexed
+    /// file ends, from what each declaring file alone says: `None` when
+    /// none is known not to come back (the top).
+    fn callable_ends(&self, _name: &str) -> Option<crate::model::witnesses::Ends> {
+        None
+    }
+    /// How a call to the `name` that `class` itself defines ends, from the
+    /// files that provide `class`. `Unknown` where nothing indexed provides
+    /// it.
+    fn member_ends(&self, _class: &str, _name: &str) -> MemberEnds {
+        MemberEnds::Unknown
     }
     fn get_cached(&self, module_name: &str) -> Option<std::sync::Arc<CachedModule>>;
     /// `get_cached` scoped to a querying file's VISIBILITY set (its own path +
@@ -1362,6 +1385,12 @@ impl<'a> ScopedLookup<'a> {
 impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn resolution_epoch(&self) -> u64 {
         self.inner.resolution_epoch()
+    }
+    fn callable_ends(&self, name: &str) -> Option<crate::model::witnesses::Ends> {
+        self.inner.callable_ends(name)
+    }
+    fn member_ends(&self, class: &str, name: &str) -> MemberEnds {
+        self.inner.member_ends(class, name)
     }
     fn is_dependency_path(&self, path: &crate::util::canonical_path::CanonicalPath) -> bool {
         self.inner.is_dependency_path(path)

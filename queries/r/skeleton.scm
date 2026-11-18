@@ -64,6 +64,7 @@
 (string) @expr.lit.string
 (float) @expr.lit.number
 (integer) @expr.lit.number
+(null) @expr.lit.null
 
 ; ---- keyed shapes: list(a = 1, b = 2) / data.frame(age = ..., ...) ----
 ; Named arguments of a shape constructor are the keys. Which callees

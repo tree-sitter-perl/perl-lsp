@@ -401,7 +401,6 @@ fn build_once(
         attr_projections: Vec::new(),
         escape_recorded: std::collections::HashSet::new(),
         role_requires: std::collections::HashMap::new(),
-        dynamic_parent_packages: std::collections::HashSet::new(),
         dynamic_dispatch_sites: 0,
         role_maker_modules: std::collections::HashSet::new(),
         framework_mode_modules: std::collections::HashMap::new(),
@@ -421,6 +420,10 @@ fn build_once(
         method_call_ref_dedup: std::collections::HashSet::new(),
         tag_narrowings: Vec::new(),
         pending_narrowings: Vec::new(),
+        place_disturbances: None,
+        untaken_proofs: Vec::new(),
+        guard_seeds: Vec::new(),
+        narrowed_arms: Default::default(),
         rebinds: Default::default(),
         guard_sites: Vec::new(),
         arrow_deref_sites: Vec::new(),
@@ -570,6 +573,10 @@ fn build_once(
     // edge-driven replacement for the `cst::rebinds_scalar` walk) and emit.
     bphase!("narrowing_cutoffs", b.apply_narrowing_cutoffs());
 
+    // Where paths rejoin, a rebound variable holds every path's value: the
+    // joins, minted once from the control document and the bound writes.
+    bphase!("assemble_joins", b.assemble_joins());
+
     // Export-list member refs: a `@EXPORT` / `@EXPORT_OK` / `%EXPORT_TAGS`
     // member naming a local sub gets a FunctionCall ref back to it. Runs
     // post-walk because subs are usually declared after the export list.
@@ -716,9 +723,12 @@ fn build_once(
             .all()
             .iter()
             .filter_map(|w| match (&w.attachment, &w.payload) {
-                (WitnessAttachment::Place(p), WitnessPayload::InferredType(_) | WitnessPayload::Projected { .. }) => {
-                    Some(&**p)
-                }
+                (
+                    WitnessAttachment::Place(p),
+                    WitnessPayload::InferredType(_)
+                    | WitnessPayload::Projected { .. }
+                    | WitnessPayload::Edge(WitnessAttachment::Join { .. }),
+                ) => Some(&**p),
                 _ => None,
             })
             .collect();
@@ -900,7 +910,7 @@ impl<'a> Builder<'a> {
             self.package_framework.clone(),
             self.role_requires.clone(),
             self.role_packages.clone(),
-            self.dynamic_parent_packages.clone(),
+            self.package_parents.dynamic().clone(),
             self.blessing_packages.clone(),
         )
     }

@@ -5,7 +5,9 @@ use crate::build::query_extract::*;
 pub fn perl_pack() -> LangPack {
     LangPack {
         id: "perl",
-        query_source: include_str!("../../../queries/perl/skeleton.scm"),
+        // The control document is the builder's too: an observation holds
+        // only within the `@ctl` arm around it.
+        query_source: concat!(include_str!("../../../queries/perl/skeleton.scm"), include_str!("../../../queries/perl/ctl.scm")),
         names: crate::model::conventions::PERL_SPELLINGS,
         free_names: FreeNameLookup::Global,
         construction: crate::model::file_analysis::ConstructionKey::Constructor,

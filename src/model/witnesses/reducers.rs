@@ -170,6 +170,10 @@ pub enum ReducedValue {
     Type(InferredType),
     FactMap(Vec<(String, FactValue)>),
     None,
+    /// How something ends: the answer of an attachment that
+    /// `asks_effects`, never of one that holds a value. A type reader
+    /// treats it as no type.
+    Effects(super::types::Ends),
 }
 
 pub trait WitnessReducer: Send + Sync {
@@ -322,7 +326,10 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                 .filter(|w| matches!(w.payload, WitnessPayload::InferredType(_)))
                 .map(|w| w.span.start)
                 .max();
-            let mut narrow: Option<(&Witness, u64)> = None;
+            // The narrowest region wins. Regions that tie are arms of one
+            // value (a member's class-wide writes), so they join.
+            let mut narrow: Option<u64> = None;
+            let mut tied: Vec<&Witness> = Vec::new();
             for w in ws {
                 if let WitnessPayload::InferredType(_) = w.payload {
                     if span_contains(&w.span, point)
@@ -331,15 +338,45 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                         && latest_point_fact.is_none_or(|p| p <= w.span.start)
                     {
                         let area = span_area(&w.span);
-                        if narrow.is_none_or(|(_, a)| area < a) {
-                            narrow = Some((*w, area));
+                        match narrow {
+                            Some(a) if area > a => {}
+                            Some(a) if a == area => tied.push(*w),
+                            _ => {
+                                narrow = Some(area);
+                                tied = vec![*w];
+                            }
                         }
                     }
                 }
             }
-            if let Some((w, _)) = narrow {
-                if let WitnessPayload::InferredType(t) = &w.payload {
-                    return ReducedValue::Type(t.clone());
+            let narrowed = match tied.as_slice() {
+                [] => None,
+                [w] => match &w.payload {
+                    WitnessPayload::InferredType(t) => Some((t.clone(), *w)),
+                    _ => None,
+                },
+                arms => {
+                    let types: Vec<InferredType> = arms
+                        .iter()
+                        .filter_map(|w| match &w.payload {
+                            WitnessPayload::InferredType(t) => Some(t.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    crate::model::file_analysis::join_all(&types, class_order(q)).map(|t| (t, arms[0]))
+                }
+            };
+            if let Some((t, w)) = narrowed {
+                // An untyped region yields to a use inside it, as an
+                // untyped write does (the full fold below).
+                let used_inside = !t.is_known()
+                    && ws.iter().any(|o| {
+                        matches!(o.payload, WitnessPayload::Observation(_))
+                            && window.admits(o)
+                            && o.span.start >= w.span.start
+                    });
+                if !used_inside {
+                    return ReducedValue::Type(t);
                 }
             }
         }
@@ -464,10 +501,15 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             }
         }
         // An `Unknown` on the plain axis (a reset the RHS never typed, a
-        // join approximation) yields to rep and scalar-context evidence that
-        // lands strictly after it: `$r = f(); $r->{k}` reads the hash.
-        if matches!(plain_type, Some(InferredType::Unknown))
-            && last_observation_at > plain_type_at
+        // join approximation), or an open one whose `…` it could name, yields
+        // to rep and scalar-context evidence that
+        // lands at or after it: `$r = f(); $r->{k}` reads the hash, and a
+        // loop's test reads the value its head join lands right where the
+        // test starts. A write lands past its RHS, so no use in the RHS ties
+        // it.
+        if matches!(plain_type, Some(InferredType::Unknown | InferredType::Open(_)))
+            && last_observation_at.is_some()
+            && last_observation_at >= plain_type_at
         {
             plain_type = None;
         }
@@ -479,8 +521,15 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         }
         // The class axis wins over rep, consistent or not: the user's intent
         // is object-typed use, and a rep mismatch is a separate diagnostic.
+        // An undef written or declared beside it is no rep but absence: the
+        // place holds the class or nothing.
         if let Some(name) = class_assertion.name {
-            return ReducedValue::Type(InferredType::ClassName(name));
+            let class = InferredType::ClassName(name);
+            return ReducedValue::Type(match plain_type {
+                Some(t) if t.is_undef() => InferredType::Optional(Box::new(class)),
+                Some(InferredType::Optional(inner)) if *inner == class => InferredType::Optional(inner),
+                _ => class,
+            });
         }
         // A method's invocant IS the call's receiver: with one in hand (a
         // chase through `$o->m`) it answers that receiver, so `return $self`
@@ -583,8 +632,8 @@ impl WitnessReducer for BranchArmFold {
         // a distinct source at emission so this fold can prefer them.
         let mut fallback: Vec<InferredType> = Vec::new();
         let mut undef_arms = 0usize;
-        // `Some(exits)` for a short-circuit, whether or not its arms typed.
-        let mut short_circuit: Option<bool> = None;
+        // Whether this is a short-circuit, whether or not its arms typed.
+        let mut short_circuit = false;
         for w in ws {
             let is_fallback =
                 matches!(&w.source, WitnessSource::Builder(t) if t == "fallback_arm");
@@ -592,17 +641,16 @@ impl WitnessReducer for BranchArmFold {
                 WitnessPayload::InferredType(t) if is_fallback => fallback.push(t.clone()),
                 WitnessPayload::InferredType(t) => typed.push(t.clone()),
                 WitnessPayload::Fact { family, .. } if family == tags::FACT_UNDEF_ARM => undef_arms += 1,
-                WitnessPayload::Fact { family, value, .. } if family == tags::FACT_SHORT_CIRCUIT => {
-                    short_circuit = Some(matches!(value, FactValue::Bool(true)));
-                }
+                WitnessPayload::Fact { family, .. } if family == tags::FACT_SHORT_CIRCUIT => short_circuit = true,
                 _ => {}
             }
         }
-        if let Some(exits) = short_circuit {
-            // `X || return`: when the fallback runs nothing is assigned, so
-            // the value is `X` minus its false part — an `Optional` peels,
-            // and a plain `undef` never gets past the exit.
-            if exits {
+        if short_circuit {
+            // `X || return`: a fallback that never comes back (`Never`)
+            // assigns nothing when it runs, so the value is `X` minus its
+            // false part — an `Optional` peels, and a plain `undef` never
+            // gets past the exit.
+            if !fallback.is_empty() && fallback.iter().all(InferredType::is_never) {
                 return match typed.first().and_then(InferredType::defined_part) {
                     Some(t) => ReducedValue::Type(t.clone()),
                     None => ReducedValue::None,
@@ -625,6 +673,9 @@ impl WitnessReducer for BranchArmFold {
             let unseen_left = typed.is_empty() && undef_arms == 0;
             let all: Vec<InferredType> = defined.chain(fallback).collect();
             return match crate::model::file_analysis::join_all(&all, class_order(_q)) {
+                // A fallback that leaves (`X // fatal()`) is `Never`, the
+                // join's identity; with no left in sight that says nothing.
+                Some(t) if t.is_never() && unseen_left => ReducedValue::None,
                 Some(t) if unseen_left => ReducedValue::Type(t.joined_with_unseen()),
                 Some(t) => ReducedValue::Type(t),
                 None => ReducedValue::None,
@@ -644,6 +695,79 @@ impl WitnessReducer for BranchArmFold {
             Some(t) => ReducedValue::Type(t),
             None => ReducedValue::None,
         }
+    }
+}
+
+// ---- Join fold ----
+
+/// The value of a place where control paths rejoin: the join of what it
+/// holds at the end of every arm that reaches the join. Its arms arrive
+/// materialized, an untyped one as `Unknown` (`folds_every_arm`), so one
+/// arm the chase could not type makes the place `Unknown` rather than
+/// letting the others answer for it.
+pub struct JoinFold;
+
+impl WitnessReducer for JoinFold {
+    fn name(&self) -> &str {
+        "join_fold"
+    }
+
+    fn claims(&self, w: &Witness) -> bool {
+        matches!(w.attachment, WitnessAttachment::Join { .. })
+            && matches!(w.payload, WitnessPayload::InferredType(_))
+    }
+
+    fn reduce(&self, ws: &[&Witness], q: &ReducerQuery) -> ReducedValue {
+        let arms: Vec<InferredType> = ws
+            .iter()
+            .filter_map(|w| match &w.payload {
+                WitnessPayload::InferredType(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        match crate::model::file_analysis::join_all(&arms, class_order(q)) {
+            Some(t) => ReducedValue::Type(t),
+            None => ReducedValue::None,
+        }
+    }
+}
+
+// ---- Effect fold ----
+
+/// How a callable ends: the union of the `Ends` its arms state, from the
+/// highest-priority source present, so a declaration or a plugin's
+/// statement answers instead of the body's inferred arms
+/// (`WitnessSource::priority`). It answers only an attachment that
+/// `asks_effects`: an expression's own effect sits beside its value
+/// witnesses and must never answer a type question asked of it.
+pub struct EffectFold;
+
+impl WitnessReducer for EffectFold {
+    fn name(&self) -> &str {
+        "effect_fold"
+    }
+
+    fn claims(&self, w: &Witness) -> bool {
+        matches!(w.payload, WitnessPayload::Effect(_))
+    }
+
+    fn reduce(&self, ws: &[&Witness], q: &ReducerQuery) -> ReducedValue {
+        if !q.attachment.asks_effects() {
+            return ReducedValue::None;
+        }
+        let Some(top) = ws.iter().map(|w| w.source.priority()).max() else {
+            return ReducedValue::None;
+        };
+        let top: Vec<&&Witness> = ws.iter().filter(|w| w.source.priority() == top).collect();
+        let declared = top
+            .iter()
+            .any(|w| matches!(w.payload, WitnessPayload::Effect(super::types::Effect::Declared(_))));
+        let ends = top.iter().fold(super::types::Ends::empty(), |acc, w| match &w.payload {
+            WitnessPayload::Effect(super::types::Effect::Declared(e)) => acc | *e,
+            WitnessPayload::Effect(super::types::Effect::Ends(e)) if !declared => acc | *e,
+            _ => acc,
+        });
+        ReducedValue::Effects(ends)
     }
 }
 

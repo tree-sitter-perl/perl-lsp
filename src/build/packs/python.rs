@@ -40,7 +40,7 @@ pub fn python_pack() -> LangPack {
         family_reach: crate::model::file_analysis::FamilyReach::Descendants,
         // `bool` is a subclass of `int`.
         lattice: PYTHON_LATTICE,
-        type_display: |_| None,
+        type_display: |tag| (tag == "Undef").then_some("None"),
         shape_name: |raw| raw.to_string(),
         default_name: |_, _| None,
         annot_type: annotation_type,

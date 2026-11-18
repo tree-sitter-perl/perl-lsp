@@ -153,6 +153,18 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             let target = Target { name, scopes: target_scopes, at, resets, token: e.span(), relative, space, constant };
             f.flow_targets.insert(e.match_id, target);
         }
+        Capture::Flow(FlowCap::Unbind) => {
+            let name = (pack.shape_name)(&e.text);
+            let at = ad.in_match(e.match_id, Capture::Flow(FlowCap::Lasts)).map_or(e.end, |n| n.end);
+            reset(&mut out.witnesses, name.clone(), cur_scope, at);
+            out.witnesses.push(Witness {
+                attachment: WitnessAttachment::Variable { name: name.clone(), scope: cur_scope },
+                source: WitnessSource::Builder(crate::model::witnesses::RESET_SOURCE.into()),
+                payload: WitnessPayload::Unbind,
+                span: Span { start: at, end: at },
+            });
+            f.flow_rebinds.push((name, cur_scope, at, e.span()));
+        }
         Capture::Flow(FlowCap::Rebind) => {
             let (at, resets) = written_at(ad, e);
             if resets {
@@ -209,7 +221,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             // Usage-site evidence: a mono-typed operator observes
             // its operand. Same Observation payloads the Perl
             // walker emits; the fold is the production one. It holds from
-            // the site to the end of the innermost `@arm` around it inside
+            // the site to the end of the innermost `@ctl` arm around it inside
             // its scope, else to the end of the scope, cut at the next
             // rebind like a guard's narrowing.
             let site = e.span();
@@ -221,7 +233,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             let end = ad
                 .around(e)
                 .map(|a| &ad.events()[a])
-                .filter(|a| a.cap == Capture::Arm)
+                .filter(|a| matches!(a.cap, Capture::Ctl(c) if c.is_arm()))
                 .min_by_key(|a| ad.width(a))
                 .filter(|a| !before(a.start, scope.start))
                 .map_or(scope.end, |a| a.end);
@@ -501,6 +513,8 @@ pub(super) fn finish(st: &mut ExtractState) {
             if let (Some(t), true) = (&annot_type, field_scope_span.contains_key(&(name.clone(), *scope))) {
                 out.field_types.push((name.clone(), *scope, t.clone()));
             }
+            let is_field = field_scope_span.contains_key(&(name.clone(), *scope));
+            let unreadable = annot_type.is_none();
             if let Some(ty) = crate::model::witnesses::BoundType::declared(annot_type) {
                 // A binding through a pointer or reference holds the
                 // referent, whose type no write converts.
@@ -509,7 +523,7 @@ pub(super) fn finish(st: &mut ExtractState) {
                 });
                 let enforcement = st.pack.annot_enforcement.of_binding(through_reference);
                 // A member declaration declares the slot.
-                let extent = match field_scope_span.contains_key(&(name.clone(), *scope)) {
+                let extent = match is_field {
                     true => crate::model::witnesses::Extent::Slot,
                     false => extent,
                 };
@@ -520,6 +534,24 @@ pub(super) fn finish(st: &mut ExtractState) {
                         ty,
                         evidence: crate::model::witnesses::Evidence::Declared(enforcement),
                         extent,
+                    },
+                    span: annot_span,
+                };
+                match decl {
+                    Some((scope, token, name)) => out.decl_facts.push((scope, token, name, w)),
+                    None => out.witnesses.push(w),
+                }
+            } else if unreadable && is_field {
+                // A data member declared with a type the pack cannot read
+                // holds values of that type class-wide: an arm come back
+                // untyped, so a lone null write elsewhere is no answer.
+                let w = Witness {
+                    attachment: var.clone(),
+                    source: WitnessSource::Builder("declared_type".into()),
+                    payload: WitnessPayload::Fact {
+                        family: crate::model::witnesses::tags::FACT_UNTYPED_ARM.into(),
+                        key: String::new(),
+                        value: crate::model::witnesses::FactValue::Bool(true),
                     },
                     span: annot_span,
                 };
@@ -580,6 +612,7 @@ pub(super) fn finish(st: &mut ExtractState) {
                 member: read.member.clone(),
                 spaces: read.spaces,
                 value,
+                place: place.span(),
             });
         }
     }

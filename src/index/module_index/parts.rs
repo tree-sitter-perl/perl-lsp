@@ -3,6 +3,42 @@
 
 use super::*;
 
+/// The files declaring one name, held in path order.
+///
+/// Path order is the candidate order every consumer scan, union and
+/// tie-break leans on. It is kept at the write so a read is a plain copy:
+/// sorting per lookup made a bucket shared by hundreds of files (a script
+/// tree whose files all declare into `main`) the hottest thing in a run.
+/// One entry per path — a re-registered file replaces its own candidate.
+#[derive(Default, Clone)]
+pub struct DefCandidates(Vec<Arc<CachedModule>>);
+
+impl DefCandidates {
+    pub fn upsert(&mut self, cand: Arc<CachedModule>) {
+        match self.0.binary_search_by(|c| c.path.cmp(&cand.path)) {
+            Ok(i) => self.0[i] = cand,
+            Err(i) => self.0.insert(i, cand),
+        }
+    }
+
+    pub fn remove_path(&mut self, path: &std::path::Path) {
+        if let Ok(i) = self.0.binary_search_by(|c| c.path.as_path().cmp(path)) {
+            self.0.remove(i);
+        }
+    }
+
+    pub fn to_vec(&self) -> Vec<Arc<CachedModule>> {
+        self.0.clone()
+    }
+}
+
+impl std::ops::Deref for DefCandidates {
+    type Target = [Arc<CachedModule>];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 /// Concurrent module cache with background resolution.
 ///
 /// The reverse-edge maps over the module cache, bundled so every feed
@@ -88,6 +124,13 @@ impl ModuleBucket {
         self.modules.is_empty()
     }
 
+    pub fn contains(&self, module: &str) -> bool {
+        match &self.seen {
+            Some(seen) => seen.contains(module),
+            None => self.modules.iter().any(|m| m == module),
+        }
+    }
+
     /// The module names, in first-fed order.
     pub fn as_slice(&self) -> &[String] {
         &self.modules
@@ -153,6 +196,12 @@ pub struct ModuleEdgeIndexes {
     /// module names skip every sweep, which is why the term is invisible on
     /// Koha and only bites on a CPAN-shaped tree.
     fed_modules: DashMap<String, FedKeys>,
+    /// callable name → the modules declaring one of that name that never
+    /// comes back as far as its own file can tell, with how it ends
+    /// (`docs/adr/cfg-tier.md` §Effects): the one-hop answer for a gate on a
+    /// callable defined elsewhere, and the pre-filter that lets every other
+    /// gate pass unresolved. Derived from the same feed as `names`.
+    pub(super) ends: DashMap<String, Vec<(String, crate::model::witnesses::Ends)>>,
 }
 
 /// The bucket keys one module was fed under, per map — the reverse record
@@ -170,6 +219,7 @@ struct FedKeys {
     children: ModuleBucket,
     specs: ModuleBucket,
     providers: ModuleBucket,
+    ends: ModuleBucket,
 }
 
 /// The symbols-derived parts of one FILE's feed, recorded together so a
@@ -181,6 +231,9 @@ struct FedNames {
     names: Vec<String>,
     providers: Vec<String>,
     bridges: Vec<String>,
+    /// The file's callables that never come back, by name: local answers
+    /// that need the bag, so recorded from the whole copy too.
+    ends: Vec<(String, crate::model::witnesses::Ends)>,
 }
 
 impl FedKeys {
@@ -192,6 +245,7 @@ impl FedKeys {
             (&mut self.children, &other.children),
             (&mut self.specs, &other.specs),
             (&mut self.providers, &other.providers),
+            (&mut self.ends, &other.ends),
         ] {
             for k in src.as_slice() {
                 dst.insert(k);
@@ -211,6 +265,7 @@ impl ModuleEdgeIndexes {
             includers: DashMap::new(),
             name_records: DashMap::new(),
             fed_modules: DashMap::new(),
+            ends: DashMap::new(),
         }
     }
 
@@ -223,7 +278,7 @@ impl ModuleEdgeIndexes {
     /// candidate-set rebuilds (purge + one feed per candidate) and the
     /// warm rebuild can overlap without accumulation.
     pub fn feed(&self, module_name: &str, path: &std::path::Path, analysis: &FileAnalysis) {
-        let FedNames { names, providers, bridges } = if analysis.symbols_are_evicted() {
+        let FedNames { names, providers, bridges, ends } = if analysis.symbols_are_evicted() {
             match self.name_records.get(path) {
                 Some(rec) => rec.clone(),
                 // No record (a stripped copy fed without ever being fed
@@ -245,6 +300,35 @@ impl ModuleEdgeIndexes {
                 seen.insert(&key);
                 map.entry(key).or_default().insert(module_name);
             };
+        // A module name can hold several files, and its row speaks for all
+        // of them: a second never-returning declaration joins the row, and
+        // a declaration that comes back (no row of its own) widens it — in
+        // either feed order, so ends go in before this file's names do.
+        use crate::model::witnesses::Ends;
+        let fed_before = |name: &str| {
+            self.names
+                .get(name)
+                .is_some_and(|b| b.as_slice().iter().any(|m| m == module_name))
+        };
+        for (name, e) in &ends {
+            let came_back = fed_before(name);
+            let mut rows = self.ends.entry(name.clone()).or_default();
+            match rows.iter_mut().find(|(m, _)| m == module_name) {
+                Some((_, row)) => *row |= *e,
+                None => rows.push((
+                    module_name.to_string(),
+                    if came_back { *e | Ends::COMPLETES } else { *e },
+                )),
+            }
+            fed.ends.insert(name);
+        }
+        for name in names.iter().filter(|n| !ends.iter().any(|(e, _)| e == *n)) {
+            if let Some(mut rows) = self.ends.get_mut(name.as_str()) {
+                if let Some((_, row)) = rows.iter_mut().find(|(m, _)| m == module_name) {
+                    *row |= Ends::COMPLETES;
+                }
+            }
+        }
         for name in names {
             push_unique(&self.names, name, &mut fed.names);
         }
@@ -313,6 +397,10 @@ impl ModuleEdgeIndexes {
                 !bucket.is_empty()
             });
         }
+        self.ends.retain(|_, rows| {
+            rows.retain(|(m, _)| m != module_name);
+            !rows.is_empty()
+        });
     }
 
     /// Test-only: the whole edge state, canonically ordered, for comparing
@@ -398,6 +486,59 @@ impl ModuleEdgeIndexes {
                 }
             }
         }
+        for key in fed.ends.as_slice() {
+            if let Some(mut rows) = self.ends.get_mut(key) {
+                rows.retain(|(m, _)| m != module_name);
+            }
+            self.ends.remove_if(key, |_, rows| rows.is_empty());
+        }
+    }
+
+    /// How a call to a callable named `name` that another file defines
+    /// ends, joined over every indexed module declaring the name: `None`
+    /// when none of them is known not to come back (the top, and the
+    /// pre-filter: such a gate passes unresolved).
+    // TODO(effect-visibility): every declaring module is a candidate, not
+    // only those the caller sees, so a name a returning callable shares
+    // anywhere answers the top. The owner is the free-function visibility
+    // tier the definition lookup grows (`ScopedLookup`).
+    pub fn callable_ends(&self, name: &str) -> Option<crate::model::witnesses::Ends> {
+        use crate::model::witnesses::Ends;
+        let rows = self.ends.get(name)?;
+        let mut out = rows.iter().fold(Ends::empty(), |acc, (_, e)| acc | *e);
+        let unknown = self
+            .names
+            .get(name)
+            .is_some_and(|definers| definers.as_slice().iter().any(|m| !rows.iter().any(|(r, _)| r == m)));
+        if unknown {
+            out |= Ends::all();
+        }
+        Some(out)
+    }
+
+    /// How a call to `class`'s own `name` ends, from the files providing
+    /// `class`: absent where none of them declares the name, the top where
+    /// one does and is not known not to come back.
+    pub fn member_ends(&self, class: &str, name: &str) -> crate::model::file_analysis::MemberEnds {
+        use crate::model::file_analysis::MemberEnds;
+        use crate::model::witnesses::Ends;
+        let Some(providers) = self.providers.get(class) else { return MemberEnds::Unknown };
+        let declarers = self.names.get(name);
+        let rows = self.ends.get(name);
+        let mut out: Option<Ends> = None;
+        for m in providers.as_slice() {
+            // A module declaring the name in any of its packages may declare
+            // it in this one.
+            if !declarers.as_ref().is_some_and(|d| d.contains(m)) {
+                continue;
+            }
+            let e = rows
+                .as_ref()
+                .and_then(|r| r.iter().find(|(r, _)| r == m).map(|(_, e)| *e))
+                .unwrap_or(Ends::all());
+            out = Some(out.map_or(e, |o| o | e));
+        }
+        out.map_or(MemberEnds::Absent, MemberEnds::Declared)
     }
 
     /// Drop `path`'s recorded name list (the file itself is gone).
@@ -414,6 +555,7 @@ impl ModuleEdgeIndexes {
         self.children.clear();
         self.specs.clear();
         self.providers.clear();
+        self.ends.clear();
         // The marks describe the maps just emptied; keeping them would let
         // a later purge take the sweep for a module with no edges left,
         // and — worse — a re-feed would find its mark already set.
@@ -423,10 +565,26 @@ impl ModuleEdgeIndexes {
     /// The symbol-derived feed parts — the
     /// record they land in is what a stripped copy replays.
     fn symbol_derived_names(analysis: &FileAnalysis) -> FedNames {
+        use crate::model::witnesses::Ends;
         FedNames {
             names: Self::indexable_names(analysis),
             providers: analysis.provided_packages(),
             bridges: analysis.bridge_classes(),
+            // One row per name: every callable of it the file defines, in
+            // any package, joined, so a returning one anywhere in the file
+            // keeps the row from closing a gate it may answer.
+            ends: {
+                let mut by_name: std::collections::BTreeMap<&str, Ends> = std::collections::BTreeMap::new();
+                for s in analysis.symbols().iter().filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method)) {
+                    let e = analysis.local_ends(s.id).unwrap_or(Ends::all());
+                    *by_name.entry(s.name.as_str()).or_insert(Ends::empty()) |= e;
+                }
+                by_name
+                    .into_iter()
+                    .filter(|(_, e)| !e.contains(Ends::COMPLETES))
+                    .map(|(n, e)| (n.to_string(), e))
+                    .collect()
+            },
         }
     }
 

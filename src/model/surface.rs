@@ -67,6 +67,9 @@ pub struct MethodSurface {
     /// Hash keys owned by this sub (`HashKeyOwner::Sub`) — the
     /// imported-hash-key completion surface.
     pub hash_keys: Vec<String>,
+    /// How a call to this ends, as far as this file alone can tell. `None`:
+    /// it depends on a callee outside the file, the same honesty `ret` has.
+    pub ends: Option<crate::model::witnesses::Ends>,
 }
 
 /// One cross-file-visible non-callable: a C global / enum constant /
@@ -280,6 +283,7 @@ impl Surface {
                             .filter(|t| !names_anonymous(t))
                             .map(|t| despan(&t)),
                         hash_keys,
+                        ends: feed.analysis.local_ends(sym.id),
                     };
                     match sym.package.clone() {
                         // Package-less callables (C free functions, subs in
@@ -399,6 +403,7 @@ impl Surface {
                         _ => None,
                     }),
                     hash_keys: Vec::new(),
+                    ends: None,
                 },
             })
             .collect();

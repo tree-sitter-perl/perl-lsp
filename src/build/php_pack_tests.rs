@@ -3027,12 +3027,13 @@ fn readonly_properties_carry_the_flag() {
 
 /// A readonly member written from outside its class family fails; inside
 /// it, only a constructor (its own closures and a subclass's included) or a
-/// `??=` lazy init sets it in good form. A receiver nothing types, or a
+/// `??=` lazy init sets it in good form, and a closure the constructor makes
+/// after setting it would set it again. A receiver nothing types, or a
 /// writable member, is no finding.
 #[cfg(feature = "php")]
 #[test]
 fn readonly_writes_outside_the_class_or_its_constructors_are_reported() {
-    use crate::model::file_analysis::MisplacedWriteKind::{OutsideConstructor as InClass, OutsideFamily as Outside};
+    use crate::model::file_analysis::MisplacedWriteKind::{AlreadySet, OutsideConstructor as InClass, OutsideFamily as Outside};
     let fa = php(READONLY);
     let found: Vec<_> = fa
         .misplaced_member_writes(None)
@@ -3043,6 +3044,7 @@ fn readonly_writes_outside_the_class_or_its_constructors_are_reported() {
     assert_eq!(
         found,
         [
+            at(8, "x", "App\\Point", AlreadySet),
             at(11, "x", "App\\Point", InClass),
             at(12, "x", "App\\Point", InClass),
             at(19, "x", "App\\Point", InClass),
@@ -3155,11 +3157,12 @@ fn set_visibility_is_the_members_set_scope() {
 /// A write outside the member's set scope fails, whether or not the member
 /// is write-once: `private(set)` shuts out a subclass, `protected(set)`
 /// admits it, `public(set)` admits anyone. Only a write-once member has a
-/// constructor to be set in.
+/// constructor to be set in, and once the constructor sets it a method
+/// sets it again.
 #[cfg(feature = "php")]
 #[test]
 fn writes_outside_the_set_scope_are_reported() {
-    use crate::model::file_analysis::MisplacedWriteKind::{OutsideClass, OutsideConstructor, OutsideFamily};
+    use crate::model::file_analysis::MisplacedWriteKind::{AlreadySet, OutsideClass, OutsideFamily};
     let fa = php(SET_SCOPES);
     let found: Vec<_> = fa
         .misplaced_member_writes(None)
@@ -3170,7 +3173,7 @@ fn writes_outside_the_set_scope_are_reported() {
     assert_eq!(
         found,
         [
-            at(13, "own", OutsideConstructor),
+            at(13, "own", AlreadySet),
             at(19, "own", OutsideClass),
             at(21, "mine", OutsideClass),
             at(22, "p", OutsideClass),
@@ -3179,6 +3182,84 @@ fn writes_outside_the_set_scope_are_reported() {
             at(30, "p", OutsideClass),
         ]
     );
+}
+
+/// A readonly member starts each method as the constructor left it: a write
+/// where every way through the constructor set it sets it again, and fails;
+/// one where some way leaves it unset (a branch, an early `return`) is only
+/// set outside the constructor; one where none sets it initialises it. A
+/// promoted parameter is set as the constructor begins, and `__clone` runs
+/// on an object no constructor built.
+#[cfg(feature = "php")]
+#[test]
+fn a_readonly_member_the_constructor_set_is_set_again() {
+    use crate::model::file_analysis::MisplacedWriteKind::{AlreadySet, OutsideConstructor};
+    let fa = php("<?php
+class A {
+    public readonly int $x;
+    public readonly int $y;
+    public readonly int $z;
+    public readonly int $w;
+    public function __construct(public readonly int $p, bool $c) {
+        $this->x = 1;
+        $this->x = 2;
+        if ($c) { $this->y = 3; }
+        if ($c) { return; }
+        $this->z = 4;
+    }
+    public function m() {
+        $this->x = 5;
+        $this->y = 6;
+        $this->z = 7;
+        $this->w = 8;
+        $this->p = 9;
+    }
+    public function __clone() { $this->x = 10; }
+}
+");
+    let found: Vec<_> = fa
+        .misplaced_member_writes(None)
+        .into_iter()
+        .map(|w| (w.span.start.row, w.member, w.kind))
+        .collect();
+    let at = |row: usize, member: &str, kind| (row, member.to_string(), kind);
+    assert_eq!(
+        found,
+        [
+            at(8, "x", AlreadySet),
+            at(14, "x", AlreadySet),
+            at(15, "y", OutsideConstructor),
+            at(16, "z", OutsideConstructor),
+            at(18, "p", AlreadySet),
+            at(20, "x", OutsideConstructor),
+        ]
+    );
+}
+
+/// A value nothing types says neither set nor unset, and a write in a
+/// closure sets the member only if the closure runs: neither makes a later
+/// write a certain error.
+#[cfg(feature = "php")]
+#[test]
+fn an_unknown_or_closure_write_is_not_surely_set() {
+    use crate::model::file_analysis::MisplacedWriteKind::OutsideConstructor;
+    let fa = php("<?php
+class A {
+    public readonly int $x;
+    public readonly int $y;
+    public function __construct($v) {
+        $this->x = $v;
+        $f = function () { $this->y = 1; };
+    }
+    public function m() { $this->x = 2; $this->y = 3; }
+}
+");
+    let found: Vec<_> = fa
+        .misplaced_member_writes(None)
+        .into_iter()
+        .map(|w| (w.span.start.row, w.member, w.kind))
+        .collect();
+    assert_eq!(found, [(8, "x".to_string(), OutsideConstructor), (8, "y".to_string(), OutsideConstructor)]);
 }
 
 /// The warning names the set scope it is outside: the class alone, or the
@@ -3331,6 +3412,7 @@ fn an_if_whose_body_ends_in_an_exit_narrows_the_rest_of_the_block() {
         ("{ if ($z) { log_it(); } throw new \\Exception(); }", "a nested block, then the exit"),
         ("{ return; log_it(); }", "an exit that is not the last statement"),
         ("{ return; } else { log_it(); }", "an else clause that falls through"),
+        ("{ return; } elseif ($z) { log_it(); }", "an elseif clause: both ways out of it failed the test"),
     ];
     for (body, why) in exits {
         let src = format!("<?php\nnamespace App;\nuse Lib\\Foo;\nfunction f($y, $z) {{\n    if (!$y instanceof Foo) {body}\n    $y->run();\n}}\n");
@@ -3340,7 +3422,6 @@ fn an_if_whose_body_ends_in_an_exit_narrows_the_rest_of_the_block() {
     let falls_through = [
         ("{ log_it(); }", "no exit"),
         ("{ if ($z) { return; } }", "an exit only in a nested block"),
-        ("{ return; } elseif ($z) { log_it(); }", "an elseif clause"),
         ("{ diet(); }", "a call that is not die"),
     ];
     for (body, why) in falls_through {
@@ -3391,9 +3472,8 @@ fn the_one_arm_a_chain_falls_through_narrows_the_rest_of_the_block() {
     }
 }
 
-/// A bare block leaves where its statements do; a loop whose body always
-/// leaves is left only where its first test fails, unless a `break` or
-/// `continue` in the body goes to the loop.
+/// A bare block leaves where its statements do; a loop is left where a
+/// test fails, and where a `break` aimed at it leaves it.
 #[cfg(feature = "php")]
 #[test]
 fn a_bare_block_and_a_loop_that_always_leaves_narrow_the_rest_of_the_block() {
@@ -3407,6 +3487,9 @@ fn a_bare_block_and_a_loop_that_always_leaves_narrow_the_rest_of_the_block() {
         ("while (!$y instanceof Foo) { return; }", "a loop whose body returns"),
         ("while (!$y instanceof Foo) { log_it(); throw new \\Exception(); }", "a loop whose body throws"),
         ("while (!$y instanceof Foo) { if ($z) { return; } else { exit; } }", "a loop body chain whose every arm leaves"),
+        ("while (!$y instanceof Foo) { log_it(); }", "a loop body that falls through tests again"),
+        ("while (!$y instanceof Foo) { if ($z) { continue; } return; }", "a continue goes back to the test"),
+        ("while (!$y instanceof Foo) { foreach ($z as $w) { break; } return; }", "a break an inner loop owns"),
     ];
     for (chain, why) in narrows {
         let src = src_of(chain);
@@ -3414,10 +3497,7 @@ fn a_bare_block_and_a_loop_that_always_leaves_narrow_the_rest_of_the_block() {
     }
     let nothing = [
         ("if (!$y instanceof Foo) { { log_it(); } }", "a bare block that falls through"),
-        ("while (!$y instanceof Foo) { log_it(); }", "a loop body that falls through"),
         ("while (!$y instanceof Foo) { if ($z) { break; } return; }", "a break before the exit"),
-        ("while (!$y instanceof Foo) { if ($z) { continue; } return; }", "a continue before the exit"),
-        ("while (!$y instanceof Foo) { foreach ($z as $w) { break; } return; }", "a break an inner loop owns"),
     ];
     for (chain, why) in nothing {
         let src = src_of(chain);
@@ -4763,6 +4843,30 @@ function f($p) {
     assert!(fa.resolve_variable("late", tree_sitter::Point::new(3, 4)).is_some(), "it still binds from the top");
 }
 
+/// A local first written further down a loop's body is in force at the
+/// body's top on every pass after the first, so it is offered there.
+#[cfg(feature = "php")]
+#[test]
+fn a_loop_carried_local_is_offered_above_its_write() {
+    let src = "<?php
+function f($xs) {
+    foreach ($xs as $x) {
+
+        $acc = $x;
+    }
+}
+";
+    let fa = php(src);
+    let offered = |row: usize| -> Vec<String> {
+        crate::lsp::symbols::in_scope_completion(&fa, tree_sitter::Point::new(row, 8))
+            .into_iter()
+            .map(|c| c.label)
+            .filter(|l| l == "acc")
+            .collect()
+    };
+    assert_eq!(offered(3), ["acc"], "a later pass reaches it");
+}
+
 /// A receiver the written buffer leaves untyped is typed on the buffer the
 /// sentinel finished only where the written one failed to parse the
 /// access: `Foo::` at the end of a block is an ERROR, so the finished
@@ -5225,6 +5329,197 @@ fn a_constant_read_holds_the_value_another_file_declares() {
     assert_eq!(php(qualified.1).inferred_type_via_bag("a", at(qualified.1, "echo", 0)), None);
 }
 
+/// A loop's head is what enters it or what a pass leaves; past it, what
+/// its failed test or a `break` leaves; `break 2` leaves the loop around.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_loop_joins_its_entry_its_passes_and_its_exits() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = "<?php
+class A {}
+class B {}
+function f($c, $xs) {
+    $x = new A();
+    while ($c) { $u = $x; $x = new B(); }
+    $v = $x;
+    $y = new A();
+    foreach ($xs as $i) { for ($j = 0; $j < 3; $j++) { if ($c) { $y = new B(); break 2; } } $y = new A(); }
+    $w = $y;
+    $z = new A();
+    do { $z = new B(); } while ($c);
+    $t = $z;
+}
+";
+    let fa = php(src);
+    let both = crate::model::file_analysis::join_all(&[T::ClassName("A".into()), T::ClassName("B".into())], &crate::model::file_analysis::Unordered);
+    assert_eq!(fa.inferred_type_via_bag("x", tree_sitter::Point { row: 5, column: 24 }), both, "a later pass reads the body's write");
+    let at = |n: &str, row| fa.inferred_type_via_bag(n, tree_sitter::Point { row, column: 9 });
+    assert_eq!(at("x", 6), both, "past the loop: either");
+    assert_eq!(at("y", 9), both, "`break 2` carries the inner write past the outer loop");
+    assert_eq!(at("z", 12), Some(T::ClassName("B".into())), "a `do` body always runs");
+}
+
+/// Past an `if` chain or a short circuit, a variable a branch rebinds holds
+/// what every path leaves it: an arm's write, and the value entering the
+/// branch where no arm writes or none runs.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_branch_joins_what_its_arms_leave() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = "<?php
+class A {}
+class B {}
+function f($c, $d) {
+    $x = new A();
+    if ($c) { $x = new B(); }
+    $y = $x;
+    $z = new A();
+    if ($c) { $z = new B(); } elseif ($d) { g(); } else { $z = new B(); }
+    $w = $z;
+    $t = new A();
+    $c && ($t = new B());
+    $v = $t;
+    $s = new A();
+    if ($c) { $s = new B(); } else { $s = new B(); }
+    $r = $s;
+}
+";
+    let fa = php(src);
+    let both = crate::model::file_analysis::join_all(&[T::ClassName("A".into()), T::ClassName("B".into())], &crate::model::file_analysis::Unordered);
+    let at = |n: &str, row| fa.inferred_type_via_bag(n, tree_sitter::Point { row, column: 9 });
+    assert_eq!(at("x", 6), both, "an `if` with no `else`");
+    assert_eq!(at("z", 9), both, "the `elseif` arm that does not write");
+    assert_eq!(at("t", 12), both, "a short circuit");
+    assert_eq!(at("s", 15), Some(T::ClassName("B".into())), "every arm writes");
+}
+
+/// A `foreach` binds its variable afresh each pass, a variable bound before
+/// the loop included: what the body wrote last pass never reaches the next.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_foreach_variable_is_bound_each_pass() {
+    let src = "<?php\nfunction f($xs, $c) {\n    $v = 1;\n    foreach ($xs as $v) {\n        echo $v;\n        if ($c) { $v = [$v]; }\n    }\n}\n";
+    let fa = php(src);
+    let t = fa.inferred_type_via_bag("$v", Point::new(4, 14));
+    assert!(!matches!(t, Some(InferredType::ArrayRef | InferredType::Numeric)), "neither last pass's write nor the entry: {t:?}");
+}
+
+/// Past a `try`, a variable holds what the body leaves it or what a
+/// `catch` does; a `catch` starts from any point the body could stop at;
+/// a `finally` write is what comes past.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_try_joins_its_body_and_its_handlers() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = "<?php
+class A {}
+class B {}
+class C {}
+function f() {
+    $x = new A();
+    try { $x = new B(); g(); } catch (Exception $e) { $u = $x; $x = new C(); }
+    $v = $x;
+    $y = new A();
+    try { $y = new B(); } finally { $y = new C(); }
+    $w = $y;
+}
+";
+    let fa = php(src);
+    let two = |a: &str, b: &str| crate::model::file_analysis::join_all(&[T::ClassName(a.into()), T::ClassName(b.into())], &crate::model::file_analysis::Unordered);
+    let at = |n: &str, row, column| fa.inferred_type_via_bag(n, tree_sitter::Point { row, column });
+    assert_eq!(at("x", 6, 63), two("A", "B"), "the handler starts from the entry or the body's write");
+    assert_eq!(at("x", 7, 9), two("B", "C"), "past: the body's end or the handler's");
+    assert_eq!(at("y", 10, 9), Some(T::ClassName("C".into())), "a `finally` runs on every path");
+}
+
+
+/// A `null` literal holds no value: joined with a typed path it makes the
+/// place optional, and on its own it is `null`.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_null_literal_is_no_value() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = "<?php
+class A {}
+function f($c) {
+    $x = null;
+    if ($c) { $x = new A(); }
+    $y = $x;
+    $z = null;
+    $w = $z;
+}
+";
+    let fa = php(src);
+    let at = |n: &str, row| fa.inferred_type_via_bag(n, tree_sitter::Point { row, column: 9 });
+    assert_eq!(at("x", 5), Some(T::Optional(Box::new(T::ClassName("A".into())))));
+    assert_eq!(at("z", 7), Some(T::Undef));
+}
+
+/// A `null` beside an arm nothing types says only that the value may be
+/// absent, not what it is: the return answers nothing rather than `null`.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_null_return_beside_an_untyped_one_answers_nothing() {
+    let src = "<?php
+class R {
+    public function find($c) {
+        if ($c) { return null; }
+        return unknown_thing();
+    }
+    public function f() {
+        $p = $this->find(1);
+        echo $p;
+    }
+}
+";
+    let fa = php(src);
+    assert_eq!(fa.inferred_type_via_bag("p", tree_sitter::Point { row: 8, column: 13 }), None);
+}
+
+#[cfg(feature = "php")]
+#[test]
+fn php_a_nullable_field_initialised_to_null_keeps_its_class() {
+    let src = "<?php
+class E {}
+class C {
+    private E|null $type = null;
+    public function getType(): E|null { return $this->type; }
+    public function setType(E $type): static { $this->type = $type; return $this; }
+}
+";
+    let fa = php(src);
+    assert_eq!(
+        fa.sub_return_type_at_arity("getType", None),
+        Some(InferredType::Optional(Box::new(InferredType::ClassName("E".into()))))
+    );
+}
+
+#[cfg(feature = "php")]
+#[test]
+fn php_a_nullable_field_read_keeps_null_beside_a_class_write() {
+    let src = "<?php
+class E {}
+class C {
+    private E|null $type = null;
+    public function getType(): E|null
+    {
+        return $this->type;
+    }
+    public function setType(E $type): static
+    {
+        $this->type = $type;
+        return $this;
+    }
+}
+";
+    let fa = php(src);
+    let sp = crate::model::file_analysis::Span { start: tree_sitter::Point { row: 6, column: 15 }, end: tree_sitter::Point { row: 6, column: 26 } };
+    assert_eq!(
+        fa.expr_type_at_span(sp, None),
+        Some(InferredType::Optional(Box::new(InferredType::ClassName("E".into()))))
+    );
+}
+
 /// A parameter's declared type is checked when the call binds it, so it
 /// bounds the local on entry only: a later write retypes it, and a guard
 /// narrows within it. A property's declared type bounds the member for its
@@ -5308,4 +5603,30 @@ function f(?Shape $c) {
     let fa = php(src);
     let t = fa.inferred_type_via_bag("c", at(src, "$c->side", 0)).expect("a type inside the guard");
     assert_eq!(t, crate::model::file_analysis::InferredType::ClassName("Square".into()));
+}
+
+/// A body stops only where something in it may throw, so a catch starts
+/// from the writes something that may throw follows; only the paths that
+/// complete go on past a `finally`.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_try_unwinds_only_where_it_may_throw() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = "<?php
+class A {}
+class B {}
+class C {}
+function f($c) {
+    $x = new A();
+    try { $x = new B(); } catch (Exception $e) { $u = $x; }
+    $y = new A();
+    try { $y = new B(); g(); } finally { if ($c) { $y = new C(); } }
+    $w = $y;
+}
+";
+    let fa = php(src);
+    let two = |a: &str, b: &str| crate::model::file_analysis::join_all(&[T::ClassName(a.into()), T::ClassName(b.into())], &crate::model::file_analysis::Unordered);
+    let at = |n: &str, row, column| fa.inferred_type_via_bag(n, tree_sitter::Point { row, column });
+    assert_eq!(at("x", 6, 54), Some(T::ClassName("A".into())), "the construction is the write's own right side");
+    assert_eq!(at("y", 9, 9), two("B", "C"), "the entry value only unwinds through the finally");
 }
