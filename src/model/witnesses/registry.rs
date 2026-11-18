@@ -31,7 +31,7 @@ use super::*;
 type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>, Option<ReadPoint>);
 /// Each on-path key with its position on the path (`QueryState::path_len`
 /// when it entered), so a cut can say which frame it closed at.
-type VisitedSet = std::collections::HashMap<VisitedKey, u32>;
+type VisitedSet = super::QueryMap<VisitedKey, u32>;
 /// What a cross-file fan-out asks the files of: a class-keyed attachment's
 /// candidate files (`class_candidates_node`), or a free name's exporters
 /// and linkage-visible definitions (`free_name_cross_file`).
@@ -363,7 +363,7 @@ struct FoldMemo {
     /// query that can reach an index. `Some`: a pass's, which admits exactly
     /// one bag under exactly one lookup (`FoldMemoScope::for_pass`).
     owner: Option<PassOwner>,
-    answers: std::collections::HashMap<FoldMemoKey, (MemoAnswer, std::sync::Arc<ChaseTrace>)>,
+    answers: super::QueryMap<FoldMemoKey, (MemoAnswer, std::sync::Arc<ChaseTrace>)>,
     /// Estimated bytes `answers` holds (`fold_memo_entry_bytes`).
     bytes: usize,
     /// Keys whose root query is being computed beneath the current one: a
@@ -825,8 +825,8 @@ pub(super) struct QueryState {
     /// The cross-file fan-outs on the current path, and the answers of those
     /// already walked this query (`fan_out_node`). The bag-free twins of
     /// `visited` and `memo`.
-    fan_outs: std::collections::HashMap<FanOutKey, u32>,
-    fan_out_memo: std::collections::HashMap<FanOutKey, (std::sync::Arc<ReducedValue>, std::sync::Arc<ChaseTrace>, u32)>,
+    fan_outs: super::QueryMap<FanOutKey, u32>,
+    fan_out_memo: super::QueryMap<FanOutKey, (std::sync::Arc<ReducedValue>, std::sync::Arc<ChaseTrace>, u32)>,
     /// Enriched copies consulted during this query — pinned so memo
     /// entries keyed on their bag ADDRESSES stay valid even if the
     /// overlay's eviction drops its own reference mid-query.
@@ -845,7 +845,7 @@ pub(super) struct QueryState {
     /// computes. Any other value depends on the path it was reached from, so
     /// it may be reused inside this query (the memo always has) but never by
     /// another one.
-    memo: std::collections::HashMap<VisitedKey, MemoEntry>,
+    memo: super::QueryMap<VisitedKey, MemoEntry>,
     /// Frames on the current path: the next frame's position. Starts at 1, so
     /// the root is position 1 and 0 lies above every frame.
     path_len: u32,
@@ -926,7 +926,7 @@ impl QueryState {
     /// on-path table.
     fn frame<K: std::hash::Hash + Eq + Clone, T>(
         &mut self,
-        path: fn(&mut Self) -> &mut std::collections::HashMap<K, u32>,
+        path: fn(&mut Self) -> &mut super::QueryMap<K, u32>,
         key: &K,
         body: impl FnOnce(&mut Self, u32) -> T,
     ) -> Result<Framed<T>, u32> {
@@ -1040,11 +1040,11 @@ impl QueryState {
 
     pub(super) fn new() -> Self {
         QueryState {
-            visited: std::collections::HashMap::new(),
-            fan_outs: std::collections::HashMap::new(),
-            fan_out_memo: std::collections::HashMap::new(),
+            visited: Default::default(),
+            fan_outs: Default::default(),
+            fan_out_memo: Default::default(),
             pins: Vec::new(),
-            memo: std::collections::HashMap::new(),
+            memo: Default::default(),
             path_len: 1,
             low_cut: Taint::CLEAN,
             effects: vec![EffectFrame::new(0)],

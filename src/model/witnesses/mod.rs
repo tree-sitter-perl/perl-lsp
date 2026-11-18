@@ -53,7 +53,7 @@ pub use closedness::*;
 pub struct WitnessBag {
     witnesses: Vec<Witness>,
     #[serde(skip)]
-    index: HashMap<WitnessAttachment, Vec<usize>>,
+    index: QueryMap<WitnessAttachment, Vec<usize>>,
     /// Every scope a variable name has witnesses on: the one variable's
     /// facts, wherever its writes were made.
     #[serde(skip)]
@@ -64,16 +64,16 @@ pub struct WitnessBag {
     /// more: below that the whole read is as cheap as the window, and the
     /// order would be memory every small variable pays.
     #[serde(skip)]
-    spans: HashMap<WitnessAttachment, SpanOrder>,
+    spans: QueryMap<WitnessAttachment, SpanOrder>,
     /// Each place's `MayBe` witnesses, which every read of it past their
     /// site joins in, so a read finds them without walking the rest.
     #[serde(skip)]
-    may_be: HashMap<WitnessAttachment, Vec<usize>>,
+    may_be: QueryMap<WitnessAttachment, Vec<usize>>,
     /// The `Bound` witnesses of each attachment that has any, so the
     /// registry's cap step (`cap_by_bound`) costs one probe of an empty map
     /// on a bag with no declarations.
     #[serde(skip)]
-    bounds: HashMap<WitnessAttachment, Vec<usize>>,
+    bounds: QueryMap<WitnessAttachment, Vec<usize>>,
     /// Names this bag's content: every mutation draws a fresh value from
     /// [`next_generation`], so a memo that outlives one query can tell
     /// whether the bag it answered from is still the bag being asked.
@@ -84,6 +84,12 @@ pub struct WitnessBag {
     #[serde(skip)]
     content: Option<u64>,
 }
+
+/// The map the bag's indexes and a query's tables are keyed in. A read
+/// hashes a whole attachment several times, and under std's SipHash that
+/// was 15% of one; this hasher is seeded per process, so the keys a source
+/// file chooses still cannot aim at a bucket.
+pub(crate) type QueryMap<K, V> = HashMap<K, V, ahash::RandomState>;
 
 /// One process-wide counter for every generation stamp, so two stamped
 /// stores never share a value unless their content is the same.
@@ -313,11 +319,11 @@ impl<'de> Deserialize<'de> for WitnessBag {
         let on_disk = WitnessBagOnDisk::deserialize(deserializer)?;
         let mut bag = WitnessBag {
             witnesses: on_disk.witnesses,
-            index: HashMap::new(),
-            var_scopes: HashMap::new(),
-            spans: HashMap::new(),
-            may_be: HashMap::new(),
-            bounds: HashMap::new(),
+            index: Default::default(),
+            var_scopes: Default::default(),
+            spans: Default::default(),
+            may_be: Default::default(),
+            bounds: Default::default(),
             generation: 0,
             content: None,
         };
