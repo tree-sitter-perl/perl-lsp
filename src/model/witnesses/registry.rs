@@ -1803,9 +1803,9 @@ impl ReducerRegistry {
         let materialized = self.materialize(bag, q, state);
         let v = self.reduce_materialized(&materialized, q);
 
-        // An arm that came back untyped is an arm of the value like any
-        // other: what the typed arms fold to stays open beside it (`X|…`,
-        // the join with `Unknown`). An `Undef` that flowed in says only that
+        // An arm that came back untyped (a return arm, a member's write) is
+        // an arm of the value like any other: what the typed arms fold to
+        // stays open beside it (`X|…`, the join with `Unknown`). An `Undef` that flowed in says only that
         // the value may be absent, so beside it it is no answer to what the
         // value is. One stated here (a guard's) stands where the read sees
         // it, and a declared bound still caps what is left.
@@ -1822,7 +1822,10 @@ impl ReducerRegistry {
             {
                 ReducedValue::None
             }
-            ReducedValue::Type(t) if untyped_arm && !t.is_never() => {
+            // A place's arms are its writes, and which write a read sees is
+            // the window's to say; the flow joins already keep what an
+            // untyped path leaves open there.
+            ReducedValue::Type(t) if untyped_arm && !t.is_never() && !q.attachment.is_temporal() => {
                 ReducedValue::Type(crate::model::file_analysis::join(&t, &InferredType::Unknown, class_order(q)))
             }
             v => v,
@@ -3507,9 +3510,21 @@ impl ReducerRegistry {
                     // An arm of a join is chased with the cut mark cleared, so
                     // the mark it comes back with is its own.
                     let joined = matches!(q.attachment, WitnessAttachment::Join { .. });
-                    let outer_low = joined.then(|| std::mem::replace(&mut state.low_cut, Taint::CLEAN));
+                    let counted = q.attachment.counts_untyped_arms() && !q.attachment.is_temporal();
+                    let outer_low =
+                        (joined || counted).then(|| std::mem::replace(&mut state.low_cut, Taint::CLEAN));
                     let resolved = self.chase_edge(bag, q, w, target, read, sole_witness, state);
-                    if let Some(outer_low) = outer_low {
+                    // An arm of a counted fold (a return arm, a member write)
+                    // that a cycle guard cut came back through the fold itself
+                    // (`return __SUB__->($n - 1)`): it adds nothing the other
+                    // arms do not, so it is no untyped arm.
+                    let mut recurrent = false;
+                    if let (false, Some(outer_low)) = (joined, outer_low) {
+                        let cut = state.low_cut;
+                        state.low_cut = outer_low.min(cut);
+                        recurrent = cut != Taint::CLEAN && cut != Taint::TRUNCATED;
+                    }
+                    if let (true, Some(outer_low)) = (joined, outer_low) {
                         let cut = state.low_cut;
                         state.low_cut = outer_low.min(cut);
                         // An arm whose chase closed at this join or at a frame
@@ -3559,7 +3574,7 @@ impl ReducerRegistry {
                         // nothing: the value coming in stands, as for a
                         // region that answers nothing.
                         None if target.folds_every_arm() => silent_joins.push(w.span.start),
-                        None if q.attachment.counts_untyped_arms() => out.push(Witness {
+                        None if q.attachment.counts_untyped_arms() && !recurrent => out.push(Witness {
                             attachment: w.attachment.clone(),
                             source: w.source.clone(),
                             payload: WitnessPayload::Fact {
