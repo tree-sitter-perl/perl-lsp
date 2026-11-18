@@ -168,6 +168,55 @@ fn surface_gate_covers_registered_and_open_consumers() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A save the re-parse refuses (here: past the driver's size cap, which the
+/// walk would also refuse) is a deletion: the file's classes stop answering,
+/// and its consumers, registered and open, re-analyze without it. Saved back
+/// under the cap, it registers again.
+#[cfg(feature = "cpp")]
+#[test]
+fn a_refused_reparse_counts_as_a_deletion() {
+    let dir = std::env::temp_dir().join(format!("pack-refused-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let hdr = dir.join("box.h");
+    let tu = dir.join("use.cpp");
+    let small = "class Box { public: int width() { return 1; } };\n";
+    std::fs::write(&hdr, small).unwrap();
+    std::fs::write(&tu, "#include \"box.h\"\nint f() { Box b; return b.width(); }\n").unwrap();
+
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
+    let driver = reg.for_id("cpp").expect("cpp driver");
+    let pack = Arc::new(ModuleIndex::new_for_test());
+    register_pair(driver, &pack, &[&hdr, &tu]);
+    let canon_tu = std::fs::canonicalize(&tu).unwrap();
+    let canon_hdr = std::fs::canonicalize(&hdr).unwrap();
+    let files = OpenDocs::serving(driver);
+    let tu_url = Url::from_file_path(&canon_tu).unwrap();
+    assert!(files.open(tu_url.clone(), std::fs::read_to_string(&tu).unwrap()));
+    let is_registered = |p: &Path| {
+        let mut found = false;
+        pack.for_each_registered_file(&mut |cm| found |= cm.path.as_path() == p);
+        found
+    };
+    let box_home = || pack.get_cached("Box").map(|c| c.path.to_path_buf());
+    assert_eq!(box_home(), Some(canon_hdr.clone()));
+    let tu_before = arc_of(&pack, &canon_tu);
+
+    let cap = driver.caps().file_cap as usize;
+    std::fs::write(&hdr, format!("{small}// {}\n", "x".repeat(cap))).unwrap();
+    let inv = PackInvalidator::serving(driver);
+    let outcome = inv.file_changed(None, &pack, &files, &hdr, false);
+    assert!(!is_registered(&canon_hdr), "a refused re-parse unregisters the file");
+    assert_eq!(box_home(), None, "its classes stop answering");
+    assert_ne!(arc_of(&pack, &canon_tu), tu_before, "a registered consumer re-analyzes");
+    assert_eq!(outcome.refresh_open, vec![tu_url], "an open consumer refreshes");
+
+    std::fs::write(&hdr, small).unwrap();
+    inv.file_changed(None, &pack, &files, &hdr, false);
+    assert_eq!(box_home(), Some(canon_hdr), "back under the cap, it registers again");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The guard applied at the invalidation swap: a re-analysis whose event
 /// generation is OLDER than the one registered leaves the fresher registration
 /// untouched (H9-1). Simulated by pre-claiming the max generation, so the real

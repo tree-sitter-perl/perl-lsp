@@ -49,6 +49,7 @@ use crate::index::open_docs::OpenDocs;
 use crate::index::module_cache;
 use crate::index::module_index::{CachedModule, ModuleIndex};
 use crate::model::file_analysis::FileAnalysis;
+use crate::build::source_files::analyze_file;
 use crate::util::canonical_path::CanonicalPath;
 
 /// One change, as the consumer rule reads it.
@@ -219,7 +220,9 @@ impl PackInvalidator {
     }
 
     /// A pack file's bytes changed on disk (save or watcher event) — or the
-    /// file was deleted. Runs the whole invalidation (blocking: Rayon inside;
+    /// file was deleted. A change whose re-parse is refused (the file went
+    /// over the driver's cap or became unreadable) is handled as a deletion.
+    /// Runs the whole invalidation (blocking: Rayon inside;
     /// call off the message loop) and returns the outcome the caller
     /// publishes. `open_docs` is the caller's open-document view; the
     /// consumer rule maps it to the URIs whose gather must re-run.
@@ -407,16 +410,6 @@ impl PackInvalidator {
             }
         });
 
-        if deleted {
-            // The departed file's own header/macro/closure caches go too — a
-            // consumer re-gather resolving the deleted header from its
-            // still-warm entry would make the deletion invisible.
-            crate::build::cpp_reparse::evict_analysis_caches(&std::iter::once(canon.to_path_buf()).collect());
-            pack.unregister_file(&canon);
-            pack.remove_surface(&canon);
-            self.forget_source_gen(&canon);
-        }
-
         // The surface gate (the freshness firewall, pack flavor): re-analyze
         // the CHANGED file first, alone. If its span-free surface is unchanged
         // — a body edit, a comment, a reformat in a header — every consumer's
@@ -426,17 +419,31 @@ impl PackInvalidator {
         // deep-header comment edit re-parses ONE file, not hundreds of TUs.
         let mut changed_verdict = crate::model::surface::SurfaceVerdict::Changed;
         let mut changed_fa: Option<Arc<FileAnalysis>> = None;
-        if !deleted {
+        // A refused re-parse (at or over the cap, unreadable, or panicking)
+        // is a deletion: the walk would not index the file, so its last
+        // registration must stop answering and its consumers re-analyze.
+        let deleted = deleted || {
             crate::build::cpp_reparse::evict_analysis_caches(&std::iter::once(canon.to_path_buf()).collect());
-            if let Ok(source) = crate::util::text::read_source(&canon) {
-                let probe = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    driver.analyze_with_path(&source, Some(&canon))
-                }));
-                if let Ok(fa) = probe {
+            match analyze_file(driver, &canon, driver.caps().file_cap) {
+                Some(fa) => {
                     changed_verdict = pack.record_surface(&canon, &fa);
                     changed_fa = Some(Arc::new(fa));
+                    false
+                }
+                None => {
+                    log::info!("{} refused on re-parse; unregistered as deleted", canon.display());
+                    true
                 }
             }
+        };
+        if deleted {
+            // The departed file's own header/macro/closure caches go too — a
+            // consumer re-gather resolving the deleted header from its
+            // still-warm entry would make the deletion invisible.
+            crate::build::cpp_reparse::evict_analysis_caches(&std::iter::once(canon.to_path_buf()).collect());
+            pack.unregister_file(&canon);
+            pack.remove_surface(&canon);
+            self.forget_source_gen(&canon);
         }
         let skip_consumers = matches!(changed_verdict, crate::model::surface::SurfaceVerdict::Unchanged);
         if !skip_consumers {
@@ -452,31 +459,18 @@ impl PackInvalidator {
             crate::build::cpp_reparse::evict_analysis_caches(&consumers.iter().map(|p| p.to_path_buf()).collect());
         }
 
-        // Re-analyze the changed file (unless deleted) + every consumer
-        // (parallel), then swap registrations. Unregister-then-register so names
+        // Re-analyze every consumer (parallel; the changed file was analyzed
+        // above), then swap registrations. Unregister-then-register so names
         // the new version no longer defines don't linger in `all_defs` / the
         // cache winner slot. Consumers re-analyze on delete too — their splices
         // and closures baked the departed header.
-        let mut targets: Vec<CanonicalPath> = Vec::with_capacity(consumers.len() + 1);
-        if !deleted && changed_fa.is_none() {
-            targets.push(canon.clone());
-        }
-        targets.extend(consumers);
+        let mut targets: Vec<CanonicalPath> = consumers;
         targets.sort();
         targets.dedup();
         targets.retain(|p| changed_fa.is_none() || *p != canon);
         let mut results: Vec<(CanonicalPath, Arc<FileAnalysis>)> = targets
             .par_iter()
-            .filter_map(|p| {
-                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let source = crate::util::text::read_source(p).ok()?;
-                    Some(driver.analyze_with_path(&source, Some(p)))
-                }));
-                match res {
-                    Ok(Some(analysis)) => Some((p.clone(), Arc::new(analysis))),
-                    _ => None,
-                }
-            })
+            .filter_map(|p| Some((p.clone(), Arc::new(analyze_file(driver, p, driver.caps().file_cap)?))))
             .collect();
         if let Some(fa) = changed_fa {
             results.push((canon.clone(), fa));
