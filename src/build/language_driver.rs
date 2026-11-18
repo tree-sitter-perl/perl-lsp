@@ -15,9 +15,8 @@ use std::path::Path;
 /// Per-language behavioral capabilities — the properties core layers ask
 /// instead of naming languages (rule #10). Each field is one behavior a
 /// serving site genuinely tests; a driver declares the ones that hold for
-/// its language. `Default` is every capability OFF/empty — the honest
-/// answer for an id no driver claims (which also matches how the serving
-/// paths treated an unrecognized language before the capabilities existed).
+/// its language. `Default` is every capability OFF/empty and the pack file
+/// cap — the honest answer for an id no driver claims.
 ///
 /// This is the CLOSED set of axes on which served languages may differ in
 /// core; growing it should feel expensive — the first question on a new
