@@ -22,7 +22,9 @@ pub(crate) struct FileRecords(DashMap<CanonicalPath, FileRecord>);
 
 impl FileRecords {
     /// A front door registered `path`: the project's file, whatever an
-    /// earlier landing said.
+    /// earlier landing said. Returns the names a previous workspace
+    /// registration of `path` recorded, for the caller's re-registration
+    /// inverse.
     pub(crate) fn register_workspace(&self, path: &CanonicalPath, names: Vec<(String, bool)>) -> Option<Vec<(String, bool)>> {
         self.0
             .insert(path.clone(), FileRecord { names, role: FileRole::Workspace })
