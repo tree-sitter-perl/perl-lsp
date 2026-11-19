@@ -25,6 +25,18 @@ trap reap_servers EXIT
 echo "building --features cpp,python release..."
 cargo build --release --features cpp,python >/dev/null 2>&1
 
+# A throwaway cache for the suites, removed on exit — see e2e/run.sh. Set after
+# the build so cargo's own tooling keeps the user's cache. The pack suites build
+# `tempname()` workspaces, each of which would otherwise leave a new hashed dir
+# in the user's real ~/.cache/perl-lsp.
+e2e_cache=$(mktemp -d "${TMPDIR:-/tmp}/perl-lsp-e2e-cache.XXXXXX")
+export XDG_CACHE_HOME="$e2e_cache"
+cleanup() {
+  reap_servers
+  rm -rf "$e2e_cache"
+}
+trap cleanup EXIT
+
 bin="$PWD/target/release/perl-lsp"
 # Every suite names its binary explicitly. `dev_lsp.lua` falls back to this same
 # path when the variable is unset, so an omission is invisible until someone
