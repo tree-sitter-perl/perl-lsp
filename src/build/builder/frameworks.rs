@@ -15,7 +15,7 @@ impl<'a> Builder<'a> {
     /// Names also land in `role_requires` — the input for the future
     /// composer-mismatch diagnostic.
     pub(super) fn visit_requires_call(&mut self, node: Node<'a>, pkg: &str) {
-        let Some(args) = node.child_by_field_name("arguments") else { return };
+        let Some(args) = node.field(Field::Arguments) else { return };
         let names = self.extract_string_list(args);
         for (name, span) in &names {
             let sid = self.add_symbol(
@@ -43,7 +43,7 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn visit_extends_call(&mut self, node: Node<'a>, pkg: &str) {
-        let args = match node.child_by_field_name("arguments") {
+        let args = match node.field(Field::Arguments) {
             Some(a) => a,
             None => return,
         };
@@ -101,7 +101,7 @@ impl<'a> Builder<'a> {
             Some(p) => p,
             None => return,
         };
-        let args = match node.child_by_field_name("arguments") {
+        let args = match node.field(Field::Arguments) {
             Some(a) => a,
             None => return,
         };
@@ -246,7 +246,7 @@ impl<'a> Builder<'a> {
         let mut mojo_default_node: Option<Node<'a>> = None;
 
         // Get the arguments node
-        let args = match node.child_by_field_name("arguments") {
+        let args = match node.field(Field::Arguments) {
             Some(a) => a,
             None => return,
         };
@@ -263,15 +263,15 @@ impl<'a> Builder<'a> {
         for (idx, child) in args_children.iter().enumerate() {
             if !child.is_named() { continue; }
             first_named_idx = Some(idx);
-            match child.kind() {
-                "string_literal" | "interpolated_string_literal" => {
+            match child.kind_of() {
+                Kind::StringLiteral | Kind::InterpolatedStringLiteral => {
                     if let Some((text, span)) = crate::cst::string_value(*child, self.source) {
                         if !text.starts_with('+') {
                             attr_names.push((text, span));
                         }
                     }
                 }
-                "bareword" | "autoquoted_bareword" => {
+                Kind::Bareword | Kind::AutoquotedBareword => {
                     if let Ok(text) = child.utf8_text(self.source) {
                         attr_names.push((text.to_string(), node_to_span(*child)));
                     }
@@ -284,7 +284,7 @@ impl<'a> Builder<'a> {
                 // (`has 'a', 'b', is => …`), a different declaration entirely,
                 // so the `array` node is intentionally excluded. A non-constant
                 // arrayref folds to nothing and stays unclaimed.
-                "anonymous_array_expression" | "refgen_expression" => {
+                Kind::AnonymousArrayExpression | Kind::RefgenExpression => {
                     self.extract_array_attr_names(*child, &mut attr_names);
                 }
                 _ => {}
@@ -500,7 +500,7 @@ impl<'a> Builder<'a> {
             FrameworkMode::MojoBase => {
                 // Infer getter return type from default value if present
                 let getter_type = if let Some(n) = mojo_default_node {
-                    if n.kind() == "anonymous_subroutine_expression" {
+                    if n.is(Kind::AnonymousSubroutineExpression) {
                         self.infer_anonymous_sub_return_type(n)
                     } else {
                         self.emit_expr_witness(n);
@@ -719,17 +719,17 @@ impl<'a> Builder<'a> {
     /// — no DSL vocabulary, just the syntactic shape. The plugin maps
     /// `(keyword, shape)` to behavior.
     pub(super) fn classify_value_shape(&self, node: Node<'a>) -> plugin::ValueShape {
-        match node.kind() {
-            "number" => plugin::ValueShape::Num(
+        match node.kind_of() {
+            Kind::Number => plugin::ValueShape::Num(
                 node.utf8_text(self.source).unwrap_or("").to_string(),
             ),
-            "string_literal" | "interpolated_string_literal" => {
+            Kind::StringLiteral | Kind::InterpolatedStringLiteral => {
                 plugin::ValueShape::Str(crate::cst::string_content_text(node, self.source).unwrap_or_default())
             }
-            "bareword" | "autoquoted_bareword" => {
+            Kind::Bareword | Kind::AutoquotedBareword => {
                 plugin::ValueShape::Str(node.utf8_text(self.source).unwrap_or("").to_string())
             }
-            "anonymous_hash_expression" => {
+            Kind::AnonymousHashExpression => {
                 // Pair-walk by POSITION (`cst::pair_nodes` — separator-
                 // agnostic, per the fat-comma rule). Flattening to a token
                 // list first loses alignment the moment a value is not a
@@ -746,7 +746,7 @@ impl<'a> Builder<'a> {
                 for (k, v) in crate::cst::pair_nodes(node) {
                     let Some(key) = self.extract_node_string(k) else { continue };
                     let val = self.extract_node_string(v).or_else(|| {
-                        (v.kind() == "anonymous_array_expression")
+                        (v.is(Kind::AnonymousArrayExpression))
                             .then(|| self.extract_string_list(v).into_iter().next())
                             .flatten()
                             .map(|(s, _)| s)
@@ -757,20 +757,20 @@ impl<'a> Builder<'a> {
                 }
                 plugin::ValueShape::HashPairs(pairs)
             }
-            "anonymous_array_expression" => {
+            Kind::AnonymousArrayExpression => {
                 plugin::ValueShape::ArrayItems(
                     self.extract_string_list(node).into_iter().map(|(s, _)| s).collect(),
                 )
             }
-            other => plugin::ValueShape::Other(other.to_string()),
+            _ => plugin::ValueShape::Other(node.kind().to_string()),
         }
     }
 
     /// Extract a string from a bareword or string-literal node.
     pub(super) fn extract_node_string(&self, node: Node<'a>) -> Option<String> {
-        match node.kind() {
-            "bareword" | "autoquoted_bareword" => node.utf8_text(self.source).ok().map(|s| s.to_string()),
-            "string_literal" | "interpolated_string_literal" => crate::cst::string_content_text(node, self.source),
+        match node.kind_of() {
+            Kind::Bareword | Kind::AutoquotedBareword => node.utf8_text(self.source).ok().map(|s| s.to_string()),
+            Kind::StringLiteral | Kind::InterpolatedStringLiteral => crate::cst::string_content_text(node, self.source),
             _ => None,
         }
     }
@@ -810,7 +810,7 @@ impl<'a> Builder<'a> {
 
     pub(super) fn extract_array_attr_names(&self, node: Node<'a>, names: &mut Vec<(String, Span)>) {
         // Handle bare qw() node directly (e.g. as method arg)
-        if node.kind() == "quoted_word_list" {
+        if node.is(Kind::QuotedWordList) {
             self.extract_qw_word_spans(node, names);
             return;
         }
@@ -837,7 +837,7 @@ impl<'a> Builder<'a> {
     /// The plugin's fold then projects (a `Maybe` passthrough asks the param's
     /// `ty` for its `constrained_inner`). rule #1: the builder walks the node.
     pub(super) fn constraint_param_for(&mut self, el: Node<'a>) -> plugin::ConstraintParam {
-        if matches!(el.kind(), "string_literal" | "interpolated_string_literal") {
+        if matches!(el.kind_of(), Kind::StringLiteral | Kind::InterpolatedStringLiteral) {
             return plugin::ConstraintParam {
                 string: crate::cst::string_content_text(el, self.source),
                 ty: None,
@@ -992,14 +992,14 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn collect_sub_exporter_members(&self, node: Node<'a>, out: &mut Vec<(String, Span)>) {
-        match (crate::cst::literal_shape(node), node.kind()) {
+        match (crate::cst::literal_shape(node), node.kind_of()) {
             (Some(LiteralShape::Qw), _) => self.extract_qw_word_spans(node, out),
             (Some(LiteralShape::Str), _) => {
                 if let Some(value) = crate::cst::string_value(node, self.source) {
                     out.push(value);
                 }
             }
-            (None, "bareword" | "autoquoted_bareword") => {
+            (None, Kind::Bareword | Kind::AutoquotedBareword) => {
                 if let Ok(text) = node.utf8_text(self.source) {
                     out.push((text.to_string(), node_to_span(node)));
                 }
@@ -1079,12 +1079,12 @@ impl<'a> Builder<'a> {
                 out.push((name, span));
                 if let Some(nv) = next_named {
                     if matches!(
-                        nv.kind(),
-                        "refgen_expression"
-                            | "anonymous_subroutine_expression"
-                            | "undef_expression"
-                            | "anonymous_hash_expression"
-                            | "scalar"
+                        nv.kind_of(),
+                        Kind::RefgenExpression
+                            | Kind::AnonymousSubroutineExpression
+                            | Kind::UndefExpression
+                            | Kind::AnonymousHashExpression
+                            | Kind::Scalar
                     ) {
                         i = j + 1;
                         continue;
@@ -1099,12 +1099,12 @@ impl<'a> Builder<'a> {
     /// literal) → its literal name + span. Barewords are NOT constant-folded:
     /// an export name written bare is a literal name.
     pub(super) fn sub_exporter_name_token(&self, node: Node<'a>) -> Option<(String, Span)> {
-        match node.kind() {
-            "bareword" | "autoquoted_bareword" => node
+        match node.kind_of() {
+            Kind::Bareword | Kind::AutoquotedBareword => node
                 .utf8_text(self.source)
                 .ok()
                 .map(|t| (t.to_string(), node_to_span(node))),
-            "string_literal" | "interpolated_string_literal" => crate::cst::string_value(node, self.source),
+            Kind::StringLiteral | Kind::InterpolatedStringLiteral => crate::cst::string_value(node, self.source),
             _ => None,
         }
     }
@@ -1141,7 +1141,7 @@ impl<'a> Builder<'a> {
                 // as the `-setup` use form so exports + groups + member refs
                 // ride one path.
                 let config = crate::cst::nth_element(args, 0)
-                    .filter(|c| c.kind() == "anonymous_hash_expression")
+                    .filter(|c| c.is(Kind::AnonymousHashExpression))
                     .unwrap_or(args);
                 self.fold_sub_exporter_config(config);
             }
@@ -1153,7 +1153,7 @@ impl<'a> Builder<'a> {
                     self.record_runtime_exports(self.extract_string_names(name_node));
                 } else if let Some(first) = crate::cst::nth_element(args, 0) {
                     // `add_type Foo, ...` — first positional is the name.
-                    if matches!(first.kind(), "string_literal" | "interpolated_string_literal" | "bareword" | "autoquoted_bareword") {
+                    if matches!(first.kind_of(), Kind::StringLiteral | Kind::InterpolatedStringLiteral | Kind::Bareword | Kind::AutoquotedBareword) {
                         self.record_runtime_exports(self.extract_string_names(first));
                     }
                 }
@@ -1183,9 +1183,9 @@ pub(super) fn walk_constraint_params<'a>(
 /// The parameter nodes of a constraint constructor, arrayref flattened.
 fn constraint_param_nodes<'a>(call_node: Node<'a>) -> Vec<Node<'a>> {
     let mut out = Vec::new();
-    let Some(args) = call_node.child_by_field_name("arguments") else { return out };
+    let Some(args) = call_node.field(Field::Arguments) else { return out };
     for child in args.elements() {
-        if child.kind() == "anonymous_array_expression" {
+        if child.is(Kind::AnonymousArrayExpression) {
             out.extend(child.elements());
         } else {
             out.push(child);
@@ -1196,7 +1196,7 @@ fn constraint_param_nodes<'a>(call_node: Node<'a>) -> Vec<Node<'a>> {
 
 /// First constructor call in a re-parsed constraint tree.
 fn find_constraint_call<'a>(node: Node<'a>) -> Option<Node<'a>> {
-    if matches!(node.kind(), "ambiguous_function_call_expression" | "function_call_expression") {
+    if matches!(node.kind_of(), Kind::AmbiguousFunctionCallExpression | Kind::FunctionCallExpression) {
         return Some(node);
     }
     for i in 0..node.named_child_count() {
@@ -1211,12 +1211,12 @@ fn find_constraint_call<'a>(node: Node<'a>) -> Option<Node<'a>> {
 fn bare_identifier_text(root: Node<'_>, src: &[u8]) -> Option<String> {
     let mut n = root;
     loop {
-        match n.kind() {
+        match n.kind_of() {
             // A qualified name (`My::Class`) is a plain `bareword` in this
             // grammar; `function` is the callee position of a constructor.
             // A union (`Str|Undef`) parses as a `binary_expression` and
             // therefore declines, which is the point.
-            "bareword" | "function" => return n.utf8_text(src).ok().map(|t| t.to_string()),
+            Kind::Bareword | Kind::Function => return n.utf8_text(src).ok().map(|t| t.to_string()),
             _ if n.named_child_count() == 1 => n = n.named_child(0)?,
             _ => return None,
         }
@@ -1279,7 +1279,7 @@ impl<'a> Builder<'a> {
             return self.plugins.type_constraint_inner(&name, &[]);
         }
         let call = find_constraint_call(root)?;
-        let name = call.child_by_field_name("function")?.utf8_text(src).ok()?.to_string();
+        let name = call.field(Field::Function)?.utf8_text(src).ok()?.to_string();
         // The leaf resolver for a re-parsed tree: no symbols and no witnesses
         // exist here, so a string literal contributes its content and a
         // nested constructor recurses through the vocabulary.

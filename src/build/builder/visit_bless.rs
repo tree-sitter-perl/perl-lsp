@@ -6,9 +6,8 @@ use super::*;
 
 impl<'a> Builder<'a> {
     pub(super) fn is_bless_call(&self, node: Node<'a>) -> bool {
-        let kind = node.kind();
-        if kind == "function_call_expression" || kind == "ambiguous_function_call_expression" {
-            if let Some(func) = node.child_by_field_name("function") {
+        if matches!(node.kind_of(), Kind::FunctionCallExpression | Kind::AmbiguousFunctionCallExpression) {
+            if let Some(func) = node.field(Field::Function) {
                 return func.utf8_text(self.source).ok() == Some("bless");
             }
         }
@@ -46,7 +45,7 @@ impl<'a> Builder<'a> {
         // (`$class` from `shift` → enclosing class via FirstParam): that
         // concrete witness is the in-body baseline; the deferred one wins
         // at real call sites via reducer order.
-        if obj.kind() == "scalar" {
+        if obj.is(Kind::Scalar) {
             if let Ok(text) = obj.utf8_text(self.source) {
                 let text = text.to_string();
                 self.push_receiver_bless_witness(&text, node);
@@ -119,17 +118,17 @@ impl<'a> Builder<'a> {
         if self.is_shift_call(node) {
             return true;
         }
-        match node.kind() {
-            "scalar" => crate::cst::is_conventional_invocant_scalar(node, self.source),
-            "array_element_expression" => crate::cst::is_positional_receiver(node, self.source),
+        match node.kind_of() {
+            Kind::Scalar => crate::cst::is_conventional_invocant_scalar(node, self.source),
+            Kind::ArrayElementExpression => crate::cst::is_positional_receiver(node, self.source),
             // `ref <invocant>`
-            "func1op_call_expression" => {
+            Kind::Func1opCallExpression => {
                 node.child(0).and_then(|c| c.utf8_text(self.source).ok()) == Some("ref")
                     && crate::cst::nth_element(node, 0)
                         .map_or(false, |op| self.bless_class_is_receiver(op))
             }
             // `<a> || <b>` / `<a> // <b>` — receiver if either side is.
-            "binary_expression" => {
+            Kind::BinaryExpression => {
                 matches!(self.get_operator_text(node).as_deref(), Some("||") | Some("//"))
                     && (0..node.named_child_count())
                         .filter_map(|i| node.named_child(i))
@@ -159,7 +158,7 @@ impl<'a> Builder<'a> {
         // EXPR's resolved class. `ref EXPR` as a general value is a String, so
         // this unwrap lives here (the class slot) rather than in the generic
         // invocant resolver.
-        if class_node.kind() == "func1op_call_expression"
+        if class_node.is(Kind::Func1opCallExpression)
             && class_node.child(0).and_then(|c| c.utf8_text(self.source).ok()) == Some("ref")
         {
             return class_node

@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use tree_sitter::{Node, Point, Tree};
 
-use crate::cst::{extract_call_name, node_to_span, NodeExt};
+use crate::cst::{extract_call_name, node_to_span, Field, Kind, NodeExt};
 use crate::model::file_analysis::{CrossFileLookup, FileAnalysis, InferredType, Span};
 
 // ---- Types ----
@@ -261,8 +261,8 @@ module_index: Option<&dyn CrossFileLookup>,
         return Some(t);
     }
     let point = node.start_position();
-    match node.kind() {
-        "scalar" => {
+    match node.kind_of() {
+        Kind::Scalar => {
             let text = node.utf8_text(source).ok()?;
             // Route scalar-type resolution through the witness bag so
             // framework / branch / arity rules refine the answer. Keep the
@@ -271,31 +271,31 @@ module_index: Option<&dyn CrossFileLookup>,
             let at = analysis.read_at(span).unwrap_or(crate::model::witnesses::ReadPoint::position(point));
             analysis.inferred_type_via_bag_ctx(text, at, module_index)
         }
-        "package" | "bareword" => {
+        Kind::Package | Kind::Bareword => {
             // Bareword = class name
             let text = node.utf8_text(source).ok()?;
             Some(InferredType::ClassName(text.to_string()))
         }
-        "array_element_expression" => {
+        Kind::ArrayElementExpression => {
             // `$arr[N]` — look up `@arr`'s Sequence shape via the
             // bag, project the index. The bag answer is whatever
             // the walker's last `push` / `my @arr = (...)`
             // contribution left on `Variable{"@arr", scope}`.
-            let arr = node.child_by_field_name("array")?;
+            let arr = node.field(Field::Array)?;
             let name = arr
                 .named_child(0)
                 .and_then(|n| n.utf8_text(source).ok())?;
-            let idx_node = node.child_by_field_name("index")?;
+            let idx_node = node.field(Field::Index)?;
             let idx: i32 = idx_node.utf8_text(source).ok()?.parse().ok()?;
             let arr_var = format!("@{}", name);
             analysis.inferred_type_via_bag(&arr_var, point)
                 .and_then(|t| t.element_at(idx).cloned())
         }
-        "method_call_expression" => {
-            let invocant_node = node.child_by_field_name("invocant")?;
+        Kind::MethodCallExpression => {
+            let invocant_node = node.field(Field::Invocant)?;
             let invocant_type = resolve_expression_type(analysis, invocant_node, source, module_index)?;
             let class_name = invocant_type.class_name()?;
-            let method_name = node.child_by_field_name("method")?;
+            let method_name = node.field(Field::Method)?;
             let method_text = method_name.utf8_text(source).ok()?;
             // Constructor call returns Object(ClassName)
             if crate::model::conventions::is_constructor_name(method_text) {
@@ -304,8 +304,8 @@ module_index: Option<&dyn CrossFileLookup>,
             let arg_count = crate::cst::call_args(node).len();
             analysis.find_method_return_type(class_name, method_text, module_index, Some(arg_count))
         }
-        "function_call_expression" | "ambiguous_function_call_expression" => {
-            let func_node = node.child_by_field_name("function")?;
+        Kind::FunctionCallExpression | Kind::AmbiguousFunctionCallExpression => {
+            let func_node = node.field(Field::Function)?;
             let name = func_node.utf8_text(source).ok()?;
             // Route through the arity-aware helper so fluent
             // arity dispatch (`return X unless @_`) can pick the
@@ -314,11 +314,11 @@ module_index: Option<&dyn CrossFileLookup>,
             analysis.sub_return_type_at_arity(name, Some(arg_count))
                 .or_else(|| crate::model::builtins::builtin_return_type(name))
         }
-        "func1op_call_expression" | "func0op_call_expression" => {
+        Kind::Func1opCallExpression | Kind::Func0opCallExpression => {
             let name = node.child(0)?.utf8_text(source).ok()?;
             crate::model::builtins::builtin_return_type(name)
         }
-        "hash_element_expression" => {
+        Kind::HashElementExpression => {
             // For chaining: resolve the base expression
             let base = node.named_child(0)?;
             resolve_expression_type(analysis, base, source, module_index)
@@ -454,17 +454,17 @@ pub fn detect_cursor_context_tree_with_index(
     // Walk up looking for an incomplete method_call_expression or hash_element_expression
     let mut current = node;
     for _ in 0..20 {
-        match current.kind() {
-            "method_call_expression" => {
+        match current.kind_of() {
+            Kind::MethodCallExpression => {
                 // Check if cursor is after -> (in the method position)
-                if let Some(invocant_node) = current.child_by_field_name("invocant") {
+                if let Some(invocant_node) = current.field(Field::Invocant) {
                     if invocant_node.end_position() < point {
                         // `$obj->Foo::Bar::` / `$obj->Foo::ba` — a fully-qualified
                         // method is being typed. The qualifier names the dispatch
                         // PACKAGE, so complete its subs (same as a bare `Foo::Bar::`),
                         // not the invocant's own methods. SUPER isn't a package, so
                         // it falls through to ordinary method completion.
-                        if let Some(method) = current.child_by_field_name("method") {
+                        if let Some(method) = current.field(Field::Method) {
                             if let Ok(mtext) = method.utf8_text(source) {
                                 if let crate::model::conventions::MethodToken::Qualified {
                                     package, ..
@@ -484,10 +484,10 @@ pub fn detect_cursor_context_tree_with_index(
                         // stub_expression means the parser absorbed "()" from a function
                         // call like `get_config()->`. The real invocant is the parent
                         // ambiguous_function_call_expression (i.e. the full `get_config()` call).
-                        if invocant_node.kind() == "stub_expression" {
+                        if invocant_node.is(Kind::StubExpression) {
                             if let Some(parent) = current.parent() {
-                                if parent.kind() == "ambiguous_function_call_expression"
-                                    || parent.kind() == "function_call_expression"
+                                if parent.is(Kind::AmbiguousFunctionCallExpression)
+                                    || parent.is(Kind::FunctionCallExpression)
                                 {
                                     let invocant_text = parent.utf8_text(source).unwrap_or("").to_string();
                                     let invocant_type = resolve_node_type(parent, source, analysis, point, module_index);
@@ -503,7 +503,7 @@ pub fn detect_cursor_context_tree_with_index(
                         // a string interior doesn't masquerade as `$obj->`.
                         // An incomplete `$obj->|` has no method child and still
                         // wants Method.
-                        if let Some(method) = current.child_by_field_name("method") {
+                        if let Some(method) = current.field(Field::Method) {
                             if point > method.end_position() {
                                 current = current.parent()?;
                                 continue;
@@ -515,7 +515,7 @@ pub fn detect_cursor_context_tree_with_index(
                     }
                 }
             }
-            "hash_element_expression" => {
+            Kind::HashElementExpression => {
                 // Check if cursor is inside the {key} part
                 if let Some(base) = current.named_child(0) {
                     if base.end_position() < point {
@@ -526,7 +526,7 @@ pub fn detect_cursor_context_tree_with_index(
                     }
                 }
             }
-            "anonymous_hash_expression" => {
+            Kind::AnonymousHashExpression => {
                 // `{ key => ... }` literal. If it lives as a positional
                 // argument to a method/function call, the hash's owner
                 // is the called sub — mirror of "inside ->{…}" detection
@@ -543,7 +543,7 @@ pub fn detect_cursor_context_tree_with_index(
                     }
                 }
             }
-            "ERROR" => {
+            Kind::Error => {
                 // Incomplete expression: look for `expr->{` or `expr->` patterns
                 // in error recovery
                 if let Some(ctx) = detect_from_error_node(current, source, point, analysis, module_index) {
@@ -571,18 +571,18 @@ fn enclosing_call_for_hash_arg(hash_node: Node, source: &[u8]) -> Option<String>
     let mut n = hash_node;
     for _ in 0..16 {
         let parent = n.parent()?;
-        match parent.kind() {
-            "method_call_expression" => {
-                let method = parent.child_by_field_name("method")?;
+        match parent.kind_of() {
+            Kind::MethodCallExpression => {
+                let method = parent.field(Field::Method)?;
                 return method.utf8_text(source).ok().map(|s| s.to_string());
             }
-            "function_call_expression" | "ambiguous_function_call_expression" => {
-                let func = parent.child_by_field_name("function")?;
+            Kind::FunctionCallExpression | Kind::AmbiguousFunctionCallExpression => {
+                let func = parent.field(Field::Function)?;
                 return func.utf8_text(source).ok().map(|s| s.to_string());
             }
-            "block" | "subroutine_declaration_statement"
-            | "method_declaration_statement" | "anonymous_subroutine_expression"
-            | "class_statement" | "package_statement" => return None,
+            Kind::Block | Kind::SubroutineDeclarationStatement
+            | Kind::MethodDeclarationStatement | Kind::AnonymousSubroutineExpression
+            | Kind::ClassStatement | Kind::PackageStatement => return None,
             _ => {}
         }
         n = parent;
@@ -606,15 +606,15 @@ fn resolve_node_type(
     point: Point,
     module_index: Option<&dyn crate::model::file_analysis::CrossFileLookup>,
 ) -> Option<InferredType> {
-    match node.kind() {
-        "scalar" | "array" | "hash" => {
+    match node.kind_of() {
+        Kind::Scalar | Kind::Array | Kind::Hash => {
             let text = node.utf8_text(source).ok()?;
             let at = analysis
                 .read_at(node_to_span(node))
                 .unwrap_or(crate::model::witnesses::ReadPoint::position(point));
             analysis.inferred_type_via_bag_ctx(text, at, module_index)
         }
-        "bareword" | "package" => {
+        Kind::Bareword | Kind::Package => {
             let text = node.utf8_text(source).ok()?;
             Some(InferredType::ClassName(text.to_string()))
         }
@@ -720,16 +720,16 @@ pub fn find_call_context(tree: &Tree, source: &[u8], point: Point) -> Option<Cal
 /// If the first argument of a call is a string literal or bareword, return
 /// its content. Used for string-dispatch signature help.
 fn first_arg_as_string(args: Node, source: &[u8]) -> Option<String> {
-    let first = if args.kind() == "list_expression" || args.kind() == "parenthesized_expression" {
+    let first = if args.is(Kind::ListExpression) || args.is(Kind::ParenthesizedExpression) {
         crate::cst::nth_element(args, 0)?
     } else {
         args
     };
-    match first.kind() {
-        "string_literal" | "interpolated_string_literal" => {
+    match first.kind_of() {
+        Kind::StringLiteral | Kind::InterpolatedStringLiteral => {
             Some(crate::cst::string_content_text(first, source).unwrap_or_default())
         }
-        "bareword" | "autoquoted_bareword" => {
+        Kind::Bareword | Kind::AutoquotedBareword => {
             first.utf8_text(source).ok().map(|s| s.to_string())
         }
         _ => None,
@@ -760,7 +760,7 @@ fn find_call_at_cursor<'a>(
     let root = tree.root_node();
     for i in 0..root.child_count() {
         if let Some(child) = root.child(i) {
-            if child.kind() == "ERROR"
+            if child.is(Kind::Error)
                 && child.end_position().row == point.row
                 && child.end_position() <= point
             {
@@ -787,23 +787,23 @@ fn find_call_at_cursor_from<'a>(
         .descendant_for_point_range(start_point, start_point)?;
 
     for _ in 0..30 {
-        match node.kind() {
-            "function_call_expression" | "ambiguous_function_call_expression" => {
+        match node.kind_of() {
+            Kind::FunctionCallExpression | Kind::AmbiguousFunctionCallExpression => {
                 let name = node
-                    .child_by_field_name("function")
+                    .field(Field::Function)
                     .and_then(|n| n.utf8_text(source).ok())?;
-                let args = node.child_by_field_name("arguments");
+                let args = node.field(Field::Arguments);
                 return Some((name.to_string(), false, None, args));
             }
-            "method_call_expression" => {
+            Kind::MethodCallExpression => {
                 let name = node
-                    .child_by_field_name("method")
+                    .field(Field::Method)
                     .and_then(|n| n.utf8_text(source).ok())?;
                 let invocant = node
-                    .child_by_field_name("invocant")
+                    .field(Field::Invocant)
                     .and_then(|n| n.utf8_text(source).ok())
                     .map(|s| s.to_string());
-                let args = node.child_by_field_name("arguments");
+                let args = node.field(Field::Arguments);
                 if args.is_some() {
                     return Some((name.to_string(), true, invocant, args));
                 }
@@ -811,11 +811,11 @@ fn find_call_at_cursor_from<'a>(
                 let args_from_error = node
                     .parent()
                     .and_then(|p| p.next_sibling())
-                    .filter(|s| s.kind() == "ERROR")
+                    .filter(|s| s.is(Kind::Error))
                     .and_then(|err| {
                         for i in 0..err.child_count() {
                             if let Some(c) = err.child(i) {
-                                if c.kind() == "list_expression" {
+                                if c.is(Kind::ListExpression) {
                                     return Some(c);
                                 }
                             }
@@ -824,7 +824,7 @@ fn find_call_at_cursor_from<'a>(
                     });
                 return Some((name.to_string(), true, invocant, args_from_error));
             }
-            "ERROR" => {
+            Kind::Error => {
                 if let Some(result) = parse_call_from_error(node, source, cursor) {
                     return Some(result);
                 }
@@ -849,39 +849,39 @@ fn find_call_from_error_sibling<'a>(
     let mut args_node: Option<Node<'a>> = None;
     for i in 0..error.child_count() {
         if let Some(child) = error.child(i) {
-            if child.kind() == "list_expression" {
+            if child.is(Kind::ListExpression) {
                 args_node = Some(child);
             }
         }
     }
 
     let prev = error.prev_sibling()?;
-    let call_node = if prev.kind() == "expression_statement" {
+    let call_node = if prev.is(Kind::ExpressionStatement) {
         prev.named_child(0)?
     } else {
         prev
     };
 
-    match call_node.kind() {
-        "method_call_expression" => {
+    match call_node.kind_of() {
+        Kind::MethodCallExpression => {
             let name = call_node
-                .child_by_field_name("method")
+                .field(Field::Method)
                 .and_then(|n| n.utf8_text(source).ok())?;
             let invocant = call_node
-                .child_by_field_name("invocant")
+                .field(Field::Invocant)
                 .and_then(|n| n.utf8_text(source).ok())
                 .map(|s| s.to_string());
-            let args = call_node.child_by_field_name("arguments").or(args_node);
+            let args = call_node.field(Field::Arguments).or(args_node);
             Some((name.to_string(), true, invocant, args))
         }
-        "function_call_expression" | "ambiguous_function_call_expression" => {
+        Kind::FunctionCallExpression | Kind::AmbiguousFunctionCallExpression => {
             let name = call_node
-                .child_by_field_name("function")
+                .field(Field::Function)
                 .and_then(|n| n.utf8_text(source).ok())?;
-            let args = call_node.child_by_field_name("arguments").or(args_node);
+            let args = call_node.field(Field::Arguments).or(args_node);
             Some((name.to_string(), false, None, args))
         }
-        "bareword" => {
+        Kind::Bareword => {
             let name = call_node.utf8_text(source).ok()?;
             Some((name.to_string(), false, None, args_node))
         }
@@ -905,20 +905,20 @@ fn parse_call_from_error<'a>(
     for i in 0..error.child_count() {
         let child = error.child(i)?;
 
-        if matches!(child.kind(), "scalar" | "array" | "hash" | "package") {
+        if matches!(child.kind_of(), Kind::Scalar | Kind::Array | Kind::Hash | Kind::Package) {
             invocant = child.utf8_text(source).ok().map(|s| s.to_string());
         } else if child.kind() == "->" {
             has_arrow = true;
             if invocant.is_none() {
                 invocant = func_name.take();
             }
-        } else if child.kind() == "method" && has_arrow {
+        } else if child.is(Kind::Method) && has_arrow {
             method_name = child.utf8_text(source).ok().map(|s| s.to_string());
-        } else if child.kind() == "bareword" || child.kind() == "function" {
+        } else if child.is(Kind::Bareword) || child.is(Kind::Function) {
             func_name = child.utf8_text(source).ok().map(|s| s.to_string());
         } else if child.kind() == "(" {
             found_open_paren = true;
-        } else if child.kind() == "list_expression" && found_open_paren {
+        } else if child.is(Kind::ListExpression) && found_open_paren {
             args_node = Some(child);
         }
     }
@@ -980,7 +980,7 @@ pub fn active_slot_in_node(node: Node, cursor: Point) -> usize {
     // dispatch completion flip to `active_param=1` at the exact
     // closing-quote cursor position the user lands on with `i` to
     // edit inside the string.
-    if scope.kind() != "list_expression" {
+    if !scope.is(Kind::ListExpression) {
         return 0;
     }
     let mut count = 0;
@@ -1007,7 +1007,7 @@ pub fn active_slot_in_node(node: Node, cursor: Point) -> usize {
 /// items directly — descend through that single-child wrapper.
 fn item_scope(node: Node) -> Node {
     let named: Vec<_> = node.elements().collect();
-    if named.len() == 1 && named[0].kind() == "list_expression" {
+    if named.len() == 1 && named[0].is(Kind::ListExpression) {
         return named[0];
     }
     node
@@ -1051,7 +1051,7 @@ pub fn used_keys_in_enclosing_hash(tree: &Tree, source: &[u8], point: Point) -> 
     let Some(mut node) = tree.root_node().descendant_for_point_range(check_point, check_point)
         else { return HashSet::new() };
     for _ in 0..16 {
-        if node.kind() == "anonymous_hash_expression" {
+        if node.is(Kind::AnonymousHashExpression) {
             return used_keys_in_pairs(node, source);
         }
         let Some(parent) = node.parent() else { break };
@@ -1071,12 +1071,12 @@ fn used_keys_in_pairs(container: Node, source: &[u8]) -> HashSet<String> {
 
 /// Extract the text of a key node (bareword, string literal, etc.)
 fn extract_key_text(node: Node, source: &[u8]) -> Option<String> {
-    match node.kind() {
-        "autoquoted_bareword" => node.utf8_text(source).ok().map(|s| s.to_string()),
-        "string_literal" | "interpolated_string_literal" => {
+    match node.kind_of() {
+        Kind::AutoquotedBareword => node.utf8_text(source).ok().map(|s| s.to_string()),
+        Kind::StringLiteral | Kind::InterpolatedStringLiteral => {
             Some(crate::cst::string_content_text(node, source).unwrap_or_default())
         }
-        "string_content" => node.utf8_text(source).ok().map(|s| s.to_string()),
+        Kind::StringContent => node.utf8_text(source).ok().map(|s| s.to_string()),
         _ => None, // dynamic keys — don't include
     }
 }
@@ -1157,8 +1157,8 @@ pub fn build_plugin_query_context(
         let mut found: Option<ContainerFrame> = None;
         let mut found_node: Option<Node> = None;
         while let Some(node) = n {
-            match node.kind() {
-                "anonymous_array_expression" => {
+            match node.kind_of() {
+                Kind::AnonymousArrayExpression => {
                     found = Some(ContainerFrame {
                         kind: ContainerKind::Array,
                         active_slot: active_slot_in_node(node, point),
@@ -1167,7 +1167,7 @@ pub fn build_plugin_query_context(
                     found_node = Some(node);
                     break;
                 }
-                "anonymous_hash_expression" => {
+                Kind::AnonymousHashExpression => {
                     let used = used_keys_in_enclosing_hash(tree, source, point);
                     found = Some(ContainerFrame {
                         kind: ContainerKind::Hash,
@@ -1177,8 +1177,8 @@ pub fn build_plugin_query_context(
                     found_node = Some(node);
                     break;
                 }
-                "method_call_expression" | "function_call_expression"
-                | "ambiguous_function_call_expression" => break,
+                Kind::MethodCallExpression | Kind::FunctionCallExpression
+                | Kind::AmbiguousFunctionCallExpression => break,
                 _ => {}
             }
             n = node.parent();
@@ -1191,8 +1191,8 @@ pub fn build_plugin_query_context(
         // use-line args slot.
         let use_module = found_node.and_then(|hash| {
             let parent = hash.parent()?;
-            if parent.kind() != "use_statement" { return None; }
-            let module = parent.child_by_field_name("module")?;
+            if !parent.is(Kind::UseStatement) { return None; }
+            let module = parent.field(Field::Module)?;
             module.utf8_text(source).ok().map(|s| s.to_string())
         });
         (found, use_module)
