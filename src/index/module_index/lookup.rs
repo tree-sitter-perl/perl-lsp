@@ -734,7 +734,7 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn search_roots(&self) -> Arc<Vec<std::path::PathBuf>> {
-        self.core.dependency_map().map(|m| m.search_roots()).unwrap_or_default()
+        self.core.dependency_map.get().map(|m| m.search_roots()).unwrap_or_default()
     }
 
     fn workspace_root_path(&self) -> Option<std::path::PathBuf> {

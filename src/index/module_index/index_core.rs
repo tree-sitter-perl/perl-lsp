@@ -79,9 +79,11 @@ pub(crate) struct IndexCore {
     /// The dependency map this process locates from: the one owner of the
     /// search roots (the visibility rank reads them, the landing locates
     /// through it, the walk skips its tier roots). Read once per process by
-    /// the served language's reader (`dependency_map_for`); `None` until
+    /// the served language's reader (`dependency_map_for`), and set once:
+    /// the visibility rank reads it on request paths, where a set-once cell
+    /// costs a load and a lock would cost a shared write; `None` until
     /// then, which every reader takes as an empty map.
-    pub(crate) dependency_map: std::sync::RwLock<Option<Arc<crate::build::dependency_map::DependencyMap>>>,
+    pub(crate) dependency_map: std::sync::OnceLock<Arc<crate::build::dependency_map::DependencyMap>>,
     /// Held across a read so concurrent first askers (the walk and the
     /// resolver thread) read the map once.
     map_read: Mutex<()>,
@@ -164,7 +166,7 @@ impl IndexCore {
             leaf_defs: DashMap::new(),
             records: FileRecords::default(),
             all_files: DashMap::new(),
-            dependency_map: std::sync::RwLock::new(None),
+            dependency_map: std::sync::OnceLock::new(),
             map_read: Mutex::new(()),
             queue: ResolveQueue {
                 priority: Mutex::new(Vec::new()),
@@ -213,13 +215,12 @@ impl IndexCore {
 
     /// The map read so far, if any.
     pub(crate) fn dependency_map(&self) -> Option<Arc<crate::build::dependency_map::DependencyMap>> {
-        self.dependency_map.read().ok().and_then(|g| g.clone())
+        self.dependency_map.get().cloned()
     }
 
+    /// Publish the map. The first publish wins: a process reads one map.
     pub(crate) fn set_dependency_map(&self, map: Arc<crate::build::dependency_map::DependencyMap>) {
-        if let Ok(mut g) = self.dependency_map.write() {
-            *g = Some(map);
-        }
+        let _ = self.dependency_map.set(map);
     }
 
     /// Mint a fresh monotonic registration generation for `path`. The
