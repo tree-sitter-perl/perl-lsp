@@ -165,6 +165,12 @@ registry! {
             version TEXT NOT NULL,
             surface BLOB NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS dependency_maps (
+            root    TEXT PRIMARY KEY,
+            version TEXT NOT NULL,
+            stamps  BLOB NOT NULL,
+            map     BLOB NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_modules_path ON modules(path);
         CREATE INDEX IF NOT EXISTS idx_modules_name ON modules(module_name);";
     META_GET => NoScratch, "SELECT value FROM meta WHERE key = ?1";
@@ -321,6 +327,12 @@ registry! {
     SURFACE_SAVE => NoScratch,
         "INSERT OR REPLACE INTO surfaces (path, version, surface) VALUES (?1, ?2, ?3)";
     SURFACE_DELETE => NoScratch, "DELETE FROM surfaces WHERE path = ?1";
+    DEPENDENCY_MAP_SAVE => NoScratch,
+        "INSERT OR REPLACE INTO dependency_maps (root, version, stamps, map) VALUES (?1, ?2, ?3, ?4)";
+    DEPENDENCY_MAP_LOAD => NoScratch,
+        "SELECT stamps, map FROM dependency_maps WHERE root = ?1 AND version = ?2";
+    DEPENDENCY_MAP_ALL => NoScratch, "SELECT root, version, stamps FROM dependency_maps";
+    DEPENDENCY_MAP_DELETE => NoScratch, "DELETE FROM dependency_maps WHERE root = ?1";
     SURFACE_LOAD => NoScratch,
         "SELECT surface FROM surfaces WHERE path = ?1 AND version = ?2";
     /// The newest row at or below the pinned generation; the `(path,

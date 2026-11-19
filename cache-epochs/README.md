@@ -17,6 +17,7 @@ every reader compares the version for equality.
 | `conclusion-rows` | `conclusions` row shape                       | table rebuilt, re-baked                  |
 | `schema`          | `modules` table DDL and keying                | `modules` dropped                        |
 | `macro-cache`     | persisted C/C++ macro tables                  | tables re-gathered                       |
+| `dependency-map`  | persisted dependency maps (`dependency_maps`) | the map is read afresh and rewritten     |
 
 Add a file when your change alters what a cache STORES (its shape or its
 meaning). A pure refactor, a query-time change, or a perf change that leaves

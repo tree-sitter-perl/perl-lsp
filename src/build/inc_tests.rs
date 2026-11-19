@@ -30,3 +30,12 @@ fn a_project_without_carton_s_base_gives_the_tier_no_root() {
     assert!(map.tier_roots().is_empty());
     assert_eq!(map.search_roots()[0], root.join("lib"));
 }
+
+/// `@INC` comes from running `perl` (and its environment), and which
+/// project dirs join it from whether they exist: no input stamps either, so
+/// the map is read every run, never kept.
+#[test]
+fn perl_s_map_is_never_kept() {
+    let root = project("unkept", &["lib", "local/lib/perl5"]);
+    assert!(read_map(Some(&root)).encode().is_none());
+}

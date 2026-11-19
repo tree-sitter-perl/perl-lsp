@@ -119,3 +119,11 @@ fn the_spelling_names_modules_and_packages_and_nothing_else() {
     assert_eq!(of("a/README"), None);
     assert_eq!((SPELLING.module_paths)("a.b"), ["a/b/__init__.py", "a/b.py"]);
 }
+
+/// Which environments a project has is a directory listing no input
+/// stamps, so python's map is read every run, never kept.
+#[test]
+fn python_s_map_is_never_kept() {
+    let root = project("unkept", &[(".venv/pyvenv.cfg", ""), (".venv/lib/python3.12/site-packages/six.py", "")]);
+    assert!(read_map(Some(&root)).unwrap().encode().is_none());
+}

@@ -38,6 +38,7 @@ fn sep() -> &'static str {
 /// answers before a module file of the same name, as the path finder
 /// tries them.
 pub const SPELLING: ModuleSpelling = ModuleSpelling {
+    id: "python-module",
     module_paths: |m| {
         let dir = m.replace(sep(), "/");
         vec![format!("{dir}/{PYTHON_PACKAGE_MARKER}"), format!("{dir}.{SOURCE_EXT}")]
@@ -67,8 +68,14 @@ pub fn read_map(root: Option<&Path>) -> Option<DependencyMap> {
             inputs.push(marker);
         }
     }
+    // Not `with_complete_inputs`: which environments exist and which
+    // `lib/pythonX.Y` each holds come from listing directories no input
+    // stamps, so the map is read every run (a few stats, not a table).
     Some(DependencyMap::new(vec![Lane::SearchRoots { roots: search, spelling: SPELLING }], venvs, inputs))
 }
+
+/// The spellings a kept python map's lanes may name.
+pub const SPELLINGS: &[ModuleSpelling] = &[SPELLING];
 
 /// The directories directly under `root` that hold the environment marker.
 fn environments(root: &Path) -> Vec<PathBuf> {

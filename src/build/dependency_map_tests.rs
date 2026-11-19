@@ -4,6 +4,7 @@ use super::*;
 
 fn spelling() -> ModuleSpelling {
     ModuleSpelling {
+        id: "test",
         module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
         module_of: |rel| {
             rel.extension()

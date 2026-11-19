@@ -236,3 +236,70 @@ fn lanes_answer_in_composer_s_order_and_files_load_under_no_name() {
         .iter()
         .any(|l| l.loads_as.as_deref() == Some("Acme\\Model\\Base")));
 }
+
+/// The project `lanes_answer_in_composer_s_order…` reads, every lane kind
+/// present.
+fn kept_project(tag: &str) -> PathBuf {
+    project(
+        tag,
+        &[
+            ("composer.json", ROOT_JSON),
+            ("vendor/composer/installed.json", V2),
+            ("vendor/acme/model/src/Base.php", "<?php"),
+            ("vendor/acme/model/deep/Thing.php", "<?php"),
+            ("vendor/acme/model/helpers.php", "<?php"),
+            ("vendor/old/lib/lib/Old/Tool/Hammer.php", "<?php"),
+            ("vendor/old/lib/legacy/anything.php", "<?php\nclass Legacy_Widget {}\n"),
+            ("vendor/composer/autoload_classmap.php", CLASSMAP),
+        ],
+    )
+}
+
+#[test]
+fn a_kept_map_is_the_fresh_read_while_its_inputs_hold() {
+    let root = kept_project("kept");
+    let fresh = read_map(Some(&root)).unwrap();
+    let bytes = fresh.encode().expect("Composer's reader reads only its inputs, so its map is kept");
+    let kept = DependencyMap::decode(&bytes, SPELLINGS).unwrap();
+    assert_eq!(kept.generation(), fresh.generation());
+    assert_eq!(kept.generation(), read_map(Some(&root)).unwrap().generation());
+    assert_eq!(kept.tier_roots(), fresh.tier_roots());
+    assert_eq!(*kept.search_roots(), *fresh.search_roots());
+    let v = |rel: &str| CanonicalPath::resolve(root.join("vendor").join(rel));
+    let asks = [
+        Ask::Name("Acme\\Model\\Base".into()),
+        Ask::Name("Acme\\Model\\Deep\\Thing".into()),
+        Ask::Name("Old_Tool_Hammer".into()),
+        Ask::Name("Legacy_Widget".into()),
+        Ask::Name("Acme\\Model\\Missing".into()),
+        Ask::File(v("acme/model/helpers.php")),
+        Ask::File(v("acme/model/src/Base.php")),
+    ];
+    for ask in &asks {
+        assert_eq!(kept.locate(ask), fresh.locate(ask), "{ask:?}");
+    }
+    assert!(kept.owns(&root.join("vendor/acme/model/src/Base.php")));
+    // a lane naming a spelling the reader no longer has is not a map
+    assert!(DependencyMap::decode(&bytes, &SPELLINGS[..1]).is_none());
+}
+
+#[test]
+fn touching_an_input_stops_a_kept_map_holding() {
+    let root = kept_project("touched");
+    let map = read_map(Some(&root)).unwrap();
+    let stamps = map.encode_stamps();
+    let before = map.generation();
+    assert!(DependencyMap::stamps_hold(&stamps));
+    // a touch alone, same bytes: the mtime is the stamp that moved
+    let installed = root.join("vendor/composer/installed.json");
+    let later = std::fs::metadata(&installed).unwrap().modified().unwrap() + std::time::Duration::from_secs(5);
+    std::fs::File::options().write(true).open(&installed).unwrap().set_modified(later).unwrap();
+    assert!(!DependencyMap::stamps_hold(&stamps));
+    assert_ne!(read_map(Some(&root)).unwrap().generation(), before);
+    // an input appearing moves it too
+    let bare = project("appears", &[("composer.json", ROOT_JSON)]);
+    let stamps = read_map(Some(&bare)).unwrap().encode_stamps();
+    std::fs::create_dir_all(bare.join("vendor/composer")).unwrap();
+    std::fs::write(bare.join("vendor/composer/installed.json"), V2).unwrap();
+    assert!(!DependencyMap::stamps_hold(&stamps));
+}

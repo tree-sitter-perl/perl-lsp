@@ -368,7 +368,7 @@ fn severity_rank(s: &str) -> u8 {
     }
 }
 
-/// --gc-cache <root> — drop dependency rows no landing can take, and reclaim
+/// --gc-cache <root> — drop dependency rows and kept maps no run can take, and reclaim
 /// interned strings nothing references.
 ///
 /// A MAINTENANCE verb, not an automatic sweep, and the distinction is the
@@ -386,7 +386,10 @@ fn severity_rank(s: &str) -> u8 {
 /// runs only when the caller knows nothing else is writing.
 pub(crate) fn cli_gc_cache(root: &str) {
     let (_, root_uri) = canonical_root_and_uri(root);
-    let Some(conn) = module_cache::open_cache_db(Some(&root_uri), "perl") else {
+    // The served language's store: a pack's dependency rows and kept map
+    // live in its own, never in Perl's.
+    let lang = crate::build::language_driver::LanguageRegistry::served().id();
+    let Some(conn) = module_cache::open_cache_db(Some(&root_uri), lang) else {
         eprintln!("No cache database for {root}");
         exit_with(1, "exit");
     };
@@ -412,7 +415,10 @@ pub(crate) fn cli_gc_cache(root: &str) {
     // in the same run.
     let dependency_rows = module_cache::gc_dependency_rows(&conn);
     let retired_meta = module_cache::forget_retired_meta(&conn);
-    eprintln!("Dropped {dependency_rows} dependency rows no landing can take; {retired_meta} retired meta rows");
+    let maps = module_cache::gc_dependency_maps(&conn);
+    eprintln!(
+        "Dropped {dependency_rows} dependency rows no landing can take; {maps} kept dependency maps no run can serve; {retired_meta} retired meta rows"
+    );
     let missing = n(sql::GC_COUNT_WORKSPACE_FILES);
     let reclaimed = module_cache::gc_strings(&conn);
     eprintln!(

@@ -901,3 +901,68 @@ fn a_site_packages_module_lands_named_from_its_search_root() {
     assert!(idx.land_pack_module(&map, "app.user", python).1.is_none(), "the project's own module is the walk's");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A one-shot run against an unmoved Composer project takes the map it
+/// kept: the generated classmap is not read again until an input's stamp
+/// moves, and then it is read afresh and kept over the old row.
+#[cfg(feature = "php")]
+#[test]
+fn a_kept_composer_map_is_served_until_an_input_moves() {
+    use crate::build::dependency_map::{Ask, DependencyMap};
+    use crate::index::module_index::{load_kept_map, read_and_keep};
+    let php = crate::build::language_driver::LanguageRegistry::compiled().for_id("php").expect("php driver");
+    let dir = std::env::temp_dir().join(format!("d7_kept_map_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let classmap = |class: &str| {
+        format!("<?php\n$vendorDir = dirname(__DIR__);\nreturn array(\n    '{class}' => $vendorDir . '/old/legacy.php',\n);\n")
+    };
+    let files = [
+        ("composer.json".to_string(), r#"{"autoload": {"psr-4": {"App\\": "src/"}}}"#.to_string()),
+        (
+            "vendor/composer/installed.json".to_string(),
+            r#"{"packages": [{"name": "old/lib", "install-path": "../old", "autoload": {"classmap": ["."]}}]}"#.to_string(),
+        ),
+        ("vendor/composer/autoload_classmap.php".to_string(), classmap("Legacy_Widget")),
+        ("vendor/old/legacy.php".to_string(), "<?php\nclass Legacy_Widget {}\n".to_string()),
+    ];
+    for (rel, body) in &files {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = crate::util::canonical_path::CanonicalPath::resolve(&dir).into_path_buf();
+    let cache = dir.join(".cache");
+    let located = |map: &DependencyMap, class: &str| !map.locate(&Ask::Name(class.into())).is_empty();
+    crate::index::module_cache::with_test_cache_dir(&cache, std::time::Duration::from_secs(10), || {
+        let conn = crate::index::module_cache::open_cache_db(None, php.id()).expect("test store");
+        let root = Some(dir.as_path());
+        assert!(load_kept_map(php, root, Some(&conn)).is_none(), "nothing kept yet");
+        let fresh = read_and_keep(php, root, Some(&conn)).unwrap();
+        let kept = load_kept_map(php, root, Some(&conn)).expect("the read was kept");
+        assert_eq!(kept.generation(), fresh.generation());
+        assert_eq!(kept.generation(), php.dependency_map(root).unwrap().generation());
+
+        // The classmap rewritten under the same size and mtime: its stamp
+        // holds, so the kept map answers as it was read: not re-read.
+        let cm = dir.join("vendor/composer/autoload_classmap.php");
+        let installed = dir.join("vendor/composer/installed.json");
+        let mtime = |p: &std::path::Path| std::fs::metadata(p).unwrap().modified().unwrap();
+        let was = mtime(&cm);
+        std::fs::write(&cm, classmap("Legacy_Gadget")).unwrap();
+        std::fs::File::options().write(true).open(&cm).unwrap().set_modified(was).unwrap();
+        let kept = load_kept_map(php, root, Some(&conn)).expect("its stamps hold");
+        assert!(located(&kept, "Legacy_Widget") && !located(&kept, "Legacy_Gadget"));
+
+        // Touching `installed.json` moves an input: the row is not served,
+        // and the read that replaces it reads the classmap afresh.
+        let later = mtime(&installed) + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&installed).unwrap().set_modified(later).unwrap();
+        assert!(load_kept_map(php, root, Some(&conn)).is_none(), "a moved input is not served");
+        let reread = read_and_keep(php, root, Some(&conn)).unwrap();
+        assert!(located(&reread, "Legacy_Gadget") && !located(&reread, "Legacy_Widget"));
+        let kept = load_kept_map(php, root, Some(&conn)).expect("rewritten in place");
+        assert_eq!(kept.generation(), reread.generation());
+        assert!(located(&kept, "Legacy_Gadget"));
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}

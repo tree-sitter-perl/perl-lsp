@@ -259,6 +259,57 @@ pub fn gc_dependency_rows(conn: &Connection) -> usize {
     stale.len()
 }
 
+/// The dependency map kept for the project at `root`, when its inputs
+/// still carry the stamps it was kept with. A row that does not hold is
+/// simply not served; the caller reads afresh and writes over it.
+pub fn load_dependency_map(conn: &Connection, root: &str) -> Option<Vec<u8>> {
+    let (stamps, map): (Vec<u8>, Vec<u8>) = conn
+        .query_row(
+            sql::DEPENDENCY_MAP_LOAD.registered(),
+            params![root, crate::util::cache_epochs::DEPENDENCY_MAP],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok()?;
+    crate::build::dependency_map::DependencyMap::stamps_hold(&stamps).then_some(map)
+}
+
+/// Keep `map` for the project at `root` with its inputs' stamps as they
+/// are now. A map whose reader read something its inputs do not stamp is
+/// not kept.
+pub fn save_dependency_map(conn: &Connection, root: &str, map: &crate::build::dependency_map::DependencyMap) -> bool {
+    let Some(bytes) = map.encode() else { return false };
+    conn.execute(
+        sql::DEPENDENCY_MAP_SAVE.registered(),
+        params![root, crate::util::cache_epochs::DEPENDENCY_MAP, map.encode_stamps(), bytes],
+    )
+    .is_ok()
+}
+
+/// `--gc-cache`'s sweep of kept maps: drop each a load would not serve —
+/// another epoch's, or one whose inputs moved since.
+pub fn gc_dependency_maps(conn: &Connection) -> usize {
+    let stale: Vec<String> = conn
+        .prepare(sql::DEPENDENCY_MAP_ALL.registered())
+        .and_then(|mut stmt| {
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Vec<u8>>(2)?))
+            })?;
+            Ok(rows
+                .filter_map(Result::ok)
+                .filter(|(_, version, stamps)| {
+                    version != crate::util::cache_epochs::DEPENDENCY_MAP
+                        || !crate::build::dependency_map::DependencyMap::stamps_hold(stamps)
+                })
+                .map(|(root, ..)| root)
+                .collect())
+        })
+        .unwrap_or_default();
+    for root in &stale {
+        let _ = conn.execute(sql::DEPENDENCY_MAP_DELETE.registered(), params![root]);
+    }
+    stale.len()
+}
+
 /// Drop one file's whole persisted generation — blob row AND derived ref
 /// rows, together (the eraser twin of the write invariant "blob + rows
 /// describe one generation"). Every invalidation seam calls this; nobody
