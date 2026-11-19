@@ -41,6 +41,9 @@ pub mod query_extract;
 pub mod reparse;
 // the one source-file walk and guarded analyze the indexers share
 pub mod source_files;
+// python virtual environments: python's reader of the dependency map
+#[cfg(feature = "python")]
+pub mod venv;
 // package-marker directories a workspace walk saw (python's `__init__.py`);
 // only a path-named language reads them
 #[cfg_attr(not(feature = "python"), allow(dead_code))]

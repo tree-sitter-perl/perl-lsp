@@ -29,6 +29,17 @@ impl Parse {
             Parse::Pack(_) => FrontDoor::Pack,
         }
     }
+
+    /// Whether a stored analysis of `path` still holds what it read about
+    /// the path besides its source: the module a path-named file is, which
+    /// moves with a package marker or the search root it is named from.
+    /// The hub's builder reads nothing but the source.
+    fn path_inputs_current(&self, path: &std::path::Path, fa: &crate::model::file_analysis::FileAnalysis) -> bool {
+        match self {
+            Parse::Hub(_) => true,
+            Parse::Pack(driver) => driver.path_inputs_current(path, fa),
+        }
+    }
 }
 
 // ---- Module parsing ----
@@ -128,7 +139,10 @@ fn parse_one_provider(
     parse: &mut Parse,
     rows: Option<&rusqlite::Connection>,
 ) -> Option<Arc<CachedModule>> {
-    if let Some(fa) = rows.and_then(|conn| module_cache::load_dependency_row(conn, &path)) {
+    if let Some(fa) = rows
+        .and_then(|conn| module_cache::load_dependency_row(conn, &path))
+        .filter(|fa| parse.path_inputs_current(path.as_path(), fa))
+    {
         return Some(Arc::new(CachedModule::new(path, Arc::new(fa))));
     }
     let parser = match parse {

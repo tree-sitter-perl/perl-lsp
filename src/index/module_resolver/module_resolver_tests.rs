@@ -847,3 +847,50 @@ fn a_vendor_class_lands_through_the_pack_door_from_composer_s_map() {
     assert!(idx.land_pack_module(&map, "App\\User", php).1.is_none(), "the project's own class is the walk's");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Python's map is each environment's `site-packages`: the walk leaves the
+/// environment out, an import the map places lands as a dependency, and a
+/// module outside any package is named from its search root, not from the
+/// workspace root it also lies under.
+#[cfg(feature = "python")]
+#[test]
+fn a_site_packages_module_lands_named_from_its_search_root() {
+    use crate::model::file_analysis::{CrossFileLookup, FileRole};
+    let python = crate::build::language_driver::LanguageRegistry::compiled().for_id("python").expect("python driver");
+    let dir = std::env::temp_dir().join(format!("d8_venv_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    const SITE: &str = ".venv/lib/python3.12/site-packages";
+    let files = [
+        (".venv/pyvenv.cfg".to_string(), "home = /usr/bin\n"),
+        (format!("{SITE}/acme/__init__.py"), ""),
+        (format!("{SITE}/acme/models.py"), "class Root:\n    pass\n\nclass Base(Root):\n    pass\n"),
+        (format!("{SITE}/six.py"), "class Six:\n    pass\n"),
+        ("app/__init__.py".to_string(), ""),
+        ("app/user.py".to_string(), "from acme.models import Base\nimport six\n\nclass User(Base):\n    pass\n"),
+    ];
+    for (rel, body) in &files {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = crate::util::canonical_path::CanonicalPath::resolve(dir).into_path_buf();
+    let canon = |rel: &str| crate::util::canonical_path::CanonicalPath::resolve(dir.join(rel));
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    index_pack_language(python, &dir, None, &idx, None, 0);
+    assert_eq!(idx.file_role(&canon("app/user.py")), Some(FileRole::Workspace));
+    assert_eq!(idx.file_role(&canon(&format!("{SITE}/six.py"))), None, "the walk leaves the environment to the tier");
+
+    let map = idx.dependency_map().expect("the walk read python's map");
+    let module_of = |m: &str| {
+        let (_, stored) = idx.land_pack_module(&map, m, python);
+        let stored = stored.unwrap_or_else(|| panic!("{m} lands"));
+        assert_eq!(idx.file_role(&stored[0].path), Some(FileRole::Dependency));
+        stored[0].analysis.pack.file_module.as_ref().map(|f| f.segments.join("."))
+    };
+    assert_eq!(module_of("acme.models").as_deref(), Some("acme.models"));
+    assert_eq!(module_of("six").as_deref(), Some("six"), "named from site-packages, not the workspace root");
+    assert_eq!(idx.get_cached("six").map(|m| m.path.clone()), Some(canon(&format!("{SITE}/six.py"))));
+    assert!(idx.land_pack_module(&map, "app.user", python).1.is_none(), "the project's own module is the walk's");
+    let _ = std::fs::remove_dir_all(&dir);
+}

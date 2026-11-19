@@ -123,6 +123,11 @@ fn split_top_level(t: &str, sep: char) -> Vec<&str> {
     out
 }
 
+/// The file that makes its directory a package.
+pub const PACKAGE_MARKER: &str = "__init__.py";
+/// That file's stem: it names its package, not a module of its own.
+const PACKAGE_STEM: &str = "__init__";
+
 /// The module `path` is: its stem under the chain of package directories
 /// above it (walk up while the directory is marked — holds `__init__.py`;
 /// the first unmarked one is the import root), `__init__` naming its
@@ -130,7 +135,7 @@ fn split_top_level(t: &str, sep: char) -> Vec<&str> {
 /// a script dir) is named from the root instead, when it lies under one.
 pub fn python_file_module(path: &Path, dirs: &MarkedDirs<'_>) -> Option<FileModule> {
     let stem = path.file_stem()?.to_str()?;
-    let is_package = stem == "__init__";
+    let is_package = stem == PACKAGE_STEM;
     let mut segments: Vec<String> = Vec::new();
     if !is_package {
         segments.push(stem.to_string());

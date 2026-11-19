@@ -235,6 +235,7 @@ impl IndexCore {
             return Some(m);
         }
         let map = Arc::new(crate::util::timings::phase("dependency_map::read", || driver.dependency_map(root))?);
+        name_from_search_roots(driver, &map);
         self.publish_dependency_map(Arc::clone(&map));
         Some(map)
     }
@@ -249,7 +250,10 @@ impl IndexCore {
     ) -> bool {
         let _g = self.map_read.lock().unwrap_or_else(|e| e.into_inner());
         match crate::util::timings::phase("dependency_map::read", || driver.dependency_map(root)) {
-            Some(map) => self.publish_dependency_map(Arc::new(map)),
+            Some(map) => {
+                name_from_search_roots(driver, &map);
+                self.publish_dependency_map(Arc::new(map))
+            }
             None => false,
         }
     }
@@ -829,5 +833,17 @@ pub(crate) fn strip_import_copy_one(
         Arc::new(CachedModule::new(m.path.clone(), Arc::new(fa)))
     } else {
         m.clone()
+    }
+}
+
+/// A path-named language names a file the map places from the search root
+/// holding it (`six.py` in `site-packages` is `six`), so the map's roots
+/// reach the naming before anything can land under them.
+fn name_from_search_roots(
+    driver: &dyn crate::build::language_driver::LanguageDriver,
+    map: &crate::build::dependency_map::DependencyMap,
+) {
+    if let Some(marker) = driver.module_marker() {
+        crate::build::walk_markers::set_search_roots(marker, &map.search_roots());
     }
 }

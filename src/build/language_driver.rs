@@ -339,7 +339,7 @@ pub struct PackDriver {
     /// runs in the gather phase.
     file_module: Option<FileModuleRule>,
     /// The language's reader of the dependency map (php:
-    /// `build::composer`). `None` = no dependency tier; the walk is the
+    /// `build::composer`, python: `build::venv`). `None` = no dependency tier; the walk is the
     /// whole story.
     dependency_map: Option<fn(Option<&Path>) -> Option<crate::build::dependency_map::DependencyMap>>,
 }
@@ -764,8 +764,11 @@ fn python_driver() -> PackDriver {
         include_closure: None,
         input_fingerprint: None,
         access_regions: None,
-        file_module: Some(FileModuleRule { marker: "__init__.py", name: crate::build::packs::python_file_module }),
-        dependency_map: None,
+        file_module: Some(FileModuleRule {
+            marker: crate::build::packs::PYTHON_PACKAGE_MARKER,
+            name: crate::build::packs::python_file_module,
+        }),
+        dependency_map: Some(crate::build::venv::read_map),
     }
 }
 
