@@ -3066,7 +3066,10 @@ fn a_map_move_keeps_the_rows_and_answers_from_the_new_map() {
         }
     };
 
+    // Each map is published before the workspace root wakes the resolver
+    // thread, which would otherwise read the real `@INC` over it.
     let idx = ModuleIndex::new_for_test();
+    idx.set_search_roots_for_test(&[ra.clone(), r1.clone()]);
     idx.set_workspace_root(Some(&format!("file://{}", base.join("proj").display())));
     land(&idx, &[ra.clone(), r1.clone()]);
     assert_eq!(lent(&idx), ["one"]);
@@ -3083,6 +3086,7 @@ fn a_map_move_keeps_the_rows_and_answers_from_the_new_map() {
     // The next session opens the same store under the new map: Child comes
     // back from its row, and still lends what the new map places.
     let next = ModuleIndex::new_for_test();
+    next.set_search_roots_for_test(&[ra.clone(), r2.clone()]);
     next.set_workspace_root(Some(&format!("file://{}", base.join("proj").display())));
     land(&next, &[ra.clone(), r2.clone()]);
     assert_eq!(lent(&next), ["two"]);
