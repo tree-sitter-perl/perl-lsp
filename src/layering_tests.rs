@@ -1890,6 +1890,35 @@ fn tree_fields_are_read_by_id() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// A node's kind is read as its grammar's `Kind` (`NodeExt::kind_of` /
+/// `NodeExt::is`), so a kind the grammar lacks fails the build and no read
+/// decodes a kind string (`docs/adr/grammar-vocabulary.md`). What is left
+/// reads a token, which a vocabulary does not name, or a kind a query
+/// document or another grammar names. Shrink-only.
+#[test]
+fn node_kinds_are_read_by_id() {
+    let files = layer_files(&[Layer::Build, Layer::Cst, Layer::Lsp, Layer::Index, Layer::Model]);
+    let seen = count_lines(&files, &|l| l.contains(".kind()") && !l.contains("ErrorKind"));
+    let allow: &[(&str, usize, &str)] = &[
+        ("build/builder/extract.rs", 1, "the declarator keyword (`my` / `our` / `state` / `field`): a token"),
+        ("build/builder/frameworks.rs", 1, "the kind's name, handed to a plugin as text"),
+        ("build/builder/joins.rs", 1, "a suffix every statement kind's name shares: legacy"),
+        ("build/builder/narrowing.rs", 1, "the `until` keyword: a token"),
+        ("build/builder/visit_decl.rs", 1, "the `sub` keyword: a token"),
+        ("build/cpp_reparse/defs.rs", 11, "the C++ reparse compiles in builds that do not link its grammar: legacy"),
+        ("build/cpp_reparse/synthetic.rs", 7, "the C++ reparse compiles in builds that do not link its grammar: legacy"),
+        ("build/cpp_reparse/validate.rs", 9, "the C++ reparse compiles in builds that do not link its grammar: legacy"),
+        ("build/cursor_sentinel.rs", 5, "kinds a pack declares by name, for any grammar"),
+        ("build/query_predicates.rs", 3, "kinds a query document names, for any grammar"),
+        ("cst.rs", 4, "tokens: the assignment operator, `no`, `{`, and a func1op's keyword"),
+        ("cst/syntax.rs", 2, "`SyntaxNode::kind`, the name itself, and its Debug"),
+        ("lsp/cli/mod.rs", 1, "`--parse` prints the kind's name"),
+        ("lsp/cursor_context.rs", 5, "the Perl cursor detector (rule #6): `->`, brackets and commas are tokens"),
+    ];
+    let drift = allowlist_drift("kind-string reads (NodeExt::kind_of)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// A fact about a node hangs off the node: a `NodeFacts` column keyed by
 /// `NodeId`, nested by the tree's own parent links
 /// (`docs/adr/core-syntax-tree.md`). A side index keyed by where a node sits

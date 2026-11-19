@@ -12,6 +12,7 @@
 //! decrease along it — that is what makes [`Structure::id_of`] a binary
 //! search instead of a map.
 
+use super::GrammarKind;
 use tree_sitter::{Node, Point};
 
 /// A node's position in its [`SyntaxForest`]: the preorder index in its
@@ -240,13 +241,13 @@ impl<'t> SyntaxForest<'t> {
     /// Every node whose kind id is in `kinds`, in file order: the main
     /// parse's preorder, with each injected parse standing in for the
     /// subtree it replaces.
-    pub(crate) fn file_nodes_of_kind(&self, kinds: &[u16]) -> Vec<SyntaxNode<'_, 't>> {
+    pub(crate) fn file_nodes_of_kind(&self, kinds: &[impl GrammarKind]) -> Vec<SyntaxNode<'_, 't>> {
         let mut out = Vec::new();
         self.scan_in_file_order(0, kinds, &mut out);
         out
     }
 
-    fn scan_in_file_order<'a>(&'a self, tree: usize, kinds: &[u16], out: &mut Vec<SyntaxNode<'a, 't>>) {
+    fn scan_in_file_order<'a>(&'a self, tree: usize, kinds: &[impl GrammarKind], out: &mut Vec<SyntaxNode<'a, 't>>) {
         let t = &self.trees[tree];
         let mut injections = t.injections.iter().peekable();
         let mut local = 0u32;
@@ -256,7 +257,7 @@ impl<'t> SyntaxForest<'t> {
                 local = t.entries[at as usize].end;
                 continue;
             }
-            if kinds.contains(&t.kinds[local as usize]) {
+            if kinds.iter().any(|k| k.id() == t.kinds[local as usize]) {
                 out.push(SyntaxNode { tree: t, local });
             }
             local += 1;
@@ -332,17 +333,6 @@ impl<'t> SyntaxForest<'t> {
     }
 }
 
-/// Every kind id `lang` gives any of `names` as a named node. A grammar can
-/// carry one name on several symbols (aliases), and a kind scan has to match
-/// them all.
-pub(crate) fn kind_ids(lang: &tree_sitter::Language, names: &[&str]) -> Vec<u16> {
-    (0..lang.node_kind_count() as u16)
-        .filter(|&id| {
-            lang.node_kind_is_named(id)
-                && lang.node_kind_for_id(id).is_some_and(|k| names.contains(&k))
-        })
-        .collect()
-}
 
 /// A node of a [`Structure`]: a borrowed tree plus the node's index in it.
 #[derive(Clone, Copy)]
@@ -416,11 +406,15 @@ impl<'a, 't> SyntaxNode<'a, 't> {
     pub(crate) fn kind_id(&self) -> u16 {
         self.tree.kinds[self.local as usize]
     }
+    /// The node's kind, read off the kind column.
+    pub(crate) fn kind_of<K: GrammarKind>(&self) -> K {
+        K::from_id(self.kind_id())
+    }
     /// Every node strictly under this one whose kind id is in `kinds`, in
     /// preorder: a scan of the kind column over the subtree's interval.
     pub(crate) fn descendants_of_kind<'k>(
         &self,
-        kinds: &'k [u16],
+        kinds: &'k [impl GrammarKind],
     ) -> impl Iterator<Item = SyntaxNode<'a, 't>> + 'k
     where
         'a: 'k,
@@ -430,7 +424,7 @@ impl<'a, 't> SyntaxNode<'a, 't> {
         tree.kinds[ids.clone()]
             .iter()
             .zip(ids)
-            .filter(|(k, _)| kinds.contains(k))
+            .filter(|(id, _)| kinds.iter().any(|k| k.id() == **id))
             .map(move |(_, local)| SyntaxNode { tree, local: local as u32 })
     }
     pub(crate) fn parent(&self) -> Option<SyntaxNode<'a, 't>> {

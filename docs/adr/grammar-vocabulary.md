@@ -23,7 +23,7 @@ discriminant the grammar's own id.
   it, on the grammar bump that removed it.
 - **Reads are by id.** `NodeExt::field(Field)` is `child_by_field_id`;
   `NodeExt::kind_of()` is one table load from `kind_id()`; `NodeExt::is(Kind)`
-  compares two of them.
+  compares two of them. A `match` on `kind_of()` is a jump on an integer.
 - **A kind name is one `Kind`**, however many symbols the grammar gives it.
   Aliases put several internal ids behind one name (`scalar`, `block`,
   `varname`, …); the table maps each to the name's variant, and the
@@ -40,8 +40,14 @@ the tree does not say whose it is, so the module a site imports is the
 statement of which grammar it reads. A pack reads its grammar through its
 query document (rule #15), which is where its node kinds already live.
 
-`layering_tests::tree_fields_are_read_by_id` ratchets the by-name field
-reads, shrink-only. The C++ reparse is what is left: it compiles in builds
+A kind scan of the core tree (`SyntaxForest::file_nodes_of_kind`,
+`SyntaxNode::descendants_of_kind`) takes the kinds themselves, and
+`SyntaxNode::kind_of` reads the kind column.
+
+`layering_tests::tree_fields_are_read_by_id` and `node_kinds_are_read_by_id`
+ratchet the by-name reads, shrink-only. A kind read by name that stays is a
+token's, or a kind a query document or a pack names for a grammar this code
+does not know. The C++ reparse is what is left: it compiles in builds
 that do not link the C++ grammar, so the build script has no table to
 generate its vocabulary from.
 

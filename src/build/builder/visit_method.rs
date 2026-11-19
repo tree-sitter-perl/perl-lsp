@@ -212,9 +212,9 @@ impl<'a> Builder<'a> {
         // (constructor chain `Sner->new->hi`, `__PACKAGE__->m`, a scalar
         // holding a const-folded class string). Everything
         // inference-dependent stays None for PostFold to fill from the bag.
-        let invocant_class = invocant_node.and_then(|n| match n.kind() {
-            "method_call_expression" => self.extract_constructor_class(n),
-            "func0op_call_expression" => {
+        let invocant_class = invocant_node.and_then(|n| match n.kind_of() {
+            Kind::MethodCallExpression => self.extract_constructor_class(n),
+            Kind::Func0opCallExpression => {
                 self.infer_expression_result_type(n).and_then(|t| t.class_name().map(str::to_string))
             }
             _ => None,
@@ -386,7 +386,7 @@ impl<'a> Builder<'a> {
         // wins), which lets the existing FunctionCall paths (semantic
         // tokens, hover, gd) light up the bareword as the call it is.
         if let Some(inv_node) = invocant_node {
-            if matches!(inv_node.kind(), "bareword" | "package") {
+            if matches!(inv_node.kind_of(), Kind::Bareword | Kind::Package) {
                 if let Ok(bw_text) = inv_node.utf8_text(self.source) {
                     // Find the matching sub and capture its package so
                     // the FunctionCall ref's `resolved_package` points
@@ -501,13 +501,13 @@ impl<'a> Builder<'a> {
 
         let mut names: Vec<(String, Span)> = Vec::new();
         for child in arg_nodes.iter().skip(skip_first as usize) {
-            match (crate::cst::literal_shape(*child), child.kind()) {
+            match (crate::cst::literal_shape(*child), child.kind_of()) {
                 (Some(LiteralShape::Str), _) => {
                     if let Some(value) = crate::cst::string_value(*child, self.source) {
                         names.push(value);
                     }
                 }
-                (None, "bareword" | "autoquoted_bareword") => {
+                (None, Kind::Bareword | Kind::AutoquotedBareword) => {
                     if let Ok(text) = child.utf8_text(self.source) {
                         names.push((text.to_string(), node_to_span(*child)));
                     }
@@ -595,7 +595,7 @@ impl<'a> Builder<'a> {
         // for the variable-container shape.
         let container_is_method_call = node
             .named_child(0)
-            .map(|c| c.kind() == "method_call_expression")
+            .map(|c| c.is(Kind::MethodCallExpression))
             .unwrap_or(false);
 
         // An arrow access through a plain variable is a deref site: through
@@ -698,7 +698,7 @@ impl<'a> Builder<'a> {
     /// we don't claim.
     pub(super) fn extract_resultset_parametric(&self, node: Node<'a>) -> Option<InferredType> {
         use crate::model::file_analysis::ParametricType;
-        if node.kind() != "method_call_expression" {
+        if !node.is(Kind::MethodCallExpression) {
             return None;
         }
         let method = node.field(Field::Method)?;
@@ -739,7 +739,7 @@ impl<'a> Builder<'a> {
     /// `search`/`search_rs` keep a resultset a resultset; this stays generic).
     /// The verb list is the plugin's (#10/#8).
     pub(super) fn is_fluent_verb_call(&self, node: Node<'a>) -> bool {
-        node.kind() == "method_call_expression"
+        node.is(Kind::MethodCallExpression)
             && node
                 .field(Field::Method)
                 .and_then(|m| m.utf8_text(self.source).ok())
@@ -797,12 +797,12 @@ impl<'a> Builder<'a> {
         }
         // Try the first arg as a `scalar` node with const-foldable
         // value. Same one-level unwrap rule as the literal helper.
-        let arg_node = match (crate::cst::literal_shape(args), args.kind()) {
-            (None, "scalar") => Some(args),
+        let arg_node = match (crate::cst::literal_shape(args), args.kind_of()) {
+            (None, Kind::Scalar) => Some(args),
             (Some(LiteralShape::List), _) => crate::cst::nth_element(args, 0),
             _ => None,
         }?;
-        if arg_node.kind() != "scalar" {
+        if !arg_node.is(Kind::Scalar) {
             return None;
         }
         let var_text = arg_node.utf8_text(self.source).ok()?;

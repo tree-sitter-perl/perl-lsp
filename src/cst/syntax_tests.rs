@@ -97,7 +97,7 @@ fn a_file_order_scan_reads_each_injection_in_place_of_its_string() {
             Injection { host: 0, replaces: r0.clone(), root: c0.root_node() },
         ],
     );
-    let assign = kind_ids(&ts_parser_perl::LANGUAGE.into(), &["assignment_expression"]);
+    let assign = [crate::cst::Kind::AssignmentExpression];
     let got: Vec<&str> = forest
         .file_nodes_of_kind(&assign)
         .iter()
@@ -167,6 +167,18 @@ fn facts_sit_on_their_nodes_in_arrival_order() {
     assert!(facts.on(ids[0]).is_empty());
 }
 
+/// A bare kind id, so the scan test covers the ids no vocabulary names.
+#[derive(Clone, Copy, PartialEq)]
+struct RawKind(u16);
+impl crate::cst::GrammarKind for RawKind {
+    fn from_id(id: u16) -> Self {
+        RawKind(id)
+    }
+    fn id(self) -> u16 {
+        self.0
+    }
+}
+
 #[test]
 fn a_kind_scan_finds_what_a_walk_finds_under_every_node() {
     let tree = parse(SRC);
@@ -180,7 +192,7 @@ fn a_kind_scan_finds_what_a_walk_finds_under_every_node() {
         for k in &kinds {
             let want: Vec<_> =
                 every_node(*n).into_iter().skip(1).filter(|d| d.kind_id() == *k).collect();
-            let got: Vec<_> = lifted.descendants_of_kind(&[*k]).map(|d| d.ts()).collect();
+            let got: Vec<_> = lifted.descendants_of_kind(&[RawKind(*k)]).map(|d| d.ts()).collect();
             assert_eq!(got, want, "kind {k} under {n:?}");
         }
     }
@@ -245,10 +257,12 @@ fn the_generated_vocabulary_agrees_with_the_grammar() {
     while let Some(node) = stack.pop() {
         if node.is_named() {
             named += 1;
-            assert_eq!(node.kind_of().name(), node.kind(), "kind id {}", node.kind_id());
-            assert!(node.is(node.kind_of()));
+            let kind: Kind = node.kind_of();
+            assert_eq!(kind.name(), node.kind(), "kind id {}", node.kind_id());
+            assert_eq!(kind as u16, node.kind_id(), "a named node reports its kind's discriminant");
+            assert!(node.is(kind));
         } else {
-            assert_eq!(node.kind_of(), Kind::Token, "{}", node.kind());
+            assert_eq!(node.kind_of::<Kind>(), Kind::Token, "{}", node.kind());
         }
         let mut cursor = node.walk();
         if cursor.goto_first_child() {

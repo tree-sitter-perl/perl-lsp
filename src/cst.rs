@@ -30,7 +30,7 @@ pub(crate) mod perl;
 pub(crate) mod pod;
 mod syntax;
 pub(crate) use perl::{Field, Kind};
-pub(crate) use syntax::{kind_ids, Injection, NodeFacts, NodeId, Structure, SyntaxForest, SyntaxNode};
+pub(crate) use syntax::{Injection, NodeFacts, NodeId, Structure, SyntaxForest, SyntaxNode};
 
 pub(crate) use crate::model::conventions::is_conventional_invocant_name;
 
@@ -42,6 +42,14 @@ pub(crate) trait GrammarField: Copy {
     fn id(self) -> std::num::NonZeroU16;
 }
 
+/// A node kind of some grammar's vocabulary, read off a node's kind id.
+pub(crate) trait GrammarKind: Copy + PartialEq {
+    fn from_id(id: u16) -> Self;
+    /// The id a node of this kind reports. `Token` and `Error` stand for
+    /// many ids or none of the grammar's, so a scan by id names neither.
+    fn id(self) -> u16;
+}
+
 pub(crate) trait NodeExt<'a>: Sized {
     /// The node's source text. `None` only on invalid UTF-8.
     fn text(&self, src: &'a [u8]) -> Option<&'a str>;
@@ -51,11 +59,10 @@ pub(crate) trait NodeExt<'a>: Sized {
     fn field(&self, field: impl GrammarField) -> Option<Node<'a>>;
     /// Every child in `field`, for a field the grammar repeats per slot.
     fn fields(&self, field: impl GrammarField) -> Vec<Node<'a>>;
-    /// The node's kind. A node of another grammar's tree has no Perl kind:
-    /// these three read Perl trees only.
-    fn kind_of(&self) -> Kind;
+    /// The node's kind, in the vocabulary of the grammar that parsed it.
+    fn kind_of<K: GrammarKind>(&self) -> K;
     /// Whether the node is of `kind`.
-    fn is(&self, kind: Kind) -> bool;
+    fn is<K: GrammarKind>(&self, kind: K) -> bool;
     /// The node's span, in `FileAnalysis` coordinates.
     fn span(&self) -> Span;
     /// Named children, by index (no `TreeCursor` borrow gymnastics).
@@ -78,11 +85,11 @@ impl<'a> NodeExt<'a> for Node<'a> {
     fn fields(&self, field: impl GrammarField) -> Vec<Node<'a>> {
         self.children_by_field_id(field.id(), &mut self.walk()).collect()
     }
-    fn kind_of(&self) -> Kind {
-        Kind::from_id(self.kind_id())
+    fn kind_of<K: GrammarKind>(&self) -> K {
+        K::from_id(self.kind_id())
     }
-    fn is(&self, kind: Kind) -> bool {
-        self.kind_of() == kind
+    fn is<K: GrammarKind>(&self, kind: K) -> bool {
+        self.kind_of::<K>() == kind
     }
     fn span(&self) -> Span {
         node_to_span(*self)
@@ -98,13 +105,13 @@ impl<'a> NodeExt<'a> for Node<'a> {
 /// The replacement of an `s///e` (or `/ee`, which evals the result once
 /// more): Perl compiles it as code, the grammar reads it as a string.
 pub(crate) fn eval_replacement<'a>(node: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
-    if node.kind() != "substitution_regexp" {
+    if !node.is(Kind::SubstitutionRegexp) {
         return None;
     }
     if !node.field(Field::Modifiers)?.text(src)?.contains('e') {
         return None;
     }
-    node.elements().find(|c| c.kind() == "replacement")
+    node.elements().find(|c| c.is(Kind::Replacement))
 }
 
 pub(crate) fn node_to_span(node: Node) -> Span {
@@ -117,9 +124,9 @@ pub(crate) fn node_to_span(node: Node) -> Span {
 /// The called name of a call node: the `method` field of a method call,
 /// the `function` field of either function-call shape.
 pub(crate) fn extract_call_name(node: Node, source: &[u8]) -> Option<String> {
-    match node.kind() {
-        "method_call_expression" => node.field_text(Field::Method, source).map(str::to_string),
-        "function_call_expression" | "ambiguous_function_call_expression" => {
+    match node.kind_of() {
+        Kind::MethodCallExpression => node.field_text(Field::Method, source).map(str::to_string),
+        Kind::FunctionCallExpression | Kind::AmbiguousFunctionCallExpression => {
             node.field_text(Field::Function, source).map(str::to_string)
         }
         _ => None,
@@ -179,7 +186,7 @@ impl<'a> Iterator for Elements<'a> {
 /// surface: `cast(node)` (kind-checked), `node()`, and one
 /// `Option<Node>`-returning accessor per listed field.
 macro_rules! typed_node {
-    ($(#[$meta:meta])* $name:ident($kind:literal) { $($(#[$fmeta:meta])* $field:ident: $variant:ident),* $(,)? }) => {
+    ($(#[$meta:meta])* $name:ident($kind:ident) { $($(#[$fmeta:meta])* $field:ident: $variant:ident),* $(,)? }) => {
         $(#[$meta])*
         #[derive(Clone, Copy)]
         pub(crate) struct $name<'a>(Node<'a>);
@@ -187,7 +194,7 @@ macro_rules! typed_node {
         #[allow(dead_code)]
         impl<'a> $name<'a> {
             pub(crate) fn cast(node: Node<'a>) -> Option<Self> {
-                (node.kind() == $kind).then_some(Self(node))
+                node.is(Kind::$kind).then_some(Self(node))
             }
             pub(crate) fn node(&self) -> Node<'a> {
                 self.0
@@ -204,7 +211,7 @@ macro_rules! typed_node {
 
 typed_node! {
     /// `$obj->method(args)` / `$obj->$dyn(...)` / `Class->Pkg::method`.
-    MethodCall("method_call_expression") {
+    MethodCall(MethodCallExpression) {
         invocant: Invocant,
         method: Method,
         arguments: Arguments,
@@ -213,7 +220,7 @@ typed_node! {
 
 typed_node! {
     /// `name(args)` — the parenthesized call form.
-    FunctionCall("function_call_expression") {
+    FunctionCall(FunctionCallExpression) {
         function: Function,
         arguments: Arguments,
     }
@@ -221,7 +228,7 @@ typed_node! {
 
 typed_node! {
     /// `name args` — no parens; also `bless { ... }`.
-    AmbiguousFunctionCall("ambiguous_function_call_expression") {
+    AmbiguousFunctionCall(AmbiguousFunctionCallExpression) {
         function: Function,
         arguments: Arguments,
     }
@@ -266,7 +273,7 @@ impl AssignOp {
 /// token, so it writes there.
 pub(crate) fn assignment_write_point(assign: Node) -> tree_sitter::Point {
     match assign.field(Field::Left) {
-        Some(left) if left.kind() == "variable_declaration" => left.start_position(),
+        Some(left) if left.is(Kind::VariableDeclaration) => left.start_position(),
         _ => assign.end_position(),
     }
 }
@@ -274,7 +281,7 @@ pub(crate) fn assignment_write_point(assign: Node) -> tree_sitter::Point {
 /// The operator of an `assignment_expression`. `None` for any other kind, or
 /// an operator this table doesn't know.
 pub(crate) fn assign_op(node: Node) -> Option<AssignOp> {
-    if node.kind() != "assignment_expression" {
+    if !node.is(Kind::AssignmentExpression) {
         return None;
     }
     Some(match node.field(Field::Operator)?.kind() {
@@ -309,12 +316,12 @@ pub(crate) enum LiteralShape {
 
 /// `None` for anything that isn't a literal.
 pub(crate) fn literal_shape(node: Node) -> Option<LiteralShape> {
-    Some(match node.kind() {
-        "quoted_word_list" => LiteralShape::Qw,
-        "string_literal" | "interpolated_string_literal" => LiteralShape::Str,
-        "list_expression" | "parenthesized_expression" => LiteralShape::List,
-        "anonymous_array_expression" => LiteralShape::ArrayRef,
-        "anonymous_hash_expression" => LiteralShape::HashRef,
+    Some(match node.kind_of() {
+        Kind::QuotedWordList => LiteralShape::Qw,
+        Kind::StringLiteral | Kind::InterpolatedStringLiteral => LiteralShape::Str,
+        Kind::ListExpression | Kind::ParenthesizedExpression => LiteralShape::List,
+        Kind::AnonymousArrayExpression => LiteralShape::ArrayRef,
+        Kind::AnonymousHashExpression => LiteralShape::HashRef,
         _ => return None,
     })
 }
@@ -412,15 +419,15 @@ pub(crate) enum RefgenOperand {
 /// `\my @z` names the declared variable, not the declaration.
 pub(crate) fn refgen_operand(refgen: Node) -> Option<RefgenOperand> {
     let operand = refgen.elements().next()?;
-    let operand = if operand.kind() == "variable_declaration" {
+    let operand = if operand.is(Kind::VariableDeclaration) {
         operand.field(Field::Variable)?
     } else {
         operand
     };
-    Some(match operand.kind() {
-        "function" => RefgenOperand::Code,
-        "hash" => RefgenOperand::Hash,
-        "array" => RefgenOperand::Array,
+    Some(match operand.kind_of() {
+        Kind::Function => RefgenOperand::Code,
+        Kind::Hash => RefgenOperand::Hash,
+        Kind::Array => RefgenOperand::Array,
         _ => RefgenOperand::Other,
     })
 }
@@ -431,15 +438,15 @@ pub(crate) fn refgen_operand(refgen: Node) -> Option<RefgenOperand> {
 pub(crate) fn deref_container_of<'t>(syn: &SyntaxForest<'t>, elem: Node<'t>) -> Option<Node<'t>> {
     let mut up = syn.ancestors(elem);
     let p = up.next()?;
-    if matches!(p.kind(), "array_deref_expression" | "hash_deref_expression") {
+    if matches!(p.kind_of(), Kind::ArrayDerefExpression | Kind::HashDerefExpression) {
         return Some(p);
     }
-    if p.kind() != "expression_statement" {
+    if !p.is(Kind::ExpressionStatement) {
         return None;
     }
-    up.next().filter(|b| b.kind() == "block")?;
-    up.next().filter(|v| v.kind() == "varname")?;
-    up.next().filter(|c| matches!(c.kind(), "array" | "hash"))
+    up.next().filter(|b| b.is(Kind::Block))?;
+    up.next().filter(|v| v.is(Kind::Varname))?;
+    up.next().filter(|c| matches!(c.kind_of(), Kind::Array | Kind::Hash))
 }
 
 /// The assignment whose target list holds `node` as an element:
@@ -450,7 +457,7 @@ pub(crate) fn list_assignment_target_of<'t>(syn: &SyntaxForest<'t>, node: Node<'
     while let Some(outer) = up.next_if(|g| is_list_literal(*g)) {
         group = outer;
     }
-    let assign = up.next().filter(|a| a.kind() == "assignment_expression")?;
+    let assign = up.next().filter(|a| a.is(Kind::AssignmentExpression))?;
     (assign.field(Field::Left)? == group).then_some(assign)
 }
 
@@ -458,8 +465,8 @@ pub(crate) fn list_assignment_target_of<'t>(syn: &SyntaxForest<'t>, node: Node<'
 /// assignment's target, or the operand of `++` / `--`.
 pub(crate) fn is_assignment_target<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> bool {
     syn.parent(node).is_some_and(|p| {
-        (p.kind() == "assignment_expression" && p.field(Field::Left) == Some(node))
-            || matches!(p.kind(), "postinc_expression" | "preinc_expression")
+        (p.is(Kind::AssignmentExpression) && p.field(Field::Left) == Some(node))
+            || matches!(p.kind_of(), Kind::PostincExpression | Kind::PreincExpression)
     }) || list_assignment_target_of(syn, node).is_some()
 }
 
@@ -472,9 +479,9 @@ pub(crate) fn is_value_reset_target<'t>(syn: &SyntaxForest<'t>, node: Node<'t>, 
         cur = p;
         parent = syn.parent(p);
     }
-    parent.is_some_and(|p| match p.kind() {
-        "undef_expression" | "localization_expression" => true,
-        "func1op_call_expression" => p
+    parent.is_some_and(|p| match p.kind_of() {
+        Kind::UndefExpression | Kind::LocalizationExpression => true,
+        Kind::Func1opCallExpression => p
             .child(0)
             .and_then(|k| k.utf8_text(source).ok())
             .is_some_and(crate::model::builtins::removes_its_element_argument),
@@ -498,14 +505,14 @@ pub(crate) struct IndirectObjectCall<'a> {
 
 pub(crate) fn indirect_object_call<'a>(node: Node<'a>, src: &[u8]) -> Option<IndirectObjectCall<'a>> {
     use crate::model::conventions::{is_bareword_class_name, PERL_SPELLINGS};
-    if node.kind() != "ambiguous_function_call_expression" {
+    if !node.is(Kind::AmbiguousFunctionCallExpression) {
         return None;
     }
     let method = node.field(Field::Function)?;
     let inner = node.field(Field::Arguments)?;
-    let (class, arguments) = match inner.kind() {
-        "bareword" => (inner, None),
-        "function_call_expression" | "ambiguous_function_call_expression" => {
+    let (class, arguments) = match inner.kind_of() {
+        Kind::Bareword => (inner, None),
+        Kind::FunctionCallExpression | Kind::AmbiguousFunctionCallExpression => {
             (inner.field(Field::Function)?, inner.field(Field::Arguments))
         }
         _ => return None,
@@ -529,9 +536,9 @@ pub(crate) fn indirect_object_call<'a>(node: Node<'a>, src: &[u8]) -> Option<Ind
 /// The kind-filter callback keeps it reusable across callers.
 pub(crate) fn first_named_child_where<'a>(
     node: Node<'a>,
-    pred: impl Fn(&str) -> bool,
+    pred: impl Fn(Kind) -> bool,
 ) -> Option<Node<'a>> {
-    node.named().map(peel_groups).find(|c| pred(c.kind()))
+    node.named().map(peel_groups).find(|c| pred(c.kind_of()))
 }
 
 
@@ -647,7 +654,7 @@ pub(crate) fn literal_body(literal: Node) -> Node {
 /// through [`literal_body`]). Composition of [`flatten_list`] +
 /// [`pair_nodes_in`].
 pub(crate) fn pair_nodes<'a>(container: Node<'a>) -> Vec<(Node<'a>, Node<'a>)> {
-    let list = if container.kind() == "anonymous_hash_expression" {
+    let list = if container.is(Kind::AnonymousHashExpression) {
         literal_body(container)
     } else {
         container
@@ -662,23 +669,23 @@ pub(crate) fn pair_nodes<'a>(container: Node<'a>) -> Vec<(Node<'a>, Node<'a>)> {
 /// `block`, not a `varname` — this returns `None` there, so a `Some` is
 /// always a simple identifier.
 pub(crate) fn varname_child<'a>(node: Node<'a>) -> Option<Node<'a>> {
-    node.named().find(|c| c.kind() == "varname")
+    node.named().find(|c| c.is(Kind::Varname))
 }
 
 /// Whether `node` names the sub's argument array: `@_` itself, or the
 /// container of a `$_[N]` slot read.
 pub(crate) fn names_arg_array(node: Node, src: &[u8]) -> bool {
-    matches!(node.kind(), "array" | "container_variable")
+    matches!(node.kind_of(), Kind::Array | Kind::ContainerVariable)
         && varname_child(node).and_then(|v| v.utf8_text(src).ok()) == Some("_")
 }
 
 /// `$_[N]`: the index of a read of one argument slot.
 pub(crate) fn arg_slot_index<'a>(node: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
-    if node.kind() != "array_element_expression" {
+    if !node.is(Kind::ArrayElementExpression) {
         return None;
     }
     let array = node.field(Field::Array)?;
-    (array.kind() == "container_variable" && names_arg_array(array, src))
+    (array.is(Kind::ContainerVariable) && names_arg_array(array, src))
         .then(|| node.field(Field::Index))
         .flatten()
 }
@@ -691,12 +698,12 @@ pub(crate) fn is_positional_receiver(node: Node, src: &[u8]) -> bool {
 /// A call of builtin `op` written with no argument (`shift`, `pop`,
 /// `shift()`), which defaults to the argument array.
 pub(crate) fn is_bare_call_of(node: Node, src: &[u8], op: &str) -> bool {
-    match node.kind() {
-        "bareword" => node.utf8_text(src).ok() == Some(op),
-        "func1op_call_expression" => {
+    match node.kind_of() {
+        Kind::Bareword => node.utf8_text(src).ok() == Some(op),
+        Kind::Func1opCallExpression => {
             nth_element(node, 0).is_none() && node.child(0).and_then(|c| c.utf8_text(src).ok()) == Some(op)
         }
-        "ambiguous_function_call_expression" | "function_call_expression" => node.field_text(Field::Function, src) == Some(op),
+        Kind::AmbiguousFunctionCallExpression | Kind::FunctionCallExpression => node.field_text(Field::Function, src) == Some(op),
         _ => false,
     }
 }
@@ -707,10 +714,10 @@ pub(crate) fn shifts_arg_array(node: Node, src: &[u8]) -> bool {
     if is_bare_call_of(node, src, "shift") {
         return true;
     }
-    node.kind() == "func1op_call_expression"
+    node.is(Kind::Func1opCallExpression)
         && node.child(0).and_then(|c| c.utf8_text(src).ok()) == Some("shift")
         && nth_element(node, 1).is_none()
-        && nth_element(node, 0).is_some_and(|a| a.kind() == "array" && names_arg_array(a, src))
+        && nth_element(node, 0).is_some_and(|a| a.is(Kind::Array) && names_arg_array(a, src))
 }
 
 /// `no Module LIST`: a `use_statement` led by the `no` keyword (the grammar
@@ -733,10 +740,10 @@ pub(crate) fn braced_varname<'a>(node: Node<'a>) -> Option<Node<'a>> {
 /// for deref spellings (`${$ref}` — the varname child wraps a `block`,
 /// not a bare identifier) and non-variable nodes.
 pub(crate) fn canonical_var_name<'a>(node: Node<'a>, src: &'a [u8]) -> Option<String> {
-    let sigil = match node.kind() {
-        "scalar" => '$',
-        "array" => '@',
-        "hash" => '%',
+    let sigil = match node.kind_of() {
+        Kind::Scalar => '$',
+        Kind::Array => '@',
+        Kind::Hash => '%',
         _ => return None,
     };
     let vn = varname_child(node)?;
@@ -766,14 +773,14 @@ pub(crate) fn canonical_container_name<'a>(
 /// `@a[..]`, `%a[..]`, `$#a`; `%` for `$h{k}`, `@h{..}`, `%h{..}`. The
 /// access node's own sigil never says it: a slice is always `@`.
 pub(crate) fn container_sigil<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> Option<Sigil> {
-    if node.kind() == "arraylen" {
+    if node.is(Kind::Arraylen) {
         return Some(Sigil::Array);
     }
     let parent = syn.parent(node)?;
-    match parent.kind() {
-        "array_element_expression" => Some(Sigil::Array),
-        "hash_element_expression" => Some(Sigil::Hash),
-        "slice_expression" | "keyval_expression" => {
+    match parent.kind_of() {
+        Kind::ArrayElementExpression => Some(Sigil::Array),
+        Kind::HashElementExpression => Some(Sigil::Hash),
+        Kind::SliceExpression | Kind::KeyvalExpression => {
             if parent.field(Field::Array).is_some_and(|c| c == node) {
                 Some(Sigil::Array)
             } else if parent.field(Field::Hash).is_some_and(|c| c == node) {
@@ -791,13 +798,13 @@ pub(crate) fn container_sigil<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> Opt
 /// slice or `$#` access the aggregate it reads, `&{..}` / `&$x` code,
 /// `*{..}` a glob.
 pub(crate) fn deref_sigil<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> Option<Sigil> {
-    match node.kind() {
-        "scalar" => Some(Sigil::Scalar),
-        "array" => Some(Sigil::Array),
-        "hash" => Some(Sigil::Hash),
-        "function" | "code_deref_expression" => Some(Sigil::Code),
-        "glob" | "glob_deref_expression" => Some(Sigil::Glob),
-        "container_variable" | "slice_container_variable" | "keyval_container_variable" | "arraylen" => {
+    match node.kind_of() {
+        Kind::Scalar => Some(Sigil::Scalar),
+        Kind::Array => Some(Sigil::Array),
+        Kind::Hash => Some(Sigil::Hash),
+        Kind::Function | Kind::CodeDerefExpression => Some(Sigil::Code),
+        Kind::Glob | Kind::GlobDerefExpression => Some(Sigil::Glob),
+        Kind::ContainerVariable | Kind::SliceContainerVariable | Kind::KeyvalContainerVariable | Kind::Arraylen => {
             container_sigil(syn, node)
         }
         _ => None,
@@ -809,11 +816,11 @@ pub(crate) fn deref_sigil<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> Option<
 /// `$$x[0]` / `$#$x` / `&$x`. `None` for a named variable — its `varname`
 /// is a bare leaf.
 pub(crate) fn deref_operand<'a>(node: Node<'a>) -> Option<Node<'a>> {
-    let holder = match node.kind() {
-        "code_deref_expression" | "glob_deref_expression" => node,
+    let holder = match node.kind_of() {
+        Kind::CodeDerefExpression | Kind::GlobDerefExpression => node,
         _ => varname_child(node)?,
     };
-    holder.named().find(|c| matches!(c.kind(), "block" | "scalar"))
+    holder.named().find(|c| matches!(c.kind_of(), Kind::Block | Kind::Scalar))
 }
 
 /// The expression a deref dereferences: the inner scalar of `@$x`, or the
@@ -821,11 +828,11 @@ pub(crate) fn deref_operand<'a>(node: Node<'a>) -> Option<Node<'a>> {
 /// that is more than one expression.
 pub(crate) fn deref_operand_expr<'a>(node: Node<'a>) -> Option<Node<'a>> {
     let operand = deref_operand(node)?;
-    if operand.kind() != "block" {
+    if !operand.is(Kind::Block) {
         return Some(operand);
     }
     let mut stmts = operand.elements();
-    let stmt = stmts.next().filter(|s| s.kind() == "expression_statement")?;
+    let stmt = stmts.next().filter(|s| s.is(Kind::ExpressionStatement))?;
     let mut exprs = stmt.elements();
     let expr = exprs.next()?;
     (stmts.next().is_none() && exprs.next().is_none()).then_some(expr)
@@ -869,10 +876,10 @@ pub(crate) fn read_place<'t>(
     Some(read)
 }
 
-fn is_variable_kind(kind: &str) -> bool {
+fn is_variable_kind(kind: Kind) -> bool {
     matches!(
         kind,
-        "scalar" | "array" | "hash" | "container_variable" | "slice_container_variable" | "keyval_container_variable"
+        Kind::Scalar | Kind::Array | Kind::Hash | Kind::ContainerVariable | Kind::SliceContainerVariable | Kind::KeyvalContainerVariable
     )
 }
 
@@ -902,17 +909,17 @@ pub(crate) fn element_deref_base(node: Node) -> Option<Node> {
 
 /// A scalar variable read as itself (`$x`), not through a deref (`$$x`).
 pub(crate) fn is_plain_scalar(node: Node) -> bool {
-    node.kind() == "scalar" && deref_operand(node).is_none()
+    node.is(Kind::Scalar) && deref_operand(node).is_none()
 }
 
 /// A deref whose receiver is no plain variable: the receiver and the form.
 /// `$x->{a}{k}`'s receiver is `$x->{a}`; `$$x[0]`'s is `$$x`.
 pub(crate) fn deref_of_part(node: Node) -> Option<(Node, crate::model::file_analysis::DerefForm)> {
     use crate::model::file_analysis::DerefForm;
-    let (receiver, form) = match node.kind() {
-        "hash_element_expression" => (element_deref_base(node)?, DerefForm::HashKey),
-        "array_element_expression" => (element_deref_base(node)?, DerefForm::ArrayIndex),
-        "coderef_call_expression" => (node.elements().next()?, DerefForm::Call),
+    let (receiver, form) = match node.kind_of() {
+        Kind::HashElementExpression => (element_deref_base(node)?, DerefForm::HashKey),
+        Kind::ArrayElementExpression => (element_deref_base(node)?, DerefForm::ArrayIndex),
+        Kind::CoderefCallExpression => (node.elements().next()?, DerefForm::Call),
         _ => return None,
     };
     (!is_plain_scalar(receiver)).then_some((receiver, form))
@@ -926,9 +933,9 @@ pub(crate) fn vivify_context<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> crat
     let mut n = node;
     let parent = loop {
         let Some(p) = syn.parent(n) else { return VivifyContext::Is(VivifyAccess::Fetch) };
-        let through = matches!(p.kind(), "hash_element_expression" | "array_element_expression")
+        let through = matches!(p.kind_of(), Kind::HashElementExpression | Kind::ArrayElementExpression)
             && access_base(p).is_some_and(|(base, _)| base == n);
-        if through || p.kind() == "parenthesized_expression" {
+        if through || p.is(Kind::ParenthesizedExpression) {
             n = p;
             continue;
         }
@@ -936,26 +943,26 @@ pub(crate) fn vivify_context<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> crat
     };
     let is_left = parent.field(Field::Left) == Some(n);
     let is_condition = parent.field(Field::Condition) == Some(n);
-    match parent.kind() {
-        "assignment_expression" if is_left => VivifyContext::Is(VivifyAccess::Store),
-        "assignment_expression" => VivifyContext::Is(VivifyAccess::Fetch),
-        "func1op_call_expression" => match parent.child(0).map(|c| c.kind()) {
+    match parent.kind_of() {
+        Kind::AssignmentExpression if is_left => VivifyContext::Is(VivifyAccess::Store),
+        Kind::AssignmentExpression => VivifyContext::Is(VivifyAccess::Fetch),
+        Kind::Func1opCallExpression => match parent.child(0).map(|c| c.kind()) {
             Some("exists") => VivifyContext::Is(VivifyAccess::Exists),
             Some("delete") => VivifyContext::Is(VivifyAccess::Delete),
             _ => VivifyContext::FetchOrStore,
         },
-        "conditional_statement" | "loop_statement" | "conditional_expression" if is_condition => {
+        Kind::ConditionalStatement | Kind::LoopStatement | Kind::ConditionalExpression if is_condition => {
             VivifyContext::Is(VivifyAccess::Fetch)
         }
-        "expression_statement"
-        | "binary_expression"
-        | "equality_expression"
-        | "relational_expression"
-        | "unary_expression"
-        | "anonymous_array_expression"
-        | "anonymous_hash_expression"
-        | "string_content"
-        | "return_expression" => VivifyContext::Is(VivifyAccess::Fetch),
+        Kind::ExpressionStatement
+        | Kind::BinaryExpression
+        | Kind::EqualityExpression
+        | Kind::RelationalExpression
+        | Kind::UnaryExpression
+        | Kind::AnonymousArrayExpression
+        | Kind::AnonymousHashExpression
+        | Kind::StringContent
+        | Kind::ReturnExpression => VivifyContext::Is(VivifyAccess::Fetch),
         _ => VivifyContext::FetchOrStore,
     }
 }
@@ -963,15 +970,15 @@ pub(crate) fn vivify_context<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> crat
 /// The variable a place hangs off, bound; a deref spelling's operand
 /// leads to it.
 fn place_root<'t>(syn: &SyntaxForest<'t>, node: Node<'t>, src: &[u8], binder: &mut impl PlaceBinder) -> Option<Place> {
-    match node.kind() {
-        "hash_element_expression" | "array_element_expression" | "slice_expression" | "keyval_expression" => {
+    match node.kind_of() {
+        Kind::HashElementExpression | Kind::ArrayElementExpression | Kind::SliceExpression | Kind::KeyvalExpression => {
             place_root(syn, access_base(node)?.0, src, binder)
         }
         k if is_variable_kind(k) => match deref_operand(node) {
             Some(_) => place_root(syn, deref_operand_expr(node)?, src, binder),
             None => {
                 let spelling = match k {
-                    "scalar" | "array" | "hash" => canonical_var_name(node, src)?,
+                    Kind::Scalar | Kind::Array | Kind::Hash => canonical_var_name(node, src)?,
                     _ => canonical_container_name(syn, node, src)?,
                 };
                 Some(Place::variable(binder.root(&spelling, node.start_position())?))
@@ -989,7 +996,7 @@ fn collect_steps(
     read: &mut PlaceRead,
     steps: &mut Vec<PathStep>,
 ) -> Option<()> {
-    let kind = node.kind();
+    let kind: Kind = node.kind_of();
     if is_variable_kind(kind) {
         if deref_operand(node).is_some() {
             collect_steps(deref_operand_expr(node)?, src, binder, read, steps)?;
@@ -1003,15 +1010,15 @@ fn collect_steps(
         steps.push(PathStep::Deref);
     }
     let hash = match kind {
-        "hash_element_expression" | "array_element_expression" => kind == "hash_element_expression",
-        "slice_expression" | "keyval_expression" => {
+        Kind::HashElementExpression | Kind::ArrayElementExpression => kind == Kind::HashElementExpression,
+        Kind::SliceExpression | Kind::KeyvalExpression => {
             node.field(Field::Hash).or_else(|| node.field(Field::Hashref)).is_some()
         }
         _ => return None,
     };
     let slots = match kind {
-        "hash_element_expression" => RawSlots::One(read_slot(node.field(Field::Key)?, src, binder, read, true)),
-        "array_element_expression" => RawSlots::One(read_slot(node.field(Field::Index)?, src, binder, read, false)),
+        Kind::HashElementExpression => RawSlots::One(read_slot(node.field(Field::Key)?, src, binder, read, true)),
+        Kind::ArrayElementExpression => RawSlots::One(read_slot(node.field(Field::Index)?, src, binder, read, false)),
         _ => read_slice_slots(node.elements().find(|c| *c != base), src, binder, read, hash),
     };
     steps.push(match (hash, slots) {
@@ -1026,8 +1033,8 @@ fn collect_steps(
 /// spelling (`$x` of `$$x{a}`, `@{$x}`). That inner node is a read of the
 /// longer place, not an access of its own.
 pub(crate) fn place_inner(node: Node) -> Option<Node> {
-    match node.kind() {
-        "hash_element_expression" | "array_element_expression" | "slice_expression" | "keyval_expression" => {
+    match node.kind_of() {
+        Kind::HashElementExpression | Kind::ArrayElementExpression | Kind::SliceExpression | Kind::KeyvalExpression => {
             access_base(node).map(|(b, _)| b)
         }
         k if is_variable_kind(k) => deref_operand_expr(node),
@@ -1079,13 +1086,13 @@ impl RawSlots {
 }
 
 fn read_slot(sub: Node, src: &[u8], binder: &mut impl PlaceBinder, read: &mut PlaceRead, autoquotes: bool) -> SlotName {
-    let name = match sub.kind() {
-        "autoquoted_bareword" if autoquotes => sub.text(src).map(|t| SlotName::Const(t.to_string())),
-        "number" => sub.text(src).map(|t| SlotName::Const(t.to_string())),
-        "string_literal" | "interpolated_string_literal" if autoquotes => {
+    let name = match sub.kind_of() {
+        Kind::AutoquotedBareword if autoquotes => sub.text(src).map(|t| SlotName::Const(t.to_string())),
+        Kind::Number => sub.text(src).map(|t| SlotName::Const(t.to_string())),
+        Kind::StringLiteral | Kind::InterpolatedStringLiteral if autoquotes => {
             plain_string_literal_text(sub, src).map(SlotName::Const)
         }
-        "scalar" => canonical_var_name(sub, src).map(|v| {
+        Kind::Scalar => canonical_var_name(sub, src).map(|v| {
             let b = binder.key(&v, sub.start_position());
             read.key_vars.push(v);
             SlotName::Var(b)
@@ -1109,7 +1116,7 @@ fn read_slice_slots(
         read.exact = false;
         return RawSlots::All;
     };
-    if keys.kind() == "quoted_word_list" {
+    if keys.is(Kind::QuotedWordList) {
         let mut words = Vec::new();
         qw_word_spans(keys, src, &mut words);
         return RawSlots::Many(words.into_iter().map(|(w, _)| SlotName::Const(w)).collect());
@@ -1123,7 +1130,7 @@ fn read_slice_slots(
 pub(crate) fn qw_word_spans(qw_node: Node, src: &[u8], results: &mut Vec<(String, Span)>) {
     for j in 0..qw_node.named_child_count() {
         let Some(sc) = qw_node.named_child(j) else { continue };
-        if sc.kind() != "string_content" {
+        if !sc.is(Kind::StringContent) {
             continue;
         }
         let Ok(text) = sc.utf8_text(src) else { continue };
@@ -1161,7 +1168,7 @@ pub(crate) fn qw_word_spans(qw_node: Node, src: &[u8], results: &mut Vec<(String
 /// The `string_content` child of a quoted node, whatever the quote flavour
 /// (`'…'`, `q{…}`, `qq!…!`, a heredoc). An empty literal has none.
 pub(crate) fn string_content(node: Node) -> Option<Node> {
-    node.named().find(|c| c.kind() == "string_content")
+    node.named().find(|c| c.is(Kind::StringContent))
 }
 
 /// A quoted node's value and the span it occupies. `None` for an empty
@@ -1183,7 +1190,7 @@ pub(crate) fn string_content_text(node: Node, src: &[u8]) -> Option<String> {
 /// argument never reads as a literal class name. Stricter sibling of
 /// `string_value`.
 pub(crate) fn plain_string_literal_text(node: Node, src: &[u8]) -> Option<String> {
-    if !matches!(node.kind(), "string_literal" | "interpolated_string_literal") {
+    if !matches!(node.kind_of(), Kind::StringLiteral | Kind::InterpolatedStringLiteral) {
         return None;
     }
     let mut content: Option<String> = None;
@@ -1192,7 +1199,7 @@ pub(crate) fn plain_string_literal_text(node: Node, src: &[u8]) -> Option<String
         // Interpolation nests INSIDE the `string_content` (`"$cls"` →
         // string_content > scalar), so a plain literal is a single
         // `string_content` with no children of its own.
-        if c.kind() != "string_content" || content.is_some() || c.named_child_count() > 0 {
+        if !c.is(Kind::StringContent) || content.is_some() || c.named_child_count() > 0 {
             return None;
         }
         content = c.utf8_text(src).ok().map(|s| s.to_string());
@@ -1218,29 +1225,29 @@ pub(crate) fn string_content_span(node: Node) -> Span {
 /// conditional, re-assigned, or not an expression statement is an
 /// honest miss: no fold beats a wrong parent.
 fn map_callback_template<'a>(cb: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
-    if cb.kind() != "block" {
+    if !cb.is(Kind::Block) {
         return Some(cb);
     }
     let stmts: Vec<Node> = cb.elements().collect();
-    if stmts.is_empty() || !stmts.iter().all(|s| s.kind() == "expression_statement") {
+    if stmts.is_empty() || !stmts.iter().all(|s| s.is(Kind::ExpressionStatement)) {
         return None;
     }
     let tail = stmts.last()?.named_child(0)?;
-    if tail.kind() != "scalar" {
+    if !tail.is(Kind::Scalar) {
         return Some(tail);
     }
     let name = tail.utf8_text(src).ok()?;
     let mut init: Option<Node> = None;
     for s in &stmts[..stmts.len() - 1] {
         let Some(expr) = s.named_child(0) else { continue };
-        if expr.kind() != "assignment_expression" {
+        if !expr.is(Kind::AssignmentExpression) {
             continue;
         }
         let Some(left) = expr.field(Field::Left) else { continue };
-        let declares = left.kind() == "variable_declaration"
+        let declares = left.is(Kind::VariableDeclaration)
             && left
                 .named()
-                .any(|c| c.kind() == "scalar" && c.utf8_text(src).ok() == Some(name));
+                .any(|c| c.is(Kind::Scalar) && c.utf8_text(src).ok() == Some(name));
         if declares {
             if init.is_some() {
                 return None; // two bindings — not a static value
@@ -1290,14 +1297,14 @@ fn map_built_strings<'t>(
     }
     let Some(cb) = node.field(Field::Callback) else { return vec![] };
     let Some(cb) = map_callback_template(cb, src) else { return vec![] };
-    if cb.kind() != "interpolated_string_literal" {
+    if !cb.is(Kind::InterpolatedStringLiteral) {
         return vec![];
     }
-    let Some(content) = cb.named().find(|c| c.kind() == "string_content") else {
+    let Some(content) = cb.named().find(|c| c.is(Kind::StringContent)) else {
         return vec![];
     };
     let Ok(ctext) = content.utf8_text(src) else { return vec![] };
-    let subs: Vec<Node> = content.named().filter(|c| c.kind() == "scalar").collect();
+    let subs: Vec<Node> = content.named().filter(|c| c.is(Kind::Scalar)).collect();
     let [topic] = subs.as_slice() else { return vec![] };
     if topic.utf8_text(src).ok() != Some("$_") {
         return vec![];
@@ -1345,13 +1352,13 @@ pub(crate) fn string_list_with_residue<'t>(
             return (vec![], true);
         }
         Some(_) => {}
-        None => match node.kind() {
-            "bareword" | "autoquoted_bareword" | "array" => {
+        None => match node.kind_of() {
+            Kind::Bareword | Kind::AutoquotedBareword | Kind::Array => {
                 let v = fold(node);
                 let residue = v.is_empty();
                 return (v, residue);
             }
-            "map_grep_expression" => {
+            Kind::MapGrepExpression => {
                 let v = map_built_strings(node, src, fold);
                 let residue = v.is_empty();
                 return (v, residue);
@@ -1377,13 +1384,13 @@ pub(crate) fn string_list_with_residue<'t>(
                 results.extend(v);
                 residue |= r;
             }
-            Some(LiteralShape::HashRef) | None => match child.kind() {
-                "bareword" | "autoquoted_bareword" | "array" => {
+            Some(LiteralShape::HashRef) | None => match child.kind_of() {
+                Kind::Bareword | Kind::AutoquotedBareword | Kind::Array => {
                     let v = fold(child);
                     residue |= v.is_empty();
                     results.extend(v);
                 }
-                "map_grep_expression" => {
+                Kind::MapGrepExpression => {
                     let v = map_built_strings(child, src, fold);
                     residue |= v.is_empty();
                     results.extend(v);
@@ -1408,13 +1415,13 @@ pub(crate) fn string_list_with_residue<'t>(
 pub(crate) fn declaration_in_force_from<'t>(syn: &SyntaxForest<'t>, decl: Node<'t>) -> tree_sitter::Point {
     let mut from = decl;
     for p in syn.ancestors(decl) {
-        if p.kind() == "expression_statement" {
+        if p.is(Kind::ExpressionStatement) {
             return p.end_position();
         }
         if let Some(block) = p.field(Field::Block).filter(|b| b.id() != from.id()) {
             return block.start_position();
         }
-        if matches!(p.kind(), "block" | "source_file") {
+        if matches!(p.kind_of(), Kind::Block | Kind::SourceFile) {
             break;
         }
         from = p;
@@ -1425,7 +1432,7 @@ pub(crate) fn declaration_in_force_from<'t>(syn: &SyntaxForest<'t>, decl: Node<'
 /// The block (or file) `node` runs in: the extent a fact observed at
 /// `node` can hold over when no conditional arm bounds it.
 pub(crate) fn enclosing_block<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> Option<Node<'t>> {
-    syn.ancestors(node).find(|p| matches!(p.kind(), "block" | "source_file"))
+    syn.ancestors(node).find(|p| matches!(p.kind_of(), Kind::Block | Kind::SourceFile))
 }
 
 /// A call on a variable or place whose callee `tag_of` names as reporting
@@ -1451,14 +1458,14 @@ pub(crate) fn ref_tag_operand<'a>(
     let (name, operand) = one_operand_call(node)?;
     let name = name.utf8_text(src).ok()?;
     matches!(
-        operand.kind(),
-        "scalar"
-            | "hash_element_expression"
-            | "array_element_expression"
-            | "func0op_call_expression"
-            | "func1op_call_expression"
-            | "function_call_expression"
-            | "method_call_expression"
+        operand.kind_of(),
+        Kind::Scalar
+            | Kind::HashElementExpression
+            | Kind::ArrayElementExpression
+            | Kind::Func0opCallExpression
+            | Kind::Func1opCallExpression
+            | Kind::FunctionCallExpression
+            | Kind::MethodCallExpression
     )
     .then_some((tag_of(name)?, operand))
 }
@@ -1481,15 +1488,15 @@ pub(crate) fn subject_call<'a, T>(
 
 /// A variable or a place in one, the operand a guard can narrow.
 fn is_subject(operand: Node<'_>) -> bool {
-    matches!(operand.kind(), "scalar" | "hash_element_expression" | "array_element_expression")
+    matches!(operand.kind_of(), Kind::Scalar | Kind::HashElementExpression | Kind::ArrayElementExpression)
 }
 
 /// A named call with one operand, parens or not: its callee's name node and
 /// the operand, groups peeled.
 fn one_operand_call(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
-    let (name, operand) = match node.kind() {
-        "func1op_call_expression" => (node.child(0)?, node.named().find(|c| c.kind() != "comment")?),
-        "function_call_expression" | "ambiguous_function_call_expression" => {
+    let (name, operand) = match node.kind_of() {
+        Kind::Func1opCallExpression => (node.child(0)?, node.named().find(|c| !c.is(Kind::Comment))?),
+        Kind::FunctionCallExpression | Kind::AmbiguousFunctionCallExpression => {
             (node.field(Field::Function)?, node.field(Field::Arguments)?)
         }
         _ => return None,
@@ -1498,30 +1505,30 @@ fn one_operand_call(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
 }
 
 /// The kinds whose body runs when called, not where it is written.
-pub(crate) const CALLABLE_KINDS: &[&str] = &[
-    "subroutine_declaration_statement",
-    "method_declaration_statement",
-    "anonymous_subroutine_expression",
-    "anonymous_method_expression",
+pub(crate) const CALLABLE_KINDS: &[Kind] = &[
+    Kind::SubroutineDeclarationStatement,
+    Kind::MethodDeclarationStatement,
+    Kind::AnonymousSubroutineExpression,
+    Kind::AnonymousMethodExpression,
 ];
 
 /// Does a node of `kind` open a callable body? A climb that asks what runs
 /// around a node stops here.
-pub(crate) fn is_callable_boundary(kind: &str) -> bool {
+pub(crate) fn is_callable_boundary(kind: Kind) -> bool {
     CALLABLE_KINDS.contains(&kind)
 }
 
 /// The statement-modifier kinds: `STMT if G` / `unless`, `STMT while G` /
 /// `until`, `STMT for LIST`.
-pub(crate) const MODIFIER_KINDS: &[&str] =
-    &["postfix_conditional_expression", "postfix_loop_expression", "postfix_for_expression"];
+pub(crate) const MODIFIER_KINDS: &[Kind] =
+    &[Kind::PostfixConditionalExpression, Kind::PostfixLoopExpression, Kind::PostfixForExpression];
 
 /// A statement modifier's head: its condition, or the list a `for`
 /// modifier runs over. `None` for any other node.
 pub(crate) fn modifier_head<'a>(modifier: Node<'a>) -> Option<Node<'a>> {
-    match modifier.kind() {
-        "postfix_conditional_expression" | "postfix_loop_expression" => modifier.field(Field::Condition),
-        "postfix_for_expression" => modifier.field(Field::List),
+    match modifier.kind_of() {
+        Kind::PostfixConditionalExpression | Kind::PostfixLoopExpression => modifier.field(Field::Condition),
+        Kind::PostfixForExpression => modifier.field(Field::List),
         _ => None,
     }
 }
@@ -1534,7 +1541,7 @@ pub(crate) fn modifier_runs_head_first<'a>(modifier: Node<'a>) -> Option<(Node<'
     let stmt = nth_element(modifier, 0).filter(|s| *s != head)?;
     // TODO(do-loop-node): the grammar gives `do BLOCK while G` the node
     // `STMT while G` has; a node of its own would make this a kind.
-    let body_first = modifier.kind() == "postfix_loop_expression" && stmt.kind() == "do_expression";
+    let body_first = modifier.is(Kind::PostfixLoopExpression) && stmt.is(Kind::DoExpression);
     (!body_first).then_some((stmt, head))
 }
 
@@ -1544,12 +1551,12 @@ pub(crate) fn modifier_runs_head_first<'a>(modifier: Node<'a>) -> Option<(Node<'
 pub(crate) fn varname_inner_scalar_text<'a>(node: Node<'a>, src: &'a [u8]) -> Option<String> {
     for i in 0..node.named_child_count() {
         let c = node.named_child(i)?;
-        if c.kind() != "varname" {
+        if !c.is(Kind::Varname) {
             continue;
         }
         for j in 0..c.named_child_count() {
             let gc = c.named_child(j)?;
-            if gc.kind() == "scalar" {
+            if gc.is(Kind::Scalar) {
                 return gc.text(src).map(|s| s.to_string());
             }
         }
@@ -1583,14 +1590,14 @@ pub(crate) fn element_arrow_deref(element: Node, src: &[u8]) -> bool {
 pub(crate) fn is_element_access_base<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> bool {
     let mut up = syn.ancestors(node);
     let Some(parent) = up.next() else { return false };
-    match parent.kind() {
-        "hash_element_expression" | "array_element_expression" => {
+    match parent.kind_of() {
+        Kind::HashElementExpression | Kind::ArrayElementExpression => {
             parent.named_child(0).is_some_and(|c| c == node)
         }
         // Postfix deref slice (`$h->@{…}` / `$h->%{…}` / `$a->@[…]`):
         // the scalar fills the hashref/arrayref field. A slice READ
         // copies values out — it can't mutate the referent.
-        "slice_expression" | "keyval_expression" => {
+        Kind::SliceExpression | Kind::KeyvalExpression => {
             parent.field(Field::Hashref).is_some_and(|c| c == node)
                 || parent.field(Field::Arrayref).is_some_and(|c| c == node)
         }
@@ -1598,10 +1605,10 @@ pub(crate) fn is_element_access_base<'t>(syn: &SyntaxForest<'t>, node: Node<'t>)
         // container's varname. Plain sigil derefs (`%$h`, `$$h`) keep
         // their escape classification — only slice containers are
         // value-copying reads.
-        "varname" => up.next().is_some_and(|gp| {
+        Kind::Varname => up.next().is_some_and(|gp| {
             matches!(
-                gp.kind(),
-                "slice_container_variable" | "keyval_container_variable"
+                gp.kind_of(),
+                Kind::SliceContainerVariable | Kind::KeyvalContainerVariable
             )
         }),
         _ => false,
@@ -1641,21 +1648,21 @@ pub(crate) fn constructor_invocant<'a>(node: Node<'a>, src: &'a [u8]) -> Option<
 /// `$o->${cb}`, `$o->$$cb`. The `method:` field is always a `method` node,
 /// wrapping the scalar for these spellings and a bare name otherwise.
 pub(crate) fn dynamic_method_scalar(call: Node) -> Option<Node> {
-    call.field(Field::Method)?.named_child(0).filter(|c| c.kind() == "scalar")
+    call.field(Field::Method)?.named_child(0).filter(|c| c.is(Kind::Scalar))
 }
 
 /// An argument that flattens into any number of values in list context:
 /// an array or hash, a deref of one, or a slice.
 pub(crate) fn is_flattening(node: Node) -> bool {
     matches!(
-        node.kind(),
-        "array"
-            | "hash"
-            | "array_deref_expression"
-            | "hash_deref_expression"
-            | "container_variable"
-            | "slice_expression"
-            | "keyval_expression"
+        node.kind_of(),
+        Kind::Array
+            | Kind::Hash
+            | Kind::ArrayDerefExpression
+            | Kind::HashDerefExpression
+            | Kind::ContainerVariable
+            | Kind::SliceExpression
+            | Kind::KeyvalExpression
     )
 }
 
@@ -1666,7 +1673,7 @@ pub(crate) fn is_flattening(node: Node) -> bool {
 /// "is this potentially the receiver" — position-based receiver detection
 /// (`$_[0]`, `shift`) stays with the builder, which knows the sub context.
 pub(crate) fn is_conventional_invocant_scalar<'a>(node: Node<'a>, src: &'a [u8]) -> bool {
-    node.kind() == "scalar"
+    node.is(Kind::Scalar)
         && varname_child(node)
             .and_then(|v| v.text(src))
             .is_some_and(is_conventional_invocant_name)

@@ -81,8 +81,8 @@ impl<'a> Builder<'a> {
     }
 
     fn invocant_type_at_node_on_stack(&self, node: Node<'a>) -> Option<InferredType> {
-        match node.kind() {
-            "method_call_expression" => {
+        match node.kind_of() {
+            Kind::MethodCallExpression => {
                 // Constructor pattern is closed under syntax — bake
                 // before consulting the bag. Same shape the walker's
                 // `expr_payload` uses for every rvalue expression.
@@ -183,7 +183,7 @@ impl<'a> Builder<'a> {
                 }
                 None
             }
-            "coderef_call_expression" => {
+            Kind::CoderefCallExpression => {
                 // `$cb->(args)` — value-type IS whatever the operand's
                 // `CodeRef.return_edge` resolves to. Resolve the
                 // operand recursively (via this same dispatch),
@@ -235,7 +235,7 @@ impl<'a> Builder<'a> {
                 };
                 self.bag_query_attachment_with(&target, arity, receiver)
             }
-            "scalar" => {
+            Kind::Scalar => {
                 let text = node.utf8_text(self.source).ok()?;
                 // Const-folded class string: `my $c = 'Counter'; $c->bump`.
                 // In invocant position a known constant string IS the
@@ -258,8 +258,8 @@ impl<'a> Builder<'a> {
                 let scope = self.scope_at_point(node.start_position());
                 self.bag_query_variable(text, scope, self.read_point_of(node))
             }
-            "func0op_call_expression" => self.infer_expression_result_type(node),
-            "bareword" | "package" => {
+            Kind::Func0opCallExpression => self.infer_expression_result_type(node),
+            Kind::Bareword | Kind::Package => {
                 let text = node.utf8_text(self.source).ok()?;
                 // Bareword invocant is ambiguous: class-name reference
                 // OR zero-arg function call whose return type seeds
@@ -278,10 +278,10 @@ impl<'a> Builder<'a> {
             // A bare `shift` READS the head of `@_`'s window at its point;
             // the consume is the walk's `consume_arg_head`, once per node.
             // This arm re-runs every fold iteration, so it must stay a read.
-            "func1op_call_expression" if self.is_shift_call(node) => {
+            Kind::Func1opCallExpression if self.is_shift_call(node) => {
                 self.arg_window_at(node)?.element_at(0).cloned()
             }
-            "array_element_expression" => {
+            Kind::ArrayElementExpression => {
                 // Arrow deref on an expression (`$x->[0]`,
                 // `$obj->{users}->[0]`) has no `array` field — the base is
                 // the first named child; its Sequence projects the element.
@@ -304,7 +304,7 @@ impl<'a> Builder<'a> {
                 self.bag_query_variable(&arr_var, scope, self.read_point_of(node))
                     .and_then(|t| t.element_at(idx).cloned())
             }
-            "hash_element_expression" => {
+            Kind::HashElementExpression => {
                 // A hash element's VALUE type is independent of the
                 // container's class — never `$self`'s class.
                 // TODO(union-chain-walker): a union base answers nothing
@@ -332,7 +332,7 @@ impl<'a> Builder<'a> {
                     // A slot present but untyped is no value.
                     .filter(|t| !matches!(t, InferredType::Unknown))
             }
-            "function_call_expression" | "ambiguous_function_call_expression" => {
+            Kind::FunctionCallExpression | Kind::AmbiguousFunctionCallExpression => {
                 if self.is_shift_call(node) {
                     return self.arg_window_at(node)?.element_at(0).cloned();
                 }
@@ -375,11 +375,11 @@ impl<'a> Builder<'a> {
     /// Read a string-ish arg node's literal value (string content or
     /// bareword/autoquoted key text). `None` for non-literal args.
     pub(super) fn literal_arg_string(&self, arg: Node<'a>) -> Option<String> {
-        match arg.kind() {
-            "string_literal" | "interpolated_string_literal" => {
+        match arg.kind_of() {
+            Kind::StringLiteral | Kind::InterpolatedStringLiteral => {
                 crate::cst::string_content_text(arg, self.source)
             }
-            "autoquoted_bareword" | "bareword" => {
+            Kind::AutoquotedBareword | Kind::Bareword => {
                 arg.utf8_text(self.source).ok().map(|s| s.to_string())
             }
             _ => None,
@@ -409,7 +409,7 @@ impl<'a> Builder<'a> {
         // tail; preserved here so unrelated InferredType variants
         // (Numeric / String / etc.) on a bareword still degrade to
         // the class-name interpretation rather than vanishing.
-        if matches!(node.kind(), "bareword" | "package") {
+        if matches!(node.kind_of(), Kind::Bareword | Kind::Package) {
             return node.utf8_text(self.source).ok().map(|s| s.to_string());
         }
         None
@@ -429,8 +429,8 @@ impl<'a> Builder<'a> {
     /// syntax fact the `call_name` projection carries to plugins.
     pub(super) fn invocant_call_name(&self, inv: Node<'a>) -> Option<String> {
         if !matches!(
-            inv.kind(),
-            "function_call_expression" | "ambiguous_function_call_expression"
+            inv.kind_of(),
+            Kind::FunctionCallExpression | Kind::AmbiguousFunctionCallExpression
         ) {
             return None;
         }

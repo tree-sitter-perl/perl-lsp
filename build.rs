@@ -250,6 +250,8 @@ fn grammar_vocabulary(lang_name: &str, lang: tree_sitter::Language) {
     }
     out.push_str("            Kind::Token => \"\",\n            Kind::Error => \"ERROR\",\n        }\n    }\n}\n");
 
+    out.push_str("\nimpl super::GrammarKind for Kind {\n    fn from_id(id: u16) -> Kind {\n        Kind::from_id(id)\n    }\n    fn id(self) -> u16 {\n        self as u16\n    }\n}\n");
+
     let dir = std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR for a build script");
     std::fs::write(Path::new(&dir).join(format!("{lang_name}_grammar.rs")), out).expect("write the grammar vocabulary");
 }

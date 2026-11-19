@@ -17,9 +17,9 @@ pub(super) fn classify_arity_branch<'t>(
     source: &[u8],
 ) -> Option<ArityBranch> {
     let Some(parent) = syn.parent(return_node) else { return None };
-    match parent.kind() {
-        "expression_statement" => classify_bare_return_or_if_arm(syn, parent, source),
-        "postfix_conditional_expression" => {
+    match parent.kind_of() {
+        Kind::ExpressionStatement => classify_bare_return_or_if_arm(syn, parent, source),
+        Kind::PostfixConditionalExpression => {
             let cond = parent.field(Field::Condition)?;
             let keyword = connector_keyword_between(return_node, cond, source)?;
             classify_arity_condition(cond, source, &keyword)
@@ -37,15 +37,15 @@ pub(super) fn classify_bare_return_or_if_arm<'t>(
     source: &[u8],
 ) -> Option<ArityBranch> {
     let Some(block) = syn.parent(expr_stmt) else { return None };
-    if block.kind() != "block" {
+    if !block.is(Kind::Block) {
         return None;
     }
     let Some(outer) = syn.parent(block) else { return None };
-    match outer.kind() {
-        "subroutine_declaration_statement"
-        | "method_declaration_statement"
-        | "anonymous_subroutine_expression" => Some(ArityBranch::Default),
-        "conditional_statement" => {
+    match outer.kind_of() {
+        Kind::SubroutineDeclarationStatement
+        | Kind::MethodDeclarationStatement
+        | Kind::AnonymousSubroutineExpression => Some(ArityBranch::Default),
+        Kind::ConditionalStatement => {
             // `if (condition) { return X }` — classify by condition.
             // Arity-gated condition → Zero / Exact. Anything else
             // (regular boolean predicate) is still a contributor to
@@ -70,7 +70,7 @@ pub(super) fn classify_arity_condition(
     keyword: &str,
 ) -> Option<ArityBranch> {
     // Shape 1: bare `@_`.
-    if cond.kind() == "array" {
+    if cond.is(Kind::Array) {
         if crate::cst::names_arg_array(cond, source) {
             return match keyword {
                 "unless" => Some(ArityBranch::Zero),
@@ -80,11 +80,11 @@ pub(super) fn classify_arity_condition(
         return None;
     }
     // Shape 2: `!@_` → unary_expression with operand @_.
-    if cond.kind() == "unary_expression" {
+    if cond.is(Kind::UnaryExpression) {
         let op_text = raw_leading_op(cond, source);
         if op_text == "!" {
             if let Some(operand) = cond.field(Field::Operand) {
-                if operand.kind() == "array" {
+                if operand.is(Kind::Array) {
                     if crate::cst::names_arg_array(operand, source) {
                         return match keyword {
                             "if" => Some(ArityBranch::Zero),
@@ -97,7 +97,7 @@ pub(super) fn classify_arity_condition(
         return None;
     }
     // Shape 3: `@_ == N` / `scalar(@_) == N` → equality_expression.
-    if cond.kind() == "equality_expression" {
+    if cond.is(Kind::EqualityExpression) {
         let op = raw_mid_op(cond, source);
         if op != "==" && op != "!=" {
             return None;
@@ -116,7 +116,7 @@ pub(super) fn classify_arity_condition(
         };
     }
     // Shape 4: `@_ > N` / `@_ < N` / `@_ >= N` / `@_ <= N` → relational.
-    if cond.kind() == "relational_expression" {
+    if cond.is(Kind::RelationalExpression) {
         return classify_relational_arity(cond, source, keyword);
     }
     // Shape 5: compound `A || B` / `A && B` — one side is an arity test, the
@@ -127,7 +127,7 @@ pub(super) fn classify_arity_condition(
     //     necessary.
     // The other two (`if (A||B)`, `unless (A&&B)`) can fire via the non-arity
     // term at any arity, so no sound arity constraint — punt.
-    if cond.kind() == "binary_expression" {
+    if cond.is(Kind::BinaryExpression) {
         let op = raw_mid_op(cond, source);
         let sound = matches!(
             (keyword, op.as_str()),
@@ -216,10 +216,10 @@ pub(super) fn arms_genuinely_agree(
 /// True if `node` evaluates to the length of `@_` — either `@_`
 /// itself (scalar context in an equality) or `scalar(@_)`.
 pub(super) fn node_is_arity_magnitude(node: tree_sitter::Node, source: &[u8]) -> bool {
-    if node.kind() == "array" {
+    if node.is(Kind::Array) {
         return crate::cst::names_arg_array(node, source);
     }
-    if node.kind() == "func1op_call_expression" {
+    if node.is(Kind::Func1opCallExpression) {
         let Some(kw) = node.child(0) else { return false };
         let Ok(name) = kw.utf8_text(source) else { return false };
         if name != "scalar" {
@@ -227,7 +227,7 @@ pub(super) fn node_is_arity_magnitude(node: tree_sitter::Node, source: &[u8]) ->
         }
         for i in 0..node.named_child_count() {
             if let Some(c) = node.named_child(i) {
-                if c.kind() == "array" {
+                if c.is(Kind::Array) {
                     return crate::cst::names_arg_array(c, source);
                 }
             }
@@ -238,7 +238,7 @@ pub(super) fn node_is_arity_magnitude(node: tree_sitter::Node, source: &[u8]) ->
 
 /// Extract a small unsigned numeric literal from a `number` node.
 pub(super) fn extract_numeric(node: tree_sitter::Node, source: &[u8]) -> Option<u32> {
-    if node.kind() != "number" {
+    if !node.is(Kind::Number) {
         return None;
     }
     node.utf8_text(source).ok()?.trim().parse::<u32>().ok()
@@ -317,11 +317,11 @@ pub(super) fn bare_name(s: &str) -> &str {
 pub(super) fn extract_delegated_call_name<'a>(return_node: Node<'a>, source: &'a [u8]) -> Option<String> {
     // The `return X` node has the expression as its first named child.
     let expr = crate::cst::nth_element(return_node, 0)?;
-    let call_name = match expr.kind() {
-        "function_call_expression" | "ambiguous_function_call_expression" => {
+    let call_name = match expr.kind_of() {
+        Kind::FunctionCallExpression | Kind::AmbiguousFunctionCallExpression => {
             expr.field(Field::Function)?.utf8_text(source).ok()?
         }
-        "method_call_expression" => {
+        Kind::MethodCallExpression => {
             expr.field(Field::Method)?.utf8_text(source).ok()?
         }
         _ => return None,
@@ -348,12 +348,12 @@ pub(super) fn find_varname_child<'a>(node: Node<'a>) -> Option<Node<'a>> {
 /// Find a directly-contained `code_deref_expression` in `node` (the grammar
 /// wraps it in a `function` node inside a call's `function` field).
 pub(super) fn code_deref_in<'a>(node: Node<'a>) -> Option<Node<'a>> {
-    if node.kind() == "code_deref_expression" {
+    if node.is(Kind::CodeDerefExpression) {
         return Some(node);
     }
     for i in 0..node.named_child_count() {
         let child = node.named_child(i)?;
-        if child.kind() == "code_deref_expression" {
+        if child.is(Kind::CodeDerefExpression) {
             return Some(child);
         }
     }
@@ -365,12 +365,12 @@ pub(super) fn code_deref_in<'a>(node: Node<'a>) -> Option<Node<'a>> {
 /// (typically a `scalar`) so callers can type/navigate the symbolic target.
 pub(super) fn code_deref_operand<'a>(code_deref: Node<'a>) -> Option<Node<'a>> {
     let block = code_deref.named_child(0)?;
-    if block.kind() != "block" {
+    if !block.is(Kind::Block) {
         // Defensive: future grammar may inline the expression.
         return Some(block);
     }
     let stmt = block.named_child(0)?;
-    if stmt.kind() == "expression_statement" {
+    if stmt.is(Kind::ExpressionStatement) {
         stmt.named_child(0)
     } else {
         Some(stmt)
@@ -382,7 +382,7 @@ pub(super) fn code_deref_operand<'a>(code_deref: Node<'a>) -> Option<Node<'a>> {
 pub(super) fn find_data_section<'a>(root: Node<'a>) -> Option<Node<'a>> {
     for i in 0..root.child_count() {
         let child = root.child(i)?;
-        if child.kind() == "data_section" {
+        if child.is(Kind::DataSection) {
             return Some(child);
         }
     }
@@ -397,10 +397,10 @@ pub(super) fn find_data_section<'a>(root: Node<'a>) -> Option<Node<'a>> {
 pub(super) fn collect_data_section_subs<'a>(node: Node<'a>, out: &mut Vec<Node<'a>>) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        match child.kind() {
-            "subroutine_declaration_statement" => out.push(child),
+        match child.kind_of() {
+            Kind::SubroutineDeclarationStatement => out.push(child),
             // Don't mine a nested data_section — its bytes are payload, not code.
-            "data_section" => {}
+            Kind::DataSection => {}
             _ => collect_data_section_subs(child, out),
         }
     }
@@ -415,7 +415,7 @@ pub(super) fn extract_data_section_params(sub_node: Node, source: &[u8]) -> Vec<
     let mut sig = None;
     for i in 0..sub_node.child_count() {
         if let Some(c) = sub_node.child(i) {
-            if c.kind() == "signature" {
+            if c.is(Kind::Signature) {
                 sig = Some(c);
                 break;
             }
@@ -424,12 +424,12 @@ pub(super) fn extract_data_section_params(sub_node: Node, source: &[u8]) -> Vec<
     let Some(sig) = sig else { return params };
     for i in 0..sig.named_child_count() {
         let Some(p) = sig.named_child(i) else { continue };
-        if matches!(p.kind(), "scalar" | "array" | "hash") {
+        if matches!(p.kind_of(), Kind::Scalar | Kind::Array | Kind::Hash) {
             if let Ok(text) = p.utf8_text(source) {
                 params.push(ParamInfo {
                     name: text.to_string(),
                     default: None,
-                    is_slurpy: matches!(p.kind(), "array" | "hash"),
+                    is_slurpy: matches!(p.kind_of(), Kind::Array | Kind::Hash),
                     is_invocant: false,
                     binding_site: None,
                 });
