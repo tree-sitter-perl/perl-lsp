@@ -208,6 +208,16 @@ fn a_php_identity_spelled_whole_is_a_module_path() {
     );
     assert_eq!(module_prefix("php", "<?php\nuse Vendor\\Pa|;\n"), Some("Vendor\\Pa".into()));
     assert_eq!(
+        module_prefix("php", "<?php\nuse Vendor\\Pa|"),
+        Some("Vendor\\Pa".into()),
+        "a use the buffer ends in before its `;`"
+    );
+    assert_eq!(
+        module_prefix("php", "<?php\nnamespace App;\nuse Vendor\\Pa|\n\nclass X {}\n"),
+        Some("Vendor\\Pa".into()),
+        "an unterminated use the next declaration runs into"
+    );
+    assert_eq!(
         module_prefix("php", "<?php\nnamespace App;\n$x = new \\Vend|;\n"),
         Some("Vend".into()),
         "an absolute reference drops its leading separator"
