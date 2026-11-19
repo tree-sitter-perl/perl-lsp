@@ -1,6 +1,7 @@
 # Epic 15 — Query paths at scale: the Tier 1 residual
 
-> **Status:** scheduled (15th) but **high priority by impact** — with
+> **Status:** open (audited 2026-11-19; the board below still dates from
+> 2026-08-17). **High priority by impact** — with
 > Epic 14 it is one of the two places the product is unusable rather
 > than incomplete, and it is the one that bounds the stated target
 > market.

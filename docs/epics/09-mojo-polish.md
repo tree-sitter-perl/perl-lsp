@@ -1,6 +1,6 @@
 # Epic 9 — Mojo polish: route names, stash intelligence, hooks, transitive plugins
 
-> **Status:** Phase A mostly landed (audited 2026-11-12); B–E open.
+> **Status:** Phase A mostly landed (audited 2026-11-19); B–E open.
 > The user-facing feature epic.
 > **Design owner-doc:** `docs/prompt-mojo-todo.md` — read WHOLE; its
 > stash section contains a fully-made design decision (per-action

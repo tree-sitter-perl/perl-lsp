@@ -73,9 +73,15 @@ side of a `defined` guard), never from the arm join.
 Provenance: an `Optional` return is tagged `optional_join` in its
 `TypeProvenance::ReducerFold` evidence so `--dump-package` explains it.
 
+## Undef arms
+
+A bare `return;`, `return undef`, `return ()` and a ternary's `()` are undef
+arms: none has an rvalue type to ride an `Edge`, so each is a marked Fact
+(`tags::UndefArm`, `Scalar` vs `EmptyList`) the return-arm join counts. `{T,
+undef}` joins to `Optional<T>`; a sub whose every arm is undef is `Undef`.
+
 ## Forward work
 
-Production gaps (empty-list `return ()`, all-undef → `Undef`,
-`FieldValueReducer`, the bareword `Maybe[…]` constructor form) live in
-`docs/prompt-optional-types.md`. Diagnostics on unguarded `Optional` /
+The production gap left (`{T, undef}` slot writes through `FieldValueReducer`)
+lives in `docs/prompt-optional-types.md`. Diagnostics on unguarded `Optional` /
 known-`Undef` derefs: `docs/adr/narrowing-diagnostics.md`.

@@ -1,6 +1,8 @@
 # Epic 4 — Value provenance, tier 1 (residual Parts 1, 2, 5a)
 
-> **Status:** scheduled, fourth. The largest of the type-intelligence
+> **Status:** not started (audited 2026-11-19: no `roWrite`, no
+> `KeyedOnFirstArg`, no splice union; `mutated_keys_on_class` still has no
+> production caller). The largest of the type-intelligence
 > epics; run it after Epic 3 so the before/after substrate-diff habit
 > is already in muscle memory.
 > **Design owner-doc:** `docs/prompt-type-inference-residual.md`
@@ -142,17 +144,14 @@ resolves into `$defaults`'s key set.
    Edges — confirm the attachment shapes line up and add a cycle guard
    via the existing `QueryState` visited set. `$a = { %$b }; $b = { %$a }`
    is the test.
-   **Do not entrench the silent drop.** `query_rec`'s visited guard
-   resolves an on-path revisit to *nothing*, so the cyclic arm vanishes
-   from the fold. That is harmless for types — a cyclic edge carries no
-   information, which is why it is correct here — but Epic 16 §3.6 has
-   to replace it with an explicit unknown-marker witness, because for
-   must/may facts a silently-dropped arm folds into a **stronger claim
-   than the paths justify**. Write this guard so the marker can be added
-   later without re-deriving where the cuts happen: cut in ONE place,
-   and leave a comment naming `docs/epics/16-cfg-tier.md` Phase C
-   step 3. A cycle guard spread across three call sites is the retrofit
-   that epic cannot afford.
+   **Cut cycles in ONE place.** `query_rec`'s visited guard resolves an
+   on-path revisit to *nothing*, so the cyclic arm vanishes from the fold.
+   That is harmless for a splice, where a cyclic edge carries no
+   information. A cycle through a join is different: the registry chases it
+   to a fixed point local to the frame that found it
+   (`docs/adr/cfg-tier.md` §Loops). Do not add a second cut for splices;
+   a cycle guard spread across call sites is the retrofit that tier cannot
+   afford.
 4. Owner expansion for the linker (goto-def on a key): **prefer
    index-time expansion** (one def per member) over a
    `HashKeyOwner::Union` enum variant — no serde/rename/match ripple.

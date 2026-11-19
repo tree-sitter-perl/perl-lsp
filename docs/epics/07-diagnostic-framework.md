@@ -1,6 +1,8 @@
 # Epic 7 — The diagnostic framework: PL-codes, config, suppressions, SARIF
 
-> **Status:** scheduled (7th). The CI-readiness gate.
+> **Status:** not started (audited 2026-11-19: diagnostics carry string
+> codes only; no registry, `.perl-lsp.json` config, suppression comments or
+> SARIF). The CI-readiness gate.
 > **Design owner-docs:** `docs/prompt-cli-tools.md` §"Diagnostic
 > framework" (codes table, config JSON, suppression comments, SARIF) and
 > `docs/prompt-config-schema.md` (whose "forcing function" section says

@@ -1,6 +1,7 @@
 # Epic 11 — Program boundaries: file→program assignment + `main::` unification
 
-> **Status:** scheduled (11th). Half-gated: the file→program assignment
+> **Status:** not started (audited 2026-11-19: `index/resolve/identity.rs`
+> still carries the conservative `main::` fallback). Half-gated: the file→program assignment
 > and MAIN-1 are unblocked NOW; the instance-brand consumer additionally
 > waits on Epic 4 plus constructor/field flow.
 > **Design owner-docs:** `docs/prompt-entrypoint-analysis.md` (the

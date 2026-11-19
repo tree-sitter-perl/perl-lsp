@@ -93,6 +93,22 @@ duplicates it.
 `bag_query_expr_span(span)` and `bag_query_named_sub(name, arity)`
 are thin sugar wrappers over the same call.
 
+### Compile-time tokens are expression witnesses
+
+`__PACKAGE__`, `__SUB__`, `__FILE__` and `__LINE__` (all
+`func0op_call_expression`) get their value from `emit_expr_witness` like any
+other expression: `__PACKAGE__` is `ClassName(current_package)`, `__SUB__` the
+`Symbol` of the callable it runs in, `__FILE__` a `String`, `__LINE__`
+`Numeric`. `invocant_type_at_node` reaches the same answer through the same
+witness, so every consumer (method dispatch, column-keyed args, goto-def,
+references, rename, hover) reads a type and never spells a token
+(`conventions.rs` owns recognition; `Builder::token_class` projects the class).
+
+`__PACKAGE__->search` / `->create` / `->find` / `->resultset` on a DBIC Result
+class are errors in DBIC (resultset-only methods), so leaving them unlinked is
+the correct answer; `__PACKAGE__->new({ col => … })`, `->add_columns` and any
+user-defined `__PACKAGE__->method` are the valid class-method cases.
+
 ## Why "no exceptions, even for literals"
 
 A string literal's `String` is the simplest case the walker knows.

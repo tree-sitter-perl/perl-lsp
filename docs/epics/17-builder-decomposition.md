@@ -1,6 +1,7 @@
 # Epic 17 — Builder decomposition: parts that name one concern
 
-> **Status:** scheduled. Tech debt, behavior-frozen throughout — no
+> **Status:** not started (audited 2026-11-19: no `exporters.rs` or
+> `constraints.rs`; `fold.rs` is still the largest part). Tech debt, behavior-frozen throughout — no
 > phase here may change a single answer.
 > **Design owner-doc:** none, and it does not need one. CLAUDE.md
 > already states the rule this epic applies: *"Oversized modules are

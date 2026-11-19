@@ -1,4 +1,4 @@
-# Helper consumption — phases 2–3
+# Helper consumption — phase 3 and the standing policy
 
 Phase 1 (dependency-registered helpers resolve end-to-end, warm and
 cold, editor and CLI) landed in the crm QA sweep. The standing policy
@@ -10,15 +10,12 @@ from that round:
   intend to use it" — resolve generously; PRECISION is the
   diagnostic's job, not the resolver's.
 
-## Phase 2 — entrypoint-scan diagnostic
+## Phase 2 — landed
 
-At the USAGE site: "`$c->was_loaded` is provided by
-GenericCo::App::Plugin::WasLoaded, which no entrypoint loads
-(`plugin 'WasLoaded'`)". HINT severity; fires only for WORKSPACE
-plugin modules (installed CPAN plugins keep the generous policy).
-Loaded = imported (literally or via SyntheticUse) by any workspace
-file, entrypoint scripts included. Auto-fix code action (insert the
-`plugin` line) mirrors auto-import — later.
+The `helper-not-loaded` entrypoint-scan lint (`lsp/symbols/diagnostics.rs`;
+`lsp/symbols/tests/lint_tests.rs`) fires at the usage site, HINT severity,
+only for WORKSPACE plugin modules. An auto-fix code action (insert the
+`plugin` line, mirroring auto-import) is not built.
 
 ## Phase 3 — per-app surfaces (graph walking)
 

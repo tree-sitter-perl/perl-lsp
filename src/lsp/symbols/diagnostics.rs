@@ -740,7 +740,7 @@ fn collect_diagnostics_once(
     drop(_g_meth);
 
     // 5h: helper-not-loaded — the entrypoint-scan lint
-    // (docs/prompt-helper-consumption.md phase 2). A method call whose
+    // (docs/prompt-helper-consumption.md). A method call whose
     // ONLY resolution is a plugin bridge from a WORKSPACE module that
     // no workspace file loads (imports literally or via the SyntheticUse
     // a `plugin 'X'` line emits). Installed CPAN plugins are exempt —

@@ -1,4 +1,4 @@
-# Class identity is the fully-qualified name — for every language
+# ADR: Class identity is the fully-qualified name — for every language
 
 ## The problem
 
@@ -234,14 +234,6 @@ enclosing class (`package_at`) reads it only where the language says a
 namespace IS the class (`NameSpellings::enclosing_class` —
 `NamespaceInForce` for Perl, `ScopeChain` for PHP and Python, whose
 classes are the bodies a namespace holds).
-
-## Retired with it
-
-The leaf-era plumbing is gone, not gated: `PackFacts::parent_namespaces`
-(the parent edge carries the parent's identity), `TargetRef::class_ns` and
-`CrossFileLookup::pinned_namespace` (the matcher compares identities, so a
-stranger's spelling never matches), the import-rows-only gate, and the
-leaf-space FQ family validation in `implementations_of`.
 
 ## Residuals
 
