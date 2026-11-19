@@ -757,7 +757,7 @@ impl<'a> Builder<'a> {
             self.prove_untaken(subject, op, read, of);
         }
         self.seed_guard_joins(postfix, subjects);
-        self.record_guard_sites(condition, Some(node_to_span(modified)));
+        self.record_guard_sites(condition, self.statement_call(modified).map(node_to_span));
     }
 
     /// `while (G) BLOCK` / `for (…; G; …) BLOCK` — G is tested before every
@@ -845,7 +845,7 @@ impl<'a> Builder<'a> {
             Some(Logical::Or(l, r) | Logical::And(l, r)) => (l, r),
             _ => return,
         };
-        self.record_guard_sites(left, Some(node_to_span(right)));
+        self.record_guard_sites(left, self.statement_call(right).map(node_to_span));
     }
 
     /// `assert_X($x);` / `$type->assert_valid($x);` — a statement that dies

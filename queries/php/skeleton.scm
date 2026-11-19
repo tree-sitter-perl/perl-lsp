@@ -570,14 +570,17 @@
 ; A bare block's statements run where it stands.
 (compound_statement) @flow.block
 
-; How a call to a function ends is how its body does; a call that is a
-; whole statement lets control past it only if it comes back
-; (`docs/adr/cfg-tier.md` §Effects).
+; How a call to a function ends is how its body does; a call a statement
+; runs (the statement itself, or the value an assignment stores) lets
+; control past it only if it comes back (`docs/adr/cfg-tier.md` §Effects).
 (function_definition body: (compound_statement) @ctl.body)
 (method_declaration body: (compound_statement) @ctl.body)
 (anonymous_function body: (compound_statement) @ctl.body)
 (expression_statement
   [(function_call_expression) (member_call_expression) (nullsafe_member_call_expression) (scoped_call_expression)] @ctl.gate)
+(expression_statement
+  (assignment_expression
+    right: [(function_call_expression) (member_call_expression) (nullsafe_member_call_expression) (scoped_call_expression)] @ctl.gate))
 
 ; ---- how a call ends ----
 ; A `never` return says a call never comes back; how it leaves is the

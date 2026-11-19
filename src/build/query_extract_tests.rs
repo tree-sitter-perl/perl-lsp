@@ -4531,3 +4531,22 @@ fn a_cpp_nested_write_reads_as_its_flat_twin() {
     assert_eq!(flat.inferred_type_via_bag("v", tree_sitter::Point { row: 6, column: 0 }), class);
     assert_eq!(nested.inferred_type_via_bag("v", tree_sitter::Point { row: 7, column: 0 }), class);
 }
+
+/// A call a statement runs gates what follows it whether the statement is
+/// the call or stores its value (an assignment, a declaration).
+#[cfg(all(feature = "cpp", feature = "php", feature = "python"))]
+#[test]
+fn a_call_whose_value_a_statement_stores_gates_what_follows() {
+    use crate::model::witnesses::Ends;
+    let ends = |path: &str, src: &str, name: &str| {
+        let fa = analyzed(path, src);
+        fa.symbol_ends(fa.symbols().iter().find(|s| s.name == name).unwrap().id)
+    };
+    assert_eq!(ends("/x/s.py", "def fatal():\n    raise E()\ndef f():\n    x = fatal()\n", "f"), Ends::UNWINDS);
+    assert_eq!(ends("/x/s.py", "def fatal():\n    raise E()\ndef f():\n    x: int = fatal()\n", "f"), Ends::UNWINDS);
+    assert_eq!(ends("/x/s.py", "def fatal():\n    raise E()\ndef f():\n    y = 1\n    x = fatal()\n", "f"), Ends::UNWINDS);
+    assert_eq!(ends("/x/s.php", "<?php\nfunction fatal() { throw new E(); }\nfunction f() { $x = fatal(); }\n", "f"), Ends::UNWINDS);
+    assert_eq!(ends("/x/s.cpp", "void fatal() { throw 1; }\nvoid f() { int x = fatal(); }\n", "f"), Ends::UNWINDS);
+    assert_eq!(ends("/x/s.cpp", "void fatal() { throw 1; }\nvoid f() { int x; x = fatal(); }\n", "f"), Ends::UNWINDS);
+    assert!(ends("/x/s.cpp", "int fine() { return 1; }\nvoid f() { int x = fine(); }\n", "f").completes());
+}

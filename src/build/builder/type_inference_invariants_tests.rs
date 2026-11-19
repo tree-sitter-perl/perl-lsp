@@ -608,3 +608,24 @@ fn super_passes_only_a_parent_the_file_can_vouch_for() {
     assert_eq!(ends_of_super(false), Ends::all(), "an undeclared parent may define it");
     assert_eq!(ends_of_super(true), Ends::UNWINDS, "a declared parent that lacks it is passed over");
 }
+
+/// A call a statement runs gates what follows it whether the statement is
+/// the call or stores its value: `my $r = fail();` ends a body as `fail();`
+/// does, and a guard on `$r = fail()` decides the rest of the block.
+#[test]
+fn a_call_whose_value_a_statement_stores_gates_what_follows() {
+    use crate::model::witnesses::Ends;
+    let source = "package Foo;\nsub fail { return 1 }\nsub bare { fail(); }\nsub kept { my $r = fail(); }\nsub chained { my ($a, $b); $a = $b = fail(); }\nsub soft { my $r = 2; }\n";
+    let fa = build_with(source, registry_with_fail_unwinding());
+    let ends = |n: &str| fa.symbol_ends(fa.symbols().iter().find(|s| s.name == n).unwrap().id);
+    assert_eq!(ends("bare"), Ends::UNWINDS);
+    assert_eq!(ends("kept"), Ends::UNWINDS, "the value a declaration stores");
+    assert_eq!(ends("chained"), Ends::UNWINDS, "the value a chained assignment stores");
+    assert!(ends("soft").completes());
+    let guards = |exit: &str| {
+        let src = format!("package Foo;\nsub fail {{ return 1 }}\nsub g {{ my $x = 1; my $r; {exit} unless defined $x; return $x }}\n");
+        build_with(&src, registry_with_fail_unwinding()).guard_redundancies(None).len()
+    };
+    assert_eq!(guards("$r = fail()"), 1, "the guard's statement does not come back");
+    assert_eq!(guards("$r = 2"), 0, "a statement that comes back decides nothing past it");
+}

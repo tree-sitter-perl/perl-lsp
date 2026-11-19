@@ -4524,10 +4524,11 @@ impl ReducerRegistry {
                     }
                 }
                 // A call reached through its ref (`Expr(call) → Expression`).
-                // An expression already on the walk adds nothing a union join
-                // does not already hold: the edge back to it is the least
-                // fixed point's bottom.
-                WitnessPayload::Edge(t @ (WitnessAttachment::Expr(_) | WitnessAttachment::Expression(_))) => {
+                // Value flow (`Expr → Expr`) is not how an expression ends:
+                // the calls a statement runs are named where it is minted
+                // (gates, guard exits). One already on the walk adds nothing
+                // a union join does not hold: the least fixed point's bottom.
+                WitnessPayload::Edge(t @ WitnessAttachment::Expression(_)) => {
                     if state.ends_path.contains(&(bag as *const WitnessBag as usize, t.clone())) {
                         cycled = true;
                         continue;
