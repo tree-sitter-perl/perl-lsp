@@ -1098,6 +1098,7 @@ fn sweep_one_file(
     options: symbols::DiagnosticOptions,
     path: &CanonicalPath,
     fa: &std::sync::Arc<file_analysis::FileAnalysis>,
+    hub: bool,
 ) -> Vec<(String, tower_lsp::lsp_types::Diagnostic)> {
     let file = path.display().to_string();
     // Names the file on stderr if this one unit runs long. The sweep is
@@ -1122,7 +1123,12 @@ fn sweep_one_file(
     // subtract out as children, so diag.0's self-time IS enrichment, and a
     // large self-time here is the signal that something inside it is
     // uninstrumented.)
-    let diags = {
+    let diags = if !hub {
+        // A pack language's file is not cross-file-enriched: its
+        // diagnostics read the whole copy, as the server publishes them.
+        let whole = file_analysis::CrossFileLookup::whole_present(idx, &cached);
+        symbols::pack_diagnostics(&whole, idx, options)
+    } else {
         // The overlay's stamp and the lints share receiver resolutions.
         let _session = crate::model::witnesses::ResolutionSession::enter_with_receivers(idx);
         let _g_enrich =
@@ -1171,17 +1177,15 @@ fn for_each_enriched_diagnostic(
     // Snapshot before working: values are `Arc`s, so this is a pointer copy
     // per file, and it releases the DashMap shard guards an `iter()` would
     // otherwise hold closed to writers for the whole sweep.
-    // A pack language's files take `pack_diagnostics` instead (below) —
-    // the backend's language dispatch, on the process's one language.
+    // Which diagnostics a file takes is the backend's language dispatch, on
+    // the process's one language (`sweep_one_file`).
     let hub = language_driver::LanguageRegistry::served().caps().hub_enrichment;
     let _g_snap = crate::util::timings::PhaseGuard::start("cli::diag_snapshot");
     let mut entries: Vec<(CanonicalPath, std::sync::Arc<file_analysis::FileAnalysis>)> =
         Vec::new();
-    if hub {
-        idx.for_each_registered_file(&mut |cm| {
-            entries.push((cm.path.clone(), std::sync::Arc::clone(&cm.analysis)));
-        });
-    }
+    idx.for_each_registered_file(&mut |cm| {
+        entries.push((cm.path.clone(), std::sync::Arc::clone(&cm.analysis)));
+    });
     // Streaming survives the parallelism: workers send as each file finishes
     // and the calling thread drains, so `--check` still produces output
     // THROUGHOUT the run rather than buffering it into a final print a
@@ -1255,7 +1259,7 @@ fn for_each_enriched_diagnostic(
                 let _permit = admission_ref
                     .as_ref()
                     .map(|a| a.acquire(src_bytes.max(1)));
-                for (file, d) in sweep_one_file(idx, options, path, fa) {
+                for (file, d) in sweep_one_file(idx, options, path, fa, hub) {
                     crate::util::ghost_stats::count("diag.sent");
                     crate::util::ghost_stats::add_n(
                         "diag.bytes_sent",
@@ -1277,22 +1281,6 @@ fn for_each_enriched_diagnostic(
         "diag.peak_pending",
         peak_pending.load(std::sync::atomic::Ordering::Relaxed).max(0) as u64,
     );
-
-    // Pack-language files (C++/…) get `pack_diagnostics` (Mode B —
-    // member-op swap + peel), so `--batch diagnostics` / `--check` / gold
-    // see the same Mode-B answers the LSP publishes. No enrichment (pack
-    // files aren't cross-file-enriched).
-    if hub {
-        return;
-    }
-    idx.for_each_registered_file(&mut |cm| {
-        let file = cm.path.display().to_string();
-        // Same whole-view routing: pack index copies are evicted.
-        let whole = file_analysis::CrossFileLookup::whole_present(idx, cm);
-        for d in symbols::pack_diagnostics(&whole, idx, options) {
-            emit(&file, d);
-        }
-    });
 }
 
 /// Whole-tree diagnostics as the pretty-JSON array string (warning+; shared by
