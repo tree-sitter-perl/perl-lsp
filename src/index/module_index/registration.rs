@@ -392,7 +392,7 @@ impl ModuleIndex {
     /// there is no separate one-provider path.
     pub fn insert_cache_providers(&self, module_name: &str, providers: Option<Providers>) {
         let door = FrontDoor::of(crate::build::language_driver::LanguageRegistry::served());
-        self.core.land_providers(module_name, providers, false, false, self.core.map_generation(), door);
+        self.core.land_providers(module_name, providers, false, Default::default(), false, self.core.map_generation(), door);
     }
 
     /// The resolver thread's landing of `module_name`
@@ -642,47 +642,13 @@ impl ModuleIndex {
         self.record_surface_write(&canon, surface, SurfaceWrite::Background)
     }
 
-    /// The ONE freshness write (`canon` pre-canonicalized): applies the
-    /// `SurfaceWrite` provenance rule — a `Background` write is suppressed on
-    /// a path the OPEN-DOC lane has already recorded, because consumers read
-    /// that buffer and what they read didn't move.
-    ///
-    /// Keyed on "an open-doc write has landed", NOT on "a doc is open here".
-    /// The protection only means something once there is an open-doc baseline
-    /// to protect; before one exists the disk state is the only truth anyone
-    /// holds, and the old predicate yielded to a writer that did not exist.
-    /// An open file then had NO record at all between `didOpen` and the first
-    /// debounced refresh — so it declared no dependencies, no consumer edge
-    /// existed, and a watcher-driven wave over its provider marked nobody.
-    /// Suppression resumes the instant the first open-doc record lands, so
-    /// the case the rule exists for is untouched.
     fn record_surface_write(
         &self,
         canon: &std::path::Path,
         surface: crate::model::surface::Surface,
         write: SurfaceWrite,
     ) -> crate::model::surface::SurfaceVerdict {
-        if write == SurfaceWrite::Background
-            && self.open_doc_paths.get(canon).is_some_and(|r| *r)
-        {
-            return crate::model::surface::SurfaceVerdict::Unchanged;
-        }
-        if write == SurfaceWrite::OpenDoc {
-            if let Some(mut e) = self.open_doc_paths.get_mut(canon) {
-                *e = true;
-            }
-        }
-        let verdict = self.freshness.record(canon, surface);
-        match verdict {
-            crate::model::surface::SurfaceVerdict::FirstSeen => {
-                crate::util::ghost_stats::count("epoch.freshness.record_first_seen")
-            }
-            crate::model::surface::SurfaceVerdict::Changed => {
-                crate::util::ghost_stats::count("epoch.freshness.record_changed")
-            }
-            crate::model::surface::SurfaceVerdict::Unchanged => {}
-        }
-        verdict
+        self.core.record_surface_write(canon, surface, write)
     }
 
     /// didOpen: the open-doc path owns `path`'s surface record until
@@ -692,7 +658,7 @@ impl ModuleIndex {
         // `false`: open, but the open-doc lane has recorded nothing yet, so a
         // Background write still lands. A re-open legitimately resets this —
         // `did_close` re-recorded the disk state on the way out.
-        self.open_doc_paths.insert(canon, false);
+        self.core.open_doc_paths.insert(canon, false);
     }
 
     /// didClose: release the record to background writers and reconcile —
@@ -704,12 +670,11 @@ impl ModuleIndex {
     /// corrects it.
     pub fn mark_doc_closed(&self, path: &std::path::Path) -> Option<SurfaceDirty> {
         let canon = crate::util::canonical_path::CanonicalPath::resolve(path);
-        self.open_doc_paths.remove(canon.as_path());
-        // The front door's copy: a closed dependency's record was never the
-        // open-doc lane's to hand back.
-        if self.core.records.role_of(&canon) != Some(crate::model::file_analysis::FileRole::Workspace) {
-            return None;
-        }
+        self.core.open_doc_paths.remove(canon.as_path());
+        // Either tier's copy: a landed dependency is recorded like a project
+        // file, so an installed module opened and closed hands its record
+        // back to the disk state its row and conclusions describe.
+        self.core.records.role_of(&canon)?;
         let cm = self.core.all_files.get(&canon).map(|e| e.value().clone())?;
         let whole = crate::model::file_analysis::CrossFileLookup::whole_present(self, &cm);
         Some(self.record_and_dirty(&canon, &whole, SurfaceWrite::Background))
@@ -727,16 +692,21 @@ impl ModuleIndex {
         self.core.registration_gen.get(path).map(|g| *g).unwrap_or(0)
     }
 
+    /// The freshness index's records and heap estimate, every tier's.
+    pub fn freshness_heap_estimate(&self) -> (usize, usize) {
+        self.core.freshness.heap_estimate()
+    }
+
     /// Drop `path`'s recorded surface and its dep edges (file deleted).
     pub fn remove_surface(&self, path: &std::path::Path) {
         let canon = crate::util::canonical_path::CanonicalPath::resolve(path).into_path_buf();
         crate::util::ghost_stats::count("epoch.freshness.remove");
-        self.freshness.remove(&canon);
+        self.core.freshness.remove(&canon);
         // Belt over braces: if the caller's raw spelling was the recorded
         // key (registration itself fell back), remove that too.
         if canon != path {
             crate::util::ghost_stats::count("epoch.freshness.remove");
-            self.freshness.remove(path);
+            self.core.freshness.remove(path);
         }
     }
 
@@ -969,7 +939,7 @@ impl ModuleIndex {
     pub(super) fn enrichment_epoch(&self) -> u64 {
         self.core.gen_counter.load(std::sync::atomic::Ordering::Relaxed)
             + self.core.shape_bumps.load(std::sync::atomic::Ordering::Relaxed)
-            + self.freshness.write_count()
+            + self.core.freshness.write_count()
     }
 
     /// `enrichment_key` behind the epoch memo, optimistic-read validated.
@@ -1037,7 +1007,7 @@ impl ModuleIndex {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.registration_gen_of(&cached.path).hash(&mut h);
-        self.freshness.fingerprint_of(&cached.path).unwrap_or(0).hash(&mut h);
+        self.core.freshness.fingerprint_of(&cached.path).unwrap_or(0).hash(&mut h);
         // The file's OWN packages are bridge targets too (helpers bridged to
         // a controller's class) and are not in its dep-name closure. Read
         // the REGISTRATION names (path-keyed, survives symbol eviction; a
@@ -1060,7 +1030,7 @@ impl ModuleIndex {
             self.hash_relations_for(pkg, &mut h);
         }
         let mut seen: std::collections::HashSet<String> = Default::default();
-        let mut frontier: Vec<String> = self.freshness.deps_of_names(&cached.path);
+        let mut frontier: Vec<String> = self.core.freshness.deps_of_names(&cached.path);
         frontier.sort_unstable();
         frontier.dedup();
         // Same bound as `resolve_method_in_ancestors` — enrichment's own
@@ -1090,20 +1060,19 @@ impl ModuleIndex {
                     // fingerprint deliberately ignores, so a provider
                     // re-registration must move every consumer's key.
                     self.registration_gen_of(&cm.path).hash(&mut h);
-                    match self.freshness.fingerprint_of(&cm.path) {
+                    match self.core.freshness.fingerprint_of(&cm.path) {
                         Some(fp) => {
                             1u8.hash(&mut h);
                             fp.hash(&mut h);
-                            next.extend(self.freshness.deps_of_names(&cm.path));
+                            next.extend(self.core.freshness.deps_of_names(&cm.path));
                         }
                         None => {
                             2u8.hash(&mut h);
-                            // @INC/recordless tier: its registration
-                            // generation (minted at insert/warm by the
-                            // resolver thread + `insert_cache`) already
-                            // rode the key above — a re-resolve bumps it.
-                            // No deps_of record; its parents ride the
-                            // analysis itself.
+                            // A copy with no record (one that landed
+                            // already stripped): its registration
+                            // generation already rode the key above — a
+                            // re-landing bumps it. No deps_of record; its
+                            // parents ride the analysis itself.
                             for (_pkg, parents) in cm.analysis.package_parent_edges() {
                                 next.extend(parents.iter().cloned());
                             }
@@ -1142,7 +1111,7 @@ impl ModuleIndex {
         path: &std::path::Path,
     ) -> std::collections::HashSet<std::path::PathBuf> {
         let canon = crate::util::canonical_path::CanonicalPath::resolve(path).into_path_buf();
-        self.freshness.dirty_consumers(&canon)
+        self.core.freshness.dirty_consumers(&canon)
     }
 
     /// The pre-strip half of workspace registration: extract every declared

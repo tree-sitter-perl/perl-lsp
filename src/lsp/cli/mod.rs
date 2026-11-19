@@ -346,6 +346,11 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
     drop(_resolve_phase);
     let (landed, missed) = module_index.asked_counts();
     eprintln!("Modules: {} landed, {} missed", landed, missed);
+    if crate::util::ghost_stats::enabled() {
+        let (records, bytes) = module_index.freshness_heap_estimate();
+        crate::util::ghost_stats::count_by("freshness.records", records as u64);
+        crate::util::ghost_stats::count_by("freshness.heap_kib", (bytes / 1024) as u64);
+    }
 
     (ws, module_index)
 }

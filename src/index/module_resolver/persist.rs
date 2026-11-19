@@ -48,21 +48,26 @@ pub(super) fn residency_tripwire(tier: &str, whole: usize, expected: usize) {
     }
 }
 
-/// Persist one dependency file, path-keyed. `true` when a row that can
-/// rehydrate it is on disk — already current (the landing took it from that
-/// row) or written now. That verdict is the strip licence.
-pub(super) fn persist_dependency(conn: &rusqlite::Connection, m: &Arc<CachedModule>) -> bool {
+/// Persist one dependency file, path-keyed. The verdict is `true` when a
+/// row that can rehydrate it is on disk — already current (the landing took
+/// it from that row) or written now — and that verdict is the strip
+/// licence. The surface is the one that row describes: what the encode
+/// projected, or the row's persisted projection when it was current (a warm
+/// landing, recorded as the workspace warm lane records its stub's). `None`
+/// when neither is to hand.
+pub(super) fn persist_dependency(
+    conn: &rusqlite::Connection,
+    m: &Arc<CachedModule>,
+) -> (bool, Option<crate::model::surface::Surface>) {
     if let Some(stamp) = module_cache::file_stamp(&m.path) {
         if module_cache::dependency_row_is_current(conn, &m.path, stamp) {
-            return true;
+            let surface = crate::util::ghost_stats::timed("resolver.load_surface", || {
+                module_cache::load_surface(conn, &m.path.to_string_lossy())
+            });
+            return (true, surface);
         }
     }
-    module_cache::save_to_db(
-        conn,
-        &m.path.to_string_lossy(),
-        &Some(Arc::clone(m)),
-        module_cache::DEPENDENCY_SOURCE,
-    )
+    module_cache::save_to_db_projected(conn, &m.path.to_string_lossy(), m, module_cache::DEPENDENCY_SOURCE)
 }
 
 /// Stamp-before-read + re-stat-after-parse: capture the disk stamp, run the

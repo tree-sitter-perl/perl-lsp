@@ -3094,6 +3094,70 @@ fn a_map_move_keeps_the_rows_and_answers_from_the_new_map() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A landed dependency is recorded like every other tier's file, with the
+/// surface its row was persisted with, so the row's conclusions are vouched
+/// for: cold, from the row in the next session, and with no store at all.
+/// Opening and closing it hands the record back to the disk state, and a
+/// retired landing takes its record with it.
+#[test]
+fn a_landed_dependency_records_the_surface_its_row_describes() {
+    use crate::index::module_cache;
+    use crate::index::module_index::SurfaceWrite;
+    use crate::model::surface::{surface_fingerprint, Surface};
+    use crate::util::canonical_path::CanonicalPath;
+    let base = std::env::temp_dir().join(format!(
+        "d10b-dep-surface-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    for d in ["inc", "proj"] {
+        std::fs::create_dir_all(base.join(d)).unwrap();
+    }
+    let base = CanonicalPath::resolve(base).into_path_buf();
+    let inc = base.join("inc");
+    std::fs::write(inc.join("Dep.pm"), "package Dep;\nsub new { my $c = shift; return bless {}, $c }\nsub label { return 'x' }\n1;\n")
+        .unwrap();
+    let path = CanonicalPath::resolve(inc.join("Dep.pm"));
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    module_cache::init_schema(&conn).unwrap();
+    let land = |rows: Option<&rusqlite::Connection>| -> ModuleIndex {
+        let idx = ModuleIndex::new_for_test();
+        idx.set_search_roots_for_test(&[inc.clone()]);
+        idx.set_workspace_root(Some(&format!("file://{}", base.join("proj").display())));
+        idx.wait_idle();
+        let map = idx.dependency_map().expect("a published map");
+        let mut parser = crate::index::module_resolver::create_parser();
+        assert!(idx.land_module(rows, &map, "Dep", &mut parser).1.is_some(), "Dep lands");
+        idx
+    };
+    let recorded = |idx: &ModuleIndex| idx.core.freshness.fingerprint_of(path.as_path());
+
+    let cold = land(Some(&conn));
+    let fp = recorded(&cold).expect("a landed dependency is recorded");
+    let persisted = module_cache::load_surface(&conn, &path.to_string_lossy()).expect("the row's surface");
+    assert_eq!(fp, surface_fingerprint(&persisted), "the record is the row's projection");
+    let (_, stamp) = module_cache::load_conclusions_stamped(
+        &conn,
+        &path.to_string_lossy(),
+        module_cache::current_generation(&conn),
+    )
+    .expect("the landing baked conclusions");
+    assert_eq!(stamp.source_fingerprint, fp, "the record vouches for the row's conclusions");
+
+    assert_eq!(recorded(&land(Some(&conn))), Some(fp), "a landing from the row records what the row holds");
+    assert_eq!(recorded(&land(None)), Some(fp), "a landing with no store projects the same surface");
+
+    cold.mark_doc_open(path.as_path());
+    cold.record_and_dirty_value(path.as_path(), Surface::default(), SurfaceWrite::OpenDoc);
+    assert_ne!(recorded(&cold), Some(fp), "the open buffer owns the record");
+    assert!(cold.mark_doc_closed(path.as_path()).is_some(), "closing reconciles a dependency too");
+    assert_eq!(recorded(&cold), Some(fp), "and hands the record back to the disk state");
+
+    cold.core.retire_dependency(&path);
+    assert_eq!(recorded(&cold), None, "a retired landing leaves no record");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// A name a project file holds is the project's answer: the tier neither
 /// locates nor parses the installed twin the slot would never pick. When the
 /// project file goes, the ask reopens and the installed copy lands.

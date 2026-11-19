@@ -9,9 +9,7 @@ impl ModuleIndex {
         ModuleIndex {
             core,
             loaded_modules: Arc::new(DashMap::new()),
-            open_doc_paths: Arc::new(DashMap::new()),
             closedness: Arc::new(Default::default()),
-            freshness: Arc::new(crate::model::surface::FreshnessIndex::default()),
             enriched: Arc::new(DashMap::new()),
             enriched_order: Arc::new(std::sync::Mutex::new(Default::default())),
             gated_views: Arc::new(Default::default()),

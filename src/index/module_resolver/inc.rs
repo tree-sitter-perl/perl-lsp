@@ -72,11 +72,11 @@ pub(crate) fn land_module(
     }
     let parsed = parse_providers(module_name, located.clone(), parse, prepared, rows);
     let whole = core.tier_providers(parsed);
-    let persisted = match (rows, &whole) {
-        (Some(conn), Some(providers)) => providers.iter().all(|m| persist_dependency(conn, m)),
-        _ => false,
+    let (persisted, surfaces) = match &whole {
+        Some(providers) => persist_providers(rows, providers),
+        None => (false, Default::default()),
     };
-    let stored = core.land_providers(module_name, whole.clone(), persisted, strip, map_gen, parse.door());
+    let stored = core.land_providers(module_name, whole.clone(), persisted, surfaces, strip, map_gen, parse.door());
     core.place_members(map, module_name, &located, map_gen);
     (whole, stored)
 }
@@ -112,15 +112,32 @@ pub(crate) fn land_file(
     let Some((first, rest)) = names.split_first() else {
         return (None, None);
     };
-    let persisted = match rows {
-        Some(conn) => whole.iter().all(|m| persist_dependency(conn, m)),
-        None => false,
-    };
-    let stored = core.land_providers(first, Some(whole.clone()), persisted, strip, map_gen, parse.door());
+    let (persisted, surfaces) = persist_providers(rows, &whole);
+    let stored = core.land_providers(first, Some(whole.clone()), persisted, surfaces, strip, map_gen, parse.door());
     for name in rest {
         core.place_name(path, name, 0, map_gen);
     }
     (Some(whole), stored)
+}
+
+/// Persist each file of a landing, keeping the surface each row describes
+/// for the landing to record. The strip licence is all-or-nothing, so the
+/// first file that cannot be persisted ends the writes.
+fn persist_providers(rows: Option<&rusqlite::Connection>, providers: &Providers) -> (bool, crate::index::module_index::Surfaces) {
+    let mut surfaces = crate::index::module_index::Surfaces::new();
+    let Some(conn) = rows else {
+        return (false, surfaces);
+    };
+    for m in providers {
+        let (on_disk, surface) = persist_dependency(conn, m);
+        if let Some(s) = surface {
+            surfaces.insert(m.path.clone(), s);
+        }
+        if !on_disk {
+            return (false, surfaces);
+        }
+    }
+    (true, surfaces)
 }
 
 /// The files the map places under `module_name` that load as it, in the

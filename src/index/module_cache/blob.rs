@@ -183,6 +183,13 @@ impl EncodedAnalysis {
 /// and re-serve the degraded blob every session (H8). Refusing it here means
 /// no writer has to remember the check.
 pub fn encode_analysis(fa: &FileAnalysis) -> Option<EncodedAnalysis> {
+    encode_analysis_projected(fa).map(|(enc, _)| enc)
+}
+
+/// `encode_analysis`, handing back the surface it projected for the row's
+/// stamp and its persisted surface, for a caller that records the same
+/// projection in the freshness index rather than projecting a second time.
+pub fn encode_analysis_projected(fa: &FileAnalysis) -> Option<(EncodedAnalysis, crate::model::surface::Surface)> {
     if fa.degraded {
         return None;
     }
@@ -193,7 +200,7 @@ pub fn encode_analysis(fa: &FileAnalysis) -> Option<EncodedAnalysis> {
     enc
 }
 
-fn encode_whole(fa: &FileAnalysis) -> Option<EncodedAnalysis> {
+fn encode_whole(fa: &FileAnalysis) -> Option<(EncodedAnalysis, crate::model::surface::Surface)> {
     // Split off the bag by value: `bincode` has no field-skipping hook, so
     // the alternative is serializing a clone of the whole analysis. The bag
     // goes back before this returns, so `fa` is observably unchanged.
@@ -235,13 +242,16 @@ fn encode_whole(fa: &FileAnalysis) -> Option<EncodedAnalysis> {
     }
     let source_fingerprint = crate::model::surface::surface_fingerprint(&projected);
     let surface = encode_surface(&projected).unwrap_or_default();
-    Some(EncodedAnalysis {
-        analysis,
-        bag: bag_blob,
-        conclusions,
-        surface,
-        source_fingerprint,
-    })
+    Some((
+        EncodedAnalysis {
+            analysis,
+            bag: bag_blob,
+            conclusions,
+            surface,
+            source_fingerprint,
+        },
+        projected,
+    ))
 }
 
 
@@ -871,17 +881,29 @@ pub fn save_to_db(
     let Some(cached) = result else {
         return false;
     };
+    save_to_db_projected(conn, module_name, cached, source).0
+}
+
+/// `save_to_db` for one copy, also handing back the surface the encode
+/// projected (`None` when nothing was encoded: a bag-evicted copy, which IS
+/// the persisted generation, or one with no encoding).
+pub fn save_to_db_projected(
+    conn: &Connection,
+    module_name: &str,
+    cached: &Arc<CachedModule>,
+    source: &str,
+) -> (bool, Option<crate::model::surface::Surface>) {
     // A bag-evicted copy IS the already-persisted generation — re-encoding
     // it would overwrite the good blob with a bagless one.
     if cached.analysis.bag_is_evicted() {
-        return true;
+        return (true, None);
     }
     // No encoding (degraded, or the codec failed): the prior row stays.
-    let Some(blob) = encode_analysis(&cached.analysis) else {
-        return false;
+    let Some((blob, projected)) = encode_analysis_projected(&cached.analysis) else {
+        return (false, None);
     };
     let seeds = cached.analysis.row_seeds();
-    save_generation(
+    let saved = save_generation(
         conn,
         &PersistedGeneration {
             module_name,
@@ -893,7 +915,8 @@ pub fn save_to_db(
             stamp: file_stamp(&cached.path).unwrap_or((0, 0)),
             stub: None,
         },
-    )
+    );
+    (saved, Some(projected))
 }
 
 #[cfg(test)]

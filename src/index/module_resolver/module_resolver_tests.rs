@@ -87,11 +87,11 @@ sub new {
     let cached = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/x/Demo/Has/Event.pm")), analysis));
 
     // Workspace-index style insert: a resolved module.
-    core.land_providers("Demo::Has::Event", Some(vec![cached]), false, false, 1, FrontDoor::Hub);
+    core.land_providers("Demo::Has::Event", Some(vec![cached]), false, Default::default(), false, 1, FrontDoor::Hub);
     assert!(core.cache.get("Demo::Has::Event").as_deref().unwrap().is_some());
 
     // On-demand resolver miss: `None`. Must NOT clobber the indexed copy.
-    core.land_providers("Demo::Has::Event", None, false, false, 1, FrontDoor::Hub);
+    core.land_providers("Demo::Has::Event", None, false, Default::default(), false, 1, FrontDoor::Hub);
     assert!(
         core.cache.get("Demo::Has::Event").as_deref().unwrap().is_some(),
         "a None on-demand miss clobbered an already-indexed module",
@@ -102,7 +102,7 @@ sub new {
     let tree2 = parser.parse(source, None).unwrap();
     let analysis2 = std::sync::Arc::new(crate::build::builder::build(&tree2, source.as_bytes()));
     let cached2 = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/y/Demo/Has/Event.pm")), analysis2));
-    core.land_providers("Demo::Has::Event", Some(vec![cached2]), false, false, 1, FrontDoor::Hub);
+    core.land_providers("Demo::Has::Event", Some(vec![cached2]), false, Default::default(), false, 1, FrontDoor::Hub);
     assert_eq!(
         core.cache.get("Demo::Has::Event").as_deref().unwrap().as_ref().unwrap().path,
         crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/y/Demo/Has/Event.pm")),

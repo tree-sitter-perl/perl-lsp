@@ -209,7 +209,7 @@ mod parts;
 pub use parts::*;
 
 mod index_core;
-pub(crate) use index_core::{FrontDoor, IndexCore, Outcome};
+pub(crate) use index_core::{FrontDoor, IndexCore, Outcome, Surfaces};
 #[cfg(test)]
 pub(crate) use index_core::{load_kept_map, read_and_keep};
 #[cfg(test)]
@@ -250,27 +250,11 @@ pub struct ModuleIndex {
     /// forgot to load); installed CPAN plugins keep the generous
     /// "downloaded = intended" resolution.
     workspace_modules: Arc<DashMap<String, ()>>,
-    /// Canonical paths of currently-open docs whose surface record the
-    /// open-doc path owns (`SurfaceWrite` — background writes yield).
-    /// Marked by the backend on didOpen, cleared + reconciled on didClose.
-    /// Perl hub only today: pack languages have no open-doc surface
-    /// recorder yet, so guarding their background writes would freeze
-    /// records staleward.
-    /// Open documents, and whether the OPEN-DOC lane has actually recorded a
-    /// surface for each yet. The flag is what `Background` suppression tests:
-    /// yielding to "a doc is open here" yields to a writer that may not exist.
-    open_doc_paths: Arc<DashMap<std::path::PathBuf, bool>>,
     /// Closedness certificates, byte-bounded (`docs/prompt-enrichment-
     /// alternatives.md` §6j). Derived state that decides nothing on its own:
     /// every hit is validated against the live index before it is trusted, so
     /// a stale entry costs a failed validation and a decode.
     closedness: Arc<crate::index::closedness_store::ClosednessStore>,
-    /// The freshness engine (`docs/adr/storage-engine.md`):
-    /// per-file span-free surface records + the reverse-dependency index.
-    /// Fed at registration (whole copy, pre-strip) and on open-doc
-    /// rebuilds; `dirty_consumers` names who must re-enrich after a
-    /// surface CHANGE, and an Unchanged verdict is the early-cutoff.
-    freshness: Arc<crate::model::surface::FreshnessIndex>,
     /// The enrichment overlay (R4): derived enriched copies keyed by the
     /// surface fingerprints of the file + its providers. Bounded FIFO —
     /// `enriched_order` is the eviction queue.

@@ -621,7 +621,7 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn surface_fingerprint_of(&self, path: &std::path::Path) -> Option<u64> {
-        self.freshness.fingerprint_of(path)
+        self.core.freshness.fingerprint_of(path)
     }
 
     fn closedness_certificate(
@@ -672,7 +672,7 @@ impl CrossFileLookup for ModuleIndex {
         // No freshness record means absent, not valid: a path the index has
         // never recorded is one we cannot vouch for, and the fail-open
         // direction here is "decode", never "trust".
-        match self.freshness.fingerprint_of(path) {
+        match self.core.freshness.fingerprint_of(path) {
             Some(fp) if fp == stamp.source_fingerprint => {
                 // The fingerprint is the WHOLE decision, generation included.
                 // A flush can publish a round while this walk is in flight,

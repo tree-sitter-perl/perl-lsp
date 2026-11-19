@@ -9,6 +9,11 @@
 
 use super::*;
 
+/// The surface each file of a landing was persisted with, by path: the
+/// projection its row's stamp and conclusions were made from, so the record
+/// and the row agree by construction.
+pub(crate) type Surfaces = std::collections::HashMap<crate::util::canonical_path::CanonicalPath, crate::model::surface::Surface>;
+
 /// What an ask came to at its generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
@@ -179,6 +184,22 @@ pub(crate) struct IndexCore {
     /// cache; absent on an index with no store, which simply keeps decoding.
     pub(crate) conclusion_cache:
         Arc<std::sync::RwLock<Option<Arc<crate::index::conclusion_cache::ConclusionCache>>>>,
+    /// The freshness engine (`docs/adr/storage-engine.md`): per-file
+    /// span-free surface records + the reverse-dependency index. Every tier
+    /// records here, on the whole analysis before its strip: the front doors
+    /// at registration, the resolver thread at each dependency landing, the
+    /// open-doc lane on rebuilds. `dirty_consumers` names who must re-enrich
+    /// after a surface CHANGE, and an Unchanged verdict is the early-cutoff.
+    /// It is the core's because the resolver thread lands dependencies, and
+    /// a conclusions row or a closedness certificate is vouched for only by
+    /// a record.
+    pub(crate) freshness: crate::model::surface::FreshnessIndex,
+    /// Open documents, and whether the OPEN-DOC lane has actually recorded a
+    /// surface for each yet (`SurfaceWrite` — background writes yield). The
+    /// flag is what `Background` suppression tests: yielding to "a doc is
+    /// open here" yields to a writer that may not exist. Marked by the
+    /// backend on didOpen, cleared + reconciled on didClose.
+    pub(crate) open_doc_paths: DashMap<std::path::PathBuf, bool>,
 }
 
 impl IndexCore {
@@ -235,6 +256,8 @@ impl IndexCore {
             long_lived: std::sync::atomic::AtomicBool::new(false),
             bag_cache: std::sync::RwLock::new(None),
             conclusion_cache: Arc::new(std::sync::RwLock::new(None)),
+            freshness: Default::default(),
+            open_doc_paths: DashMap::new(),
         }
     }
 
@@ -496,6 +519,7 @@ impl IndexCore {
         module_name: &str,
         result: Option<Providers>,
         persisted: bool,
+        mut surfaces: Surfaces,
         strip: bool,
         map_gen: u64,
         door: FrontDoor,
@@ -514,6 +538,7 @@ impl IndexCore {
                 bc.invalidate(&m.path);
             }
             self.mint_registration_gen(&m.path);
+            self.record_landed_surface(m, surfaces.remove(&m.path));
             match door {
                 FrontDoor::Hub => {
                     self.edges.feed(module_name, &m.path, &m.analysis);
@@ -546,6 +571,26 @@ impl IndexCore {
             self.set_slot(module_name, stored.first().cloned());
         }
         Some(stored)
+    }
+
+    /// Record a landed file's surface, as every tier records its files: the
+    /// one its row describes when the persist handed one over, else
+    /// projected from the whole copy (a landing with no store). A copy
+    /// already stripped has nothing whole to project, so it is not recorded
+    /// rather than recorded wrong.
+    fn record_landed_surface(&self, m: &Arc<CachedModule>, persisted: Option<crate::model::surface::Surface>) {
+        let surface = match persisted {
+            Some(s) => s,
+            None if !m.analysis.bag_is_evicted() => {
+                crate::util::ghost_stats::count("dependency.surface_projected");
+                crate::model::surface::Surface::project(&m.analysis)
+            }
+            None => {
+                crate::util::ghost_stats::count("dependency.surface_unrecorded");
+                return;
+            }
+        };
+        self.record_surface_write(m.path.as_path(), surface, SurfaceWrite::Background);
     }
 
     /// A pack file's edges: its specializations (`specs`, `(spec, primary)`
@@ -640,6 +685,49 @@ impl IndexCore {
         }
     }
 
+    /// The ONE freshness write (`canon` pre-canonicalized): applies the
+    /// `SurfaceWrite` provenance rule — a `Background` write is suppressed on
+    /// a path the OPEN-DOC lane has already recorded, because consumers read
+    /// that buffer and what they read didn't move.
+    ///
+    /// Keyed on "an open-doc write has landed", NOT on "a doc is open here".
+    /// The protection only means something once there is an open-doc baseline
+    /// to protect; before one exists the disk state is the only truth anyone
+    /// holds, and the old predicate yielded to a writer that did not exist.
+    /// An open file then had NO record at all between `didOpen` and the first
+    /// debounced refresh — so it declared no dependencies, no consumer edge
+    /// existed, and a watcher-driven wave over its provider marked nobody.
+    /// Suppression resumes the instant the first open-doc record lands, so
+    /// the case the rule exists for is untouched.
+    pub(crate) fn record_surface_write(
+        &self,
+        canon: &std::path::Path,
+        surface: crate::model::surface::Surface,
+        write: SurfaceWrite,
+    ) -> crate::model::surface::SurfaceVerdict {
+        if write == SurfaceWrite::Background
+            && self.open_doc_paths.get(canon).is_some_and(|r| *r)
+        {
+            return crate::model::surface::SurfaceVerdict::Unchanged;
+        }
+        if write == SurfaceWrite::OpenDoc {
+            if let Some(mut e) = self.open_doc_paths.get_mut(canon) {
+                *e = true;
+            }
+        }
+        let verdict = self.freshness.record(canon, surface);
+        match verdict {
+            crate::model::surface::SurfaceVerdict::FirstSeen => {
+                crate::util::ghost_stats::count("epoch.freshness.record_first_seen")
+            }
+            crate::model::surface::SurfaceVerdict::Changed => {
+                crate::util::ghost_stats::count("epoch.freshness.record_changed")
+            }
+            crate::model::surface::SurfaceVerdict::Unchanged => {}
+        }
+        verdict
+    }
+
     /// Undo a dependency landing of `path`: its record and path home, its
     /// candidacy under every name the map placed it, those names' edge feeds
     /// (re-fed from the survivors) and slots (re-derived). A workspace file
@@ -655,6 +743,8 @@ impl IndexCore {
             self.drop_candidate(&p.name, path);
         }
         self.edges.remove_path_record(path);
+        crate::util::ghost_stats::count("epoch.freshness.remove");
+        self.freshness.remove(path.as_path());
         if let Some(bc) = self.bag_cache.read().ok().and_then(|g| g.clone()) {
             bc.invalidate(path);
         }
