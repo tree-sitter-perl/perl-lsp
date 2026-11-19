@@ -481,11 +481,10 @@ impl PackInvalidator {
             results.push((canon.clone(), fa));
         }
         // Persist FIRST so a stripped copy always has a blob to rehydrate
-        // from, then register. The fork is `run_persist_writer`'s: it owns
-        // BEGIN IMMEDIATE / COMMIT / ROLLBACK and routes every entry to the
-        // committed or the fallback lane. The strip licence is a LANDED blob
-        // for that path — `save_to_db`'s verdict, under a transaction that
-        // committed — and exactly one thing gets to decide it.
+        // from, then register. `run_persist_writer` owns BEGIN IMMEDIATE /
+        // COMMIT / ROLLBACK; the strip licence is a LANDED blob for that
+        // path — `save_to_db`'s verdict, under a transaction that committed
+        // — and exactly one thing gets to decide it.
         let conn = module_cache::open_cache_db(root_uri, lang);
         if let Some(ref conn) = conn {
             if deleted {
@@ -525,13 +524,11 @@ impl PackInvalidator {
                         let cached = Arc::new(CachedModule::new(p.clone(), Arc::clone(arc)));
                         module_cache::save_to_db(conn, &p.to_string_lossy(), &Some(cached), "workspace")
                     },
-                    |(p, arc): (CanonicalPath, Arc<FileAnalysis>)| {
-                        self.register_after_swap(pack, &p, &arc, true, event_gen);
+                    |(p, arc): (CanonicalPath, Arc<FileAnalysis>), landed| {
+                        self.register_after_swap(pack, &p, &arc, landed, event_gen);
                     },
-                    |(p, arc): (CanonicalPath, Arc<FileAnalysis>)| {
-                        self.register_after_swap(pack, &p, &arc, false, event_gen);
-                    },
-                );
+                )
+                .unwrap_or_else(|failure| failure.exit());
             }
             // No cache DB at all: nothing can land, so nothing may be
             // stripped. (`run_persist_writer`'s own no-connection arm drains

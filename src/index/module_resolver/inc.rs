@@ -122,14 +122,15 @@ pub(crate) fn land_file(
 
 /// Persist each file of a landing, keeping the surface each row describes
 /// for the landing to record. The strip licence is all-or-nothing, so the
-/// first file that cannot be persisted ends the writes.
+/// first file with nothing to persist ends the writes; a write the store
+/// refuses ends the process (`PersistFailure`).
 fn persist_providers(rows: Option<&rusqlite::Connection>, providers: &Providers) -> (bool, crate::index::module_index::Surfaces) {
     let mut surfaces = crate::index::module_index::Surfaces::new();
     let Some(conn) = rows else {
         return (false, surfaces);
     };
     for m in providers {
-        let (on_disk, surface) = persist_dependency(conn, m);
+        let (on_disk, surface) = persist_dependency(conn, m).unwrap_or_else(|failure| failure.exit());
         if let Some(s) = surface {
             surfaces.insert(m.path.clone(), s);
         }

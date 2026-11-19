@@ -32,7 +32,7 @@ fn load_one_rehydrates_full_bag() {
     let cached = parse_source_to_cached(&source, &pm);
     // Sanity: the freshly built analysis has a populated bag.
     assert!(!cached.analysis.witnesses.is_empty());
-    save_to_db(&conn, &pm.to_string_lossy(), &Some(cached.clone()), "workspace");
+    save_to_db(&conn, &pm.to_string_lossy(), &Some(cached.clone()), "workspace").unwrap();
 
     let loaded = load_one(&conn, &pm.to_string_lossy()).expect("row should decode");
     assert!(!loaded.bag_is_evicted());
@@ -56,7 +56,7 @@ fn dep_fixture(stem: &str, source: &str) -> Arc<CachedModule> {
 }
 
 fn save_dep(conn: &Connection, cached: &Arc<CachedModule>) -> bool {
-    save_to_db(conn, &cached.path.to_string_lossy(), &Some(Arc::clone(cached)), DEPENDENCY_SOURCE)
+    save_to_db(conn, &cached.path.to_string_lossy(), &Some(Arc::clone(cached)), DEPENDENCY_SOURCE).unwrap()
 }
 
 #[test]
@@ -94,7 +94,7 @@ fn dependency_rows_are_path_keyed_and_tier_scoped() {
     assert_eq!(key, dep.path.to_string_lossy(), "the row's key is the file's path");
 
     let ws = dep_fixture("WsRowsByPath", "package WsRowsByPath;\nsub g { 2 }\n1;\n");
-    save_to_db(&conn, &ws.path.to_string_lossy(), &Some(Arc::clone(&ws)), "workspace");
+    save_to_db(&conn, &ws.path.to_string_lossy(), &Some(Arc::clone(&ws)), "workspace").unwrap();
     assert!(
         load_dependency_row(&conn, &ws.path).is_none(),
         "a workspace row is the walk's, never a dependency landing's"
@@ -108,7 +108,7 @@ fn dependency_rows_are_path_keyed_and_tier_scoped() {
 #[test]
 fn a_miss_writes_no_row() {
     let conn = test_db();
-    assert!(!save_to_db(&conn, "Nonexistent::Module", &None, DEPENDENCY_SOURCE));
+    assert!(!save_to_db(&conn, "Nonexistent::Module", &None, DEPENDENCY_SOURCE).unwrap());
     let rows: i64 = conn.query_row("SELECT COUNT(*) FROM modules", [], |r| r.get(0)).unwrap();
     assert_eq!(rows, 0);
 }
@@ -269,7 +269,7 @@ fn gc_takes_only_the_dependency_rows_no_landing_can_take() {
     for m in [&kept, &changed, &gone] {
         assert!(save_dep(&conn, m));
     }
-    save_to_db(&conn, &ws.path.to_string_lossy(), &Some(Arc::clone(&ws)), "workspace");
+    save_to_db(&conn, &ws.path.to_string_lossy(), &Some(Arc::clone(&ws)), "workspace").unwrap();
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('dependency_map', 'x')", []).unwrap();
 
     std::fs::write(&changed.path, "package GcChanged;\nsub grown { 1 }\n1;\n").unwrap();
@@ -321,7 +321,7 @@ fn test_db_source_column() {
 
     let source = std::fs::read_to_string(&pm).unwrap();
     let cached = Some(parse_source_to_cached(&source, &pm));
-    save_to_db(&conn, "SourceTest", &cached, "cpanfile");
+    save_to_db(&conn, "SourceTest", &cached, "cpanfile").unwrap();
 
     let source_val: String = conn
         .query_row(
@@ -399,7 +399,7 @@ fn same_second_same_size_rewrite_invalidates_row() {
         let s1 = std::fs::metadata(&pm).unwrap().modified().unwrap();
         let source = std::fs::read_to_string(&pm).unwrap();
         let cached = Some(parse_source_to_cached(&source, &pm));
-        save_to_db(&conn, &pm.to_string_lossy(), &cached, DEPENDENCY_SOURCE);
+        save_to_db(&conn, &pm.to_string_lossy(), &cached, DEPENDENCY_SOURCE).unwrap();
         // Same byte length, different content.
         std::fs::write(&pm, "package SubSecond;\nsub b { 2 }\n1;\n").unwrap();
         let s2 = std::fs::metadata(&pm).unwrap().modified().unwrap();
@@ -473,7 +473,7 @@ fn degraded_analysis_is_not_persisted() {
     let mut fa = crate::build::builder::build(&tree, source.as_bytes());
     fa.degraded = true;
     let cached = Some(Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::resolve(pm.clone()), Arc::new(fa))));
-    save_to_db(&conn, "Degraded", &cached, "workspace");
+    save_to_db(&conn, "Degraded", &cached, "workspace").unwrap();
 
     let rows: i64 = conn
         .query_row("SELECT COUNT(*) FROM modules", [], |r| r.get(0))
@@ -1125,7 +1125,7 @@ fn warm_stub_roundtrip_and_lane_selection() {
     assert!(stub.skeleton.symbols_are_evicted() && stub.skeleton.refs_are_evicted());
 
     // Persist the modules row (deletes any stub for the path), then the stub.
-    save_to_db(&conn, &path_str, &Some(cached.clone()), "workspace");
+    save_to_db(&conn, &path_str, &Some(cached.clone()), "workspace").unwrap();
     validate_stub_version(&conn);
     save_stub(&conn, &path_str, &blob);
 
@@ -1165,7 +1165,7 @@ fn warm_stub_roundtrip_and_lane_selection() {
     assert_eq!((stubs, fulls), (0, 1));
 
     // A rewritten modules row must orphan the stub (stale-skeleton guard).
-    save_to_db(&conn, &path_str, &Some(cached), "workspace");
+    save_to_db(&conn, &path_str, &Some(cached), "workspace").unwrap();
     assert_eq!(run(&conn, true), (0, 1));
 
     // Stale file stamp: neither lane serves.
@@ -1236,7 +1236,8 @@ fn refresh_deps_stamp_revalidates_consumer_rows() {
             stamp,
             stub: None,
         },
-    ));
+    )
+    .is_ok());
     let stored: i64 = conn
         .query_row("SELECT deps_stamp FROM modules WHERE path=?1", params![consumer_str], |r| r.get(0))
         .unwrap();
@@ -1289,7 +1290,7 @@ fn readonly_open_failure_recovers_through_read_write() {
         let w = Connection::open(&db).unwrap();
         w.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
         init_schema(&w).unwrap();
-        save_to_db(&w, &pm_str, &Some(cached.clone()), "workspace");
+        save_to_db(&w, &pm_str, &Some(cached.clone()), "workspace").unwrap();
     }
 
     // Read-only "open failed", RW open works → recovered, full bag present.
@@ -1350,7 +1351,7 @@ fn load_one_diag_discriminates_failures() {
     std::fs::write(&pm, "package D;\nsub f { 1 }\n1;\n").unwrap();
     let cached = parse_source_to_cached(&std::fs::read_to_string(&pm).unwrap(), &pm);
     let pm_str = pm.to_string_lossy().into_owned();
-    save_to_db(&conn, &pm_str, &Some(cached), "workspace");
+    save_to_db(&conn, &pm_str, &Some(cached), "workspace").unwrap();
     assert!(load_one_diag(&conn, &pm_str, true).is_ok());
     assert!(matches!(
         load_one_diag(&conn, "/absent.pm", true).unwrap_err(),
@@ -1780,7 +1781,7 @@ fn rows_only_read_is_marked_evicted_not_empty() {
     );
     let n = cached.analysis.witnesses.len();
     let pm_str = pm.to_string_lossy().into_owned();
-    save_to_db(&conn, &pm_str, &Some(cached), "workspace");
+    save_to_db(&conn, &pm_str, &Some(cached), "workspace").unwrap();
 
     let rows = load_one_diag(&conn, &pm_str, false).expect("rows-only read");
     assert!(
@@ -2053,7 +2054,7 @@ fn persisting_an_analysis_persists_its_conclusions() {
     .unwrap();
     let cached = parse_source_to_cached(&std::fs::read_to_string(&pm).unwrap(), &pm);
     let pm_str = pm.to_string_lossy().into_owned();
-    save_to_db(&conn, &pm_str, &Some(cached), "workspace");
+    save_to_db(&conn, &pm_str, &Some(cached), "workspace").unwrap();
 
     let map = load_conclusions(&conn, &pm_str, current_generation(&conn)).expect(
         "the writer persisted a blob but no conclusions — the store answers \
@@ -2087,7 +2088,7 @@ fn a_derivation_change_clears_conclusions_but_keeps_blobs() {
     std::fs::write(&pm, "package CF;\nsub f { return 'x' }\n1;\n").unwrap();
     let cached = parse_source_to_cached(&std::fs::read_to_string(&pm).unwrap(), &pm);
     let pm_str = pm.to_string_lossy().into_owned();
-    save_to_db(&conn, &pm_str, &Some(cached), "workspace");
+    save_to_db(&conn, &pm_str, &Some(cached), "workspace").unwrap();
     assert!(load_conclusions(&conn, &pm_str, current_generation(&conn)).is_some());
 
     validate_conclusion_fingerprint(&conn, "a-different-derivation").unwrap();
@@ -2132,7 +2133,7 @@ fn a_cleared_conclusion_row_is_re_baked_to_the_same_map() {
         path,
     );
     let some = Some(cached.clone());
-    assert!(save_to_db(&conn, "My::App", &some, "workspace"));
+    assert!(save_to_db(&conn, "My::App", &some, "workspace").unwrap());
 
     let at = current_generation(&conn);
     let persisted = load_conclusions(&conn, "/repair/App.pm", at)
@@ -2204,7 +2205,7 @@ fn invalidating_a_generation_drops_the_bake_that_came_with_it() {
     let source = std::fs::read_to_string(&pm).unwrap();
     let path_str = pm.to_string_lossy().into_owned();
     let cached = parse_source_to_cached(&source, &pm);
-    assert!(save_to_db(&conn, &path_str, &Some(cached), "workspace"));
+    assert!(save_to_db(&conn, &path_str, &Some(cached), "workspace").unwrap());
 
     let at = current_generation(&conn);
     assert!(
@@ -2251,7 +2252,7 @@ fn the_persisted_surface_is_the_cold_projection() {
     let whole_fp = crate::model::surface::surface_fingerprint(
         &crate::model::surface::Surface::project(&cached.analysis),
     );
-    assert!(save_to_db(&conn, "My::App", &Some(cached.clone()), "workspace"));
+    assert!(save_to_db(&conn, "My::App", &Some(cached.clone()), "workspace").unwrap());
 
     let stored = load_surface(&conn, "/surf/App.pm").expect("the persist path stores a surface");
     assert_eq!(
@@ -2290,7 +2291,7 @@ fn a_surface_from_another_projection_version_reads_absent_and_is_repaired() {
          plugin 'GenericCoApp', { alpha => 1 };\nsub helper { return 'x' }\n1;\n",
         path,
     );
-    assert!(save_to_db(&conn, "Ver::App", &Some(cached.clone()), "workspace"));
+    assert!(save_to_db(&conn, "Ver::App", &Some(cached.clone()), "workspace").unwrap());
     let at = current_generation(&conn);
     assert!(load_surface(&conn, "/surfver/App.pm").is_some(), "precondition");
     assert!(
@@ -2352,7 +2353,7 @@ fn a_surface_write_that_stores_nothing_leaves_no_stale_row() {
     let path = std::path::Path::new("/surfstale/App.pm");
 
     let before = parse_source_to_cached("package My::App;\nsub alpha { 1 }\n1;\n", path);
-    assert!(save_to_db(&conn, "My::App", &Some(before), "workspace"));
+    assert!(save_to_db(&conn, "My::App", &Some(before), "workspace").unwrap());
     assert!(
         load_surface(&conn, "/surfstale/App.pm").is_some(),
         "precondition: the first persist stored a surface"
@@ -2395,7 +2396,7 @@ fn a_surface_does_not_outlive_its_blob() {
          plugin 'GenericCoApp', { alpha => 1 };\nsub helper { return 'x' }\n1;\n",
         path,
     );
-    assert!(save_to_db(&conn, "Erase::App", &Some(cached.clone()), "workspace"));
+    assert!(save_to_db(&conn, "Erase::App", &Some(cached.clone()), "workspace").unwrap());
     assert!(load_surface(&conn, "/erase/App.pm").is_some(), "precondition");
 
     // Per-path: the blob goes, so the projection of it must go too.
@@ -2408,7 +2409,7 @@ fn a_surface_does_not_outlive_its_blob() {
     );
 
     // Hard clear: same rule, the other door.
-    assert!(save_to_db(&conn, "Erase::App", &Some(cached.clone()), "workspace"));
+    assert!(save_to_db(&conn, "Erase::App", &Some(cached.clone()), "workspace").unwrap());
     assert!(load_surface(&conn, "/erase/App.pm").is_some(), "precondition");
     conn.execute("DELETE FROM modules", []).unwrap();
     clear_derived_rows(&conn).unwrap();
@@ -2638,7 +2639,7 @@ fn a_half_saved_generation_leaves_the_previous_one_intact() {
             .unwrap()
     };
 
-    assert!(save("package Half;\nsub alpha { 1 }\nalpha();\n1;\n"));
+    assert!(save("package Half;\nsub alpha { 1 }\nalpha();\n1;\n").unwrap());
     let before = blob();
     assert_eq!(ref_candidate_files(&conn, &["alpha".to_string()]), vec![path_str.clone()]);
 
@@ -2646,7 +2647,7 @@ fn a_half_saved_generation_leaves_the_previous_one_intact() {
         "CREATE TRIGGER kill_refs BEFORE INSERT ON refs BEGIN SELECT RAISE(ABORT, 'injected'); END;",
     )
     .unwrap();
-    assert!(!save("package Half;\nsub beta { 1 }\nbeta();\n1;\n"), "the failed rows must fail the save");
+    assert!(save("package Half;\nsub beta { 1 }\nbeta();\n1;\n").is_err(), "the failed rows must fail the save");
 
     assert_eq!(blob(), before, "the new blob landed beside rows that did not");
     assert_eq!(

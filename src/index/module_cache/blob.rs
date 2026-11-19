@@ -758,12 +758,53 @@ pub struct PersistedGeneration<'a> {
     pub stub: Option<&'a [u8]>,
 }
 
-/// Persist one generation as a unit. `true` only when the blob and its rows
-/// both landed: that verdict is the strip licence. On any failure the whole
-/// savepoint rolls back, so the PREVIOUS generation stays intact instead of
-/// a new blob sitting beside partial rows that the `files` marker claims are
+/// Exit status of a process whose store refused a write (sysexits' EX_IOERR).
+pub const EXIT_PERSIST_FAILURE: i32 = 74;
+
+/// A write the derived store refused. Fatal by design: a copy is stripped
+/// only against a generation that landed, so every way of carrying on after
+/// a refusal either pins the copies whole without bound or drops answers
+/// without saying so, and a full disk refuses the next write as well. The
+/// caller that meets one ends the process with [`PersistFailure::exit`].
+#[derive(Debug)]
+pub struct PersistFailure {
+    store: String,
+    error: String,
+}
+
+impl PersistFailure {
+    pub fn new(conn: &Connection, error: impl std::fmt::Display) -> Self {
+        PersistFailure { store: conn.path().unwrap_or_default().to_string(), error: error.to_string() }
+    }
+
+    /// Say what failed and leave with [`EXIT_PERSIST_FAILURE`]. The first
+    /// caller wins: a second writer meeting the same full disk waits here
+    /// for the exit instead of saying it again.
+    pub fn exit(self) -> ! {
+        static EXITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _held = EXITING.lock().unwrap_or_else(|e| e.into_inner());
+        eprintln!("perl-lsp: {self}");
+        crate::util::ghost_stats::exit_flushed(EXIT_PERSIST_FAILURE, "persist-failure")
+    }
+}
+
+impl std::fmt::Display for PersistFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "cannot write the cache store {}: {}. If its disk is full, free space; otherwise clear the \
+             store with `perl-lsp --clear-cache <project root>`. Then start perl-lsp again.",
+            self.store, self.error
+        )
+    }
+}
+
+/// Persist one generation as a unit: `Ok` when the blob and its rows both
+/// landed, which is the strip licence. On a failure the whole savepoint
+/// rolls back, so the PREVIOUS generation stays intact instead of a new
+/// blob sitting beside partial rows that the `files` marker claims are
 /// complete.
-pub fn save_generation(conn: &Connection, g: &PersistedGeneration<'_>) -> bool {
+pub fn save_generation(conn: &Connection, g: &PersistedGeneration<'_>) -> Result<(), PersistFailure> {
     let path_str = g.path.to_string_lossy();
     let r = in_savepoint(conn, || {
         let deps = closure_stamp(g.include_closure, &mut std::collections::HashMap::new());
@@ -793,13 +834,7 @@ pub fn save_generation(conn: &Connection, g: &PersistedGeneration<'_>) -> bool {
         }
         Ok(())
     });
-    match r {
-        Ok(()) => true,
-        Err(e) => {
-            log::error!("Failed to persist '{}' ({path_str}): {e}", g.module_name);
-            false
-        }
-    }
+    r.map_err(|e| PersistFailure::new(conn, format_args!("persisting {path_str}: {e}")))
 }
 
 /// Write the baked map beside the blob it was derived from.
@@ -909,11 +944,11 @@ pub fn save_to_db(
     module_name: &str,
     result: &Option<Arc<CachedModule>>,
     source: &str,
-) -> bool {
+) -> Result<bool, PersistFailure> {
     let Some(cached) = result else {
-        return false;
+        return Ok(false);
     };
-    save_to_db_projected(conn, module_name, cached, source).0
+    Ok(save_to_db_projected(conn, module_name, cached, source)?.0)
 }
 
 /// `save_to_db` for one copy, also handing back the surface the encode
@@ -924,18 +959,18 @@ pub fn save_to_db_projected(
     module_name: &str,
     cached: &Arc<CachedModule>,
     source: &str,
-) -> (bool, Option<crate::model::surface::Surface>) {
+) -> Result<(bool, Option<crate::model::surface::Surface>), PersistFailure> {
     // A bag-evicted copy IS the already-persisted generation — re-encoding
     // it would overwrite the good blob with a bagless one.
     if cached.analysis.bag_is_evicted() {
-        return (true, None);
+        return Ok((true, None));
     }
     // No encoding (degraded, or the codec failed): the prior row stays.
     let Some((blob, projected)) = encode_analysis_projected(&cached.analysis) else {
-        return (false, None);
+        return Ok((false, None));
     };
     let seeds = cached.analysis.row_seeds();
-    let saved = save_generation(
+    save_generation(
         conn,
         &PersistedGeneration {
             module_name,
@@ -947,8 +982,8 @@ pub fn save_to_db_projected(
             stamp: file_stamp(&cached.path).unwrap_or((0, 0)),
             stub: None,
         },
-    );
-    (saved, Some(projected))
+    )?;
+    Ok((true, Some(projected)))
 }
 
 #[cfg(test)]

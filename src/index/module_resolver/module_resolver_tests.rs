@@ -581,7 +581,10 @@ fn the_writer_drains_more_entries_than_the_queue_holds() {
     // No connection: the harness drains unregistered, which is enough to
     // prove the producer/consumer pairing. The committed lane is exercised by
     // the persist-lane tests in `pack_invalidator_tests`.
-    run_persist_writer(rx, None, "test", |_c| (), |_c, (), _e: &usize| true, |_e| { c.fetch_add(1, O::SeqCst); }, |_e| {});
+    run_persist_writer(rx, None, "test", |_c| (), |_c, (), _e: &usize| Ok(true), |_e, _| {
+        c.fetch_add(1, O::SeqCst);
+    })
+    .unwrap();
     producer.join().unwrap();
     assert_eq!(committed.load(O::SeqCst), 0, "no connection ⇒ drained unregistered");
 }
@@ -659,53 +662,55 @@ fn a_bulk_index_marks_the_consumers_of_what_changed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A file whose own blob fails to save inside a chunk that still commits
-/// must stay WHOLE: a copy stripped against a blob that is not on disk
-/// answers empty. Its chunk siblings landed and must strip. The failure is
-/// injected with a statement-scoped `RAISE(ABORT)` trigger, so the
-/// transaction commits with the siblings' rows.
+/// A store that refuses a write ends the writer with a `PersistFailure`
+/// naming the store and the error, and no entry of the refused chunk
+/// reaches registration: the caller exits rather than strip a copy whose
+/// generation never landed, or keep it whole without bound. The refusal is
+/// statement-scoped (`RAISE(ABORT)`) and hits the chunk's second entry, so
+/// the first entry's write succeeded inside a transaction that must still
+/// roll back.
 #[test]
-fn a_workspace_file_whose_save_failed_in_a_committed_chunk_stays_whole() {
-    let base = std::env::temp_dir().join(format!("ws-perfile-strip-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    let (root, cache) = (base.join("root"), base.join("cache"));
-    std::fs::create_dir_all(&root).unwrap();
-    for name in ["Alpha", "Beta", "Gamma"] {
-        std::fs::write(
-            root.join(format!("{name}.pm")),
-            format!("package {name};\nsub run {{ my $self = shift; return {{ k => 1 }}; }}\n1;\n"),
-        )
-        .unwrap();
+fn a_store_that_refuses_a_write_ends_the_writer_with_its_failure() {
+    let dir = std::env::temp_dir().join(format!("refusing-store-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("store.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE t (n INTEGER);
+         CREATE TRIGGER refuse BEFORE INSERT ON t WHEN NEW.n = 1
+         BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;",
+    )
+    .unwrap();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    for n in 0..3 {
+        tx.send(n).unwrap();
     }
-    let failing = std::fs::canonicalize(root.join("Beta.pm")).unwrap();
+    drop(tx);
+    let mut registered = Vec::new();
+    let failure = run_persist_writer(
+        rx,
+        Some(&conn),
+        "test writer",
+        |_c| (),
+        |c, (), n: &i64| {
+            c.execute("INSERT INTO t (n) VALUES (?1)", [n])
+                .map(|_| true)
+                .map_err(|e| module_cache::PersistFailure::new(c, e))
+        },
+        |n, _| registered.push(n),
+    )
+    .expect_err("a refused write is the writer's failure");
 
-    let idx = crate::index::module_index::ModuleIndex::new_for_test();
-    crate::index::module_cache::with_test_cache_dir(&cache, std::time::Duration::from_secs(10), || {
-        {
-            let conn = crate::index::module_cache::open_cache_db(None, "perl").expect("test cache db");
-            let target = failing.to_string_lossy().replace('\'', "''");
-            conn.execute_batch(&format!(
-                "CREATE TRIGGER kill_one BEFORE INSERT ON modules \
-                 WHEN NEW.path = '{target}' \
-                 BEGIN SELECT RAISE(ABORT, 'injected'); END;"
-            ))
-            .unwrap();
-        }
-        index_workspace_with_index(&root, &idx, None, None);
-    });
-
-    let mut seen = 0;
-    idx.for_each_registered_file(&mut |cm| {
-        seen += 1;
-        let stripped = cm.analysis.symbols_are_evicted() || cm.analysis.bag_is_evicted();
-        if cm.path.as_path() == failing.as_path() {
-            assert!(!stripped, "{:?} was stripped though its blob never landed", cm.path);
-        } else {
-            assert!(stripped, "{:?} landed but was not stripped", cm.path);
-        }
-    });
-    assert_eq!(seen, 3, "every file must stay registered");
-    let _ = std::fs::remove_dir_all(&base);
+    let said = failure.to_string();
+    assert!(said.contains("database or disk is full"), "names the error: {said}");
+    assert!(said.contains(&*db.to_string_lossy()), "names the store: {said}");
+    assert!(said.contains("--clear-cache"), "says what to do: {said}");
+    assert!(registered.is_empty(), "nothing of the refused chunk registers");
+    let rows: i64 = conn.query_row("SELECT count(*) FROM t", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 0, "the chunk's landed write rolled back with it");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The tier's rows are path-keyed and are the landing's parse cache: a

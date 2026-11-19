@@ -670,29 +670,29 @@ pub fn ref_candidate_file_count(conn: &Connection, key: &str) -> u64 {
 /// Deferred-write chunking: N items per `BEGIN IMMEDIATE`…`COMMIT`, the
 /// SQLITE_BUSY_SNAPSHOT-safe shape every post-scan backfill shares (writing
 /// inside a streaming SELECT's snapshot turns a concurrent commit into an
-/// unretried BUSY_SNAPSHOT abort). A failed txn OPEN abandons the remaining
-/// queue (the writer is likely gone); a failed COMMIT rolls back and keeps
-/// going — later chunks may land.
+/// unretried BUSY_SNAPSHOT abort). The first BEGIN, item or COMMIT the store
+/// refuses rolls its chunk back and ends the backfill with that
+/// `PersistFailure`, fatal like every other refused persist.
 pub fn write_in_chunks<T>(
     conn: &Connection,
     items: &[T],
     chunk_size: usize,
     label: &str,
-    per_item: impl Fn(&Connection, &T),
-) {
+    per_item: impl Fn(&Connection, &T) -> rusqlite::Result<()>,
+) -> Result<(), PersistFailure> {
     for chunk in items.chunks(chunk_size) {
-        if conn.execute_batch(sql::TXN_BEGIN_IMMEDIATE.registered()).is_err() {
-            log::error!("{label}: txn open failed; remaining items defer to next warm");
-            break;
-        }
-        for item in chunk {
-            per_item(conn, item);
-        }
-        if let Err(e) = conn.execute_batch(sql::TXN_COMMIT.registered()) {
-            log::error!("{label}: commit failed: {}", e);
+        conn.execute_batch(sql::TXN_BEGIN_IMMEDIATE.registered())
+            .map_err(|e| PersistFailure::new(conn, format_args!("{label}: BEGIN: {e}")))?;
+        let written = chunk
+            .iter()
+            .try_for_each(|item| per_item(conn, item))
+            .and_then(|()| conn.execute_batch(sql::TXN_COMMIT.registered()));
+        if let Err(e) = written {
             let _ = conn.execute_batch(sql::TXN_ROLLBACK.registered());
+            return Err(PersistFailure::new(conn, format_args!("{label}: {e}")));
         }
     }
+    Ok(())
 }
 
 /// Total SOURCE bytes of every persisted analysis (all tiers — a sweep

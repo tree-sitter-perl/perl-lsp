@@ -224,24 +224,20 @@ pub fn index_pack_language(
                         blob,
                         *stamp,
                     );
+                    Ok(())
                 },
-            );
+            )
+            .unwrap_or_else(|failure| failure.exit());
             module_cache::write_in_chunks(
                 conn,
                 &pending_backfill,
                 128,
                 "pack row backfill",
                 |conn, (path, seeds)| {
-                    if let Err(e) = module_cache::shred_derived_rows(
-                        conn,
-                        &path.to_string_lossy(),
-                        "workspace",
-                        seeds,
-                    ) {
-                        log::error!("Failed to backfill derived rows for {:?}: {}", path, e);
-                    }
+                    module_cache::shred_derived_rows(conn, &path.to_string_lossy(), "workspace", seeds)
                 },
-            );
+            )
+            .unwrap_or_else(|failure| failure.exit());
             for path in dead_rows {
                 module_cache::invalidate_generation_tier(
                     conn,
@@ -291,14 +287,9 @@ pub fn index_pack_language(
         let expected_whole = Arc::new(AtomicUsize::new(0));
         let writer_conn = conn;
         let pack_index_writer = pack_index;
-        let expected_whole_writer = Arc::clone(&expected_whole);
         std::thread::scope(|scope| {
             let writer = scope.spawn(move || {
-                // Byte budget for the whole copies a failed chunk retains
-                // (see FALLBACK_WHOLE_BYTE_CAP). Per-writer accumulator — the
-                // fallback lane is single-threaded (this writer thread).
-                let mut fallback_bytes = 0usize;
-                run_persist_writer(
+                let persisted = run_persist_writer(
                     fresh_rx,
                     writer_conn.as_ref(),
                     "pack persist writer",
@@ -320,8 +311,9 @@ pub fn index_pack_language(
                                 stub: e.stub_blob.as_deref().filter(|_| stubs_writable),
                             },
                         )
+                        .map(|()| true)
                     },
-                    |e: FreshEntry| {
+                    |e: FreshEntry, _| {
                         // Stale-pin clear BEFORE the stripped copy is
                         // reachable, so its first rehydration reads the
                         // just-committed blob.
@@ -330,32 +322,10 @@ pub fn index_pack_language(
                             pack_index_writer.register_symbols_inner(e.path, parts);
                         }
                     },
-                    |e: FreshEntry| {
-                        pack_index_writer.invalidate_derived_copies(&e.path);
-                        if let Some(fa) = e.blob.decode_whole() {
-                            let bytes = fa.heap_estimate().total();
-                            if fallback_bytes.saturating_add(bytes) <= FALLBACK_WHOLE_BYTE_CAP {
-                                fallback_bytes += bytes;
-                                // Tripwire-accounted: this whole copy is a
-                                // DELIBERATE (failure-bounded) pin.
-                                expected_whole_writer.fetch_add(1, Ordering::Relaxed);
-                                pack_index_writer.register_symbols(e.path, Arc::new(fa));
-                            } else {
-                                // Over budget: DROP the resident copy. The
-                                // chunk didn't commit, so a stripped copy
-                                // would rehydrate to wrong-empty; leaving it
-                                // unregistered is honest absence that the next
-                                // index/warm re-registers.
-                                log::warn!(
-                                    "pack persist writer: fallback budget ({} MiB) exceeded — \
-                                     dropping resident copy for {:?}; re-indexes next run",
-                                    FALLBACK_WHOLE_BYTE_CAP / (1024 * 1024),
-                                    e.path,
-                                );
-                            }
-                        }
-                    },
                 );
+                if let Err(failure) = persisted {
+                    failure.exit();
+                }
             });
 
             paths.par_iter().for_each(|path| {

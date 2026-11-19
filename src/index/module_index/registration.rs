@@ -1855,8 +1855,8 @@ impl ModuleIndex {
     /// whose `include_closure` contains it).
     /// The residency tripwire's observable: fully-resident registered
     /// copies. After a bulk index with eviction on, every one of these must
-    /// be accounted for by a deliberate whole-copy site (writer fallback,
-    /// degraded/unpersisted analysis) — an unexplained count means a
+    /// be accounted for by a deliberate whole-copy site (a degraded or
+    /// unpersisted analysis) — an unexplained count means a
     /// registration path is silently pinning whole analyses (the RAM
     /// regression no functional test can see).
     pub fn count_fully_resident(&self) -> usize {

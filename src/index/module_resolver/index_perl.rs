@@ -243,16 +243,10 @@ pub fn index_workspace_with_index(
             128,
             "workspace row backfill",
             |conn, (path, seeds)| {
-                if let Err(e) = module_cache::shred_derived_rows(
-                    conn,
-                    &path.to_string_lossy(),
-                    "workspace",
-                    seeds,
-                ) {
-                    log::error!("Failed to backfill derived rows for {:?}: {}", path, e);
-                }
+                module_cache::shred_derived_rows(conn, &path.to_string_lossy(), "workspace", seeds)
             },
-        );
+        )
+        .unwrap_or_else(|failure| failure.exit());
         // Rows whose FILE is gone. The membership check above never sees
         // them — the scan skips a row it cannot stamp — so without this they
         // are never collectable at all and the store keeps a dead generation
@@ -293,16 +287,13 @@ pub fn index_workspace_with_index(
     // Deliberate whole-copy accounting for the workspace-tier residency
     // tripwire — the Perl twin of the pack indexer's counter.
     let expected_whole = Arc::new(AtomicUsize::new(0));
-    let expected_whole_writer = Arc::clone(&expected_whole);
 
     // The Connection moves INTO the writer thread (rusqlite connections are
     // Send, not Sync); nothing after the scope needs it.
     let writer_conn = conn;
     std::thread::scope(|scope| {
         let writer = scope.spawn(move || {
-            // Same failure-bounded whole-copy budget as the pack writer.
-            let mut fallback_bytes = 0usize;
-            run_persist_writer(
+            let persisted = run_persist_writer(
                 fresh_rx,
                 writer_conn.as_ref(),
                 "workspace persist writer",
@@ -322,8 +313,9 @@ pub fn index_workspace_with_index(
                             stub: None,
                         },
                     )
+                    .map(|()| true)
                 },
-                |e: WsFresh| {
+                |e: WsFresh, _| {
                     // Clear any stale LRU pin BEFORE the stripped copy
                     // becomes reachable, so its first rehydration reads the
                     // just-committed blob.
@@ -332,35 +324,10 @@ pub fn index_workspace_with_index(
                         idx.register_workspace_residency(e.path, parts);
                     }
                 },
-                |e: WsFresh| {
-                    // This entry's generation never landed (its chunk failed,
-                    // or its own write did) but the copy was stripped for it. The blob in hand IS the whole analysis —
-                    // register full copies instead, so nothing is lost
-                    // beyond the persistence itself (disk full / lock storm
-                    // stays loud AND self-heals) — up to the budget.
-                    idx.invalidate_derived_copies(&e.path);
-                    if let Some(fa) = e.blob.decode_whole() {
-                        let bytes = fa.heap_estimate().total();
-                        if fallback_bytes.saturating_add(bytes) > FALLBACK_WHOLE_BYTE_CAP {
-                            // Over budget: DROP (the chunk didn't commit, so a
-                            // stripped copy has no blob to rehydrate from —
-                            // honest absence, re-indexed next run).
-                            log::warn!(
-                                "workspace persist writer: fallback budget ({} MiB) exceeded — \
-                                 dropping resident copy for {:?}; re-indexes next run",
-                                FALLBACK_WHOLE_BYTE_CAP / (1024 * 1024),
-                                e.path,
-                            );
-                            return;
-                        }
-                        fallback_bytes += bytes;
-                        let _ = idx.register_workspace_resident(e.path.clone(), std::sync::Arc::new(fa));
-                        // A deliberate whole pin — account it so the
-                        // tripwire flags only UNEXPLAINED residents.
-                        expected_whole_writer.fetch_add(1, Ordering::Relaxed);
-                    }
-                },
             );
+            if let Err(failure) = persisted {
+                failure.exit();
+            }
         });
 
         // Force the plugin registry — plugin load AND pattern/flow query
