@@ -162,6 +162,12 @@ pub trait LanguageDriver: Send + Sync {
     fn path_inputs_current(&self, _path: &Path, _analysis: &FileAnalysis) -> bool {
         true
     }
+    /// This language's reader of the dependency map for a project at
+    /// `root` (`None`: no project open). `None` = the language has no
+    /// dependency tier and the workspace walk is the whole story.
+    fn dependency_map(&self, _root: Option<&Path>) -> Option<crate::build::dependency_map::DependencyMap> {
+        None
+    }
 }
 
 /// How a language that names modules by path names one: the marker file
@@ -249,6 +255,9 @@ impl LanguageDriver for PerlDriver {
         // Sigils open variable completion; `>`/`:`/`{` open
         // method/pkg/hash-key slots; `(`/`,` are signature-help adjacent.
         &["$", "@", "%", ">", ":", "{", "(", ","]
+    }
+    fn dependency_map(&self, root: Option<&Path>) -> Option<crate::build::dependency_map::DependencyMap> {
+        Some(crate::build::inc::read_map(root))
     }
 }
 

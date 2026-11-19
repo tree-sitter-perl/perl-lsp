@@ -1,5 +1,12 @@
 use super::*;
+use crate::build::dependency_map::Ask;
+use crate::build::inc::{discover_inc_paths, map_over};
 use crate::index::module_index::strip_import_copy_one;
+
+/// The file a `require` of `name` loads under `roots`: the map's first.
+fn winner(roots: &[PathBuf], name: &str) -> Option<PathBuf> {
+    map_over(roots.to_vec()).locate(&Ask::Name(name.to_string())).into_iter().next().map(|l| l.path.into_path_buf())
+}
 
 #[test]
 fn test_resolve_module_list_util() {
@@ -7,7 +14,7 @@ fn test_resolve_module_list_util() {
     if inc_paths.is_empty() {
         return;
     }
-    let path = resolve_module_path(&inc_paths, "List::Util");
+    let path = winner(&inc_paths, "List::Util");
     assert!(path.is_some(), "List::Util should be resolvable");
     let p = path.unwrap();
     assert!(p.to_str().unwrap().contains("List/Util.pm"));
@@ -312,7 +319,8 @@ fn twin_roots(tag: &str) -> (PathBuf, PathBuf) {
 #[test]
 fn inc_resolution_enumerates_every_providing_root_in_inc_order() {
     let (a, b) = twin_roots("paths");
-    let found = resolve_module_paths(&[a.clone(), b.clone()], "Twin");
+    let found: Vec<_> =
+        map_over(vec![a.clone(), b.clone()]).locate(&Ask::Name("Twin".into())).into_iter().map(|l| l.path).collect();
     assert_eq!(
         found,
         vec![crate::util::canonical_path::CanonicalPath::resolve(a.join("Twin.pm")), crate::util::canonical_path::CanonicalPath::resolve(b.join("Twin.pm"))],
@@ -320,13 +328,13 @@ fn inc_resolution_enumerates_every_providing_root_in_inc_order() {
     );
     // The winner is still exactly what `require` would load.
     assert_eq!(
-        resolve_module_path(&[a.clone(), b.clone()], "Twin"),
-        Some(a.join("Twin.pm")),
+        winner(&[a.clone(), b.clone()], "Twin"),
+        Some(crate::util::canonical_path::CanonicalPath::resolve(a.join("Twin.pm")).into_path_buf()),
     );
     // Reversing @INC reverses the winner, not the membership.
     assert_eq!(
-        resolve_module_path(&[b.clone(), a.clone()], "Twin"),
-        Some(b.join("Twin.pm")),
+        winner(&[b.clone(), a.clone()], "Twin"),
+        Some(crate::util::canonical_path::CanonicalPath::resolve(b.join("Twin.pm")).into_path_buf()),
     );
 }
 
@@ -341,7 +349,7 @@ fn a_name_keeps_every_provider_not_just_the_last_inserted() {
     let mut parser = create_parser();
     let mut memo: ParseMemo = HashMap::new();
     let providers =
-        resolve_and_parse_with_memo(&[a.clone(), b.clone()], "Twin", &mut parser, &mut memo)
+        resolve_and_parse_with_memo(&map_over(vec![a.clone(), b.clone()]), "Twin", &mut parser, &mut memo)
             .expect("Twin resolves");
     assert_eq!(providers.len(), 2, "both providers parse");
 
@@ -462,9 +470,9 @@ fn two_askers_with_different_use_lib_see_different_providers() {
     let mut memo: ParseMemo = HashMap::new();
     // The process @INC has only the app lib: `t/lib` is a root ONLY the
     // test file declares, which is exactly the discriminator.
-    idx.set_inc_roots_for_test(&[applib.clone()]);
+    idx.set_search_roots_for_test(&[applib.clone()]);
     let providers = resolve_and_parse_with_memo(
-        &[applib.clone(), testlib.clone()],
+        &map_over(vec![applib.clone(), testlib.clone()]),
         "Twin",
         &mut parser,
         &mut memo,
@@ -734,7 +742,7 @@ fn a_landing_reads_the_files_row_in_place_of_parsing_it() {
     std::fs::write(&pm, "package Row::Cached;\nsub aa { 1 }\n1;\n").unwrap();
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     module_cache::init_schema(&conn).unwrap();
-    let inc = vec![root.clone()];
+    let inc = map_over(vec![root.clone()]);
     let mut parser = create_parser();
 
     let core = IndexCore::new();
@@ -780,4 +788,34 @@ fn the_tier_does_not_land_a_project_file() {
     idx.insert_cache("Mine::Alias", Some(copy));
     assert!(idx.get_cached("Mine::Alias").is_none(), "the walk's file is not landed again");
     assert_eq!(idx.file_role(&canon), Some(crate::model::file_analysis::FileRole::Workspace));
+}
+
+/// Carton's `local/` is the dependency map's tier root: the walk leaves it
+/// out even though nothing ignores it, so its files reach the index only as
+/// dependencies, through the map.
+#[test]
+fn the_walk_leaves_the_map_s_tier_root_to_the_tier() {
+    use crate::model::file_analysis::{CrossFileLookup, FileRole};
+    let dir = std::env::temp_dir().join(format!("d4_tier_root_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    std::fs::create_dir_all(dir.join("local/lib/perl5")).unwrap();
+    std::fs::write(dir.join("lib/App.pm"), "package App;\nuse Dep;\n1;\n").unwrap();
+    std::fs::write(dir.join("local/lib/perl5/Dep.pm"), "package Dep;\nsub d { 1 }\n1;\n").unwrap();
+    let dir = crate::util::canonical_path::CanonicalPath::resolve(dir).into_path_buf();
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    index_workspace_with_index(&dir, &idx, None, None);
+    let app = crate::util::canonical_path::CanonicalPath::resolve(dir.join("lib/App.pm"));
+    let dep = crate::util::canonical_path::CanonicalPath::resolve(dir.join("local/lib/perl5/Dep.pm"));
+    assert_eq!(idx.file_role(&app), Some(FileRole::Workspace));
+    assert_eq!(idx.file_role(&dep), None, "the walk does not register the tier's file");
+
+    let map = idx.dependency_map_for(&crate::build::language_driver::PerlDriver, Some(&dir)).expect("perl reads a map");
+    assert_eq!(map.search_roots()[0], dir.join("local/lib/perl5"));
+    let mut parser = create_parser();
+    let (_, stored) = idx.land_module(None, &map, "Dep", &mut parser, &mut HashMap::new());
+    assert!(stored.is_some());
+    assert_eq!(idx.file_role(&dep), Some(FileRole::Dependency), "the map lands it as a dependency");
+    let _ = std::fs::remove_dir_all(&dir);
 }

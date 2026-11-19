@@ -876,15 +876,15 @@ pub trait CrossFileLookup {
     fn find_exporters(&self, func_name: &str) -> Vec<String>;
     fn defining_module_cached(&self, entry: &str, name: &str) -> Option<std::sync::Arc<CachedModule>>;
     fn module_declaring_method_in_package(&self, name: &str, class: &str) -> Option<String>;
-    /// The search-path roots this index resolved modules from — the
-    /// process-wide `@INC`, most-preferred first, ALREADY CANONICAL
-    /// (canonicalized once when the resolver published it, never per
+    /// The search path this index locates dependencies through (the
+    /// dependency map's search roots), most-preferred first, ALREADY
+    /// CANONICAL (canonicalized once when the map was read, never per
     /// query: this is read on request paths). Shared, so the common origin
     /// — one with no `use lib` of its own — builds its axis with an Arc
     /// clone and no filesystem I/O at all. Default empty (an index with no
     /// module universe), which makes the search-path axis transparent
     /// rather than blind.
-    fn inc_roots(&self) -> std::sync::Arc<Vec<std::path::PathBuf>> {
+    fn search_roots(&self) -> std::sync::Arc<Vec<std::path::PathBuf>> {
         std::sync::Arc::new(Vec::new())
     }
     /// The role recorded for the file at `path`; `None` when this lookup
@@ -1186,7 +1186,7 @@ impl VisibilityAxis {
             }
             PackVisibility::Host => {}
         }
-        let inc = index.inc_roots();
+        let inc = index.search_roots();
         // The overwhelmingly common origin declares no `use lib`, and this
         // runs on every request path — so that case is an Arc clone with
         // ZERO filesystem calls. Only a file that actually names its own
@@ -1421,8 +1421,8 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     ) -> Option<std::sync::Arc<CachedModule>> {
         self.get_cached(module_name)
     }
-    fn inc_roots(&self) -> std::sync::Arc<Vec<std::path::PathBuf>> {
-        self.inner.inc_roots()
+    fn search_roots(&self) -> std::sync::Arc<Vec<std::path::PathBuf>> {
+        self.inner.search_roots()
     }
     fn workspace_root_path(&self) -> Option<std::path::PathBuf> {
         self.inner.workspace_root_path()

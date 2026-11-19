@@ -17,10 +17,14 @@ pub mod cpp_reparse;
 pub mod cpp_toolchain;
 // sentinel re-parse for member-access cursor context
 pub mod cursor_sentinel;
+// the dependency tier's map: lanes as data, read per language
+pub mod dependency_map;
 // across-build whole-analysis dump (the L1 equivalence net)
 pub mod equiv_dump;
 // multi-language serving seam (LanguageDriver keystone)
 pub mod language_driver;
+// perl's reader of the dependency map (`@INC`)
+pub mod inc;
 pub mod plugin;
 pub mod pod;
 pub mod packs;

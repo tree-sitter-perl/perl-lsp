@@ -105,7 +105,7 @@ pub fn index_pack_language(
         let conn = module_cache::open_cache_db(cache_key, lang);
         // A generation built under different analysis inputs (toolchain
         // change — or its probe FAILURE, which empties the system include
-        // roots) must not be warmed: hard-clear, same as `validate_inc_paths`.
+        // roots) must not be warmed: hard-clear, same as `validate_dependency_map`.
         if let Some(ref conn) = conn {
             let _ = module_cache::validate_input_fingerprint(
                 conn,

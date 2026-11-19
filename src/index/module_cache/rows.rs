@@ -90,8 +90,8 @@ fn shred_derived_rows_inner(
     held: &[String],
 ) -> rusqlite::Result<()> {
     // Sticky workspace tier: project lib/ files are inside the walk AND on
-    // @INC (add_project_lib_paths), so the resolver re-shreds them as
-    // 'import'. The walk's verdict wins — downgrading would let the @INC
+    // the dependency map's search path, so the resolver could re-shred them
+    // as a dependency. The walk's verdict wins — downgrading would let the map's
     // hard-clear take an editable file's generation out from under its
     // stripped resident copy.
     conn.execute(sql::FILES_UPSERT.registered(), params![path, source])?;

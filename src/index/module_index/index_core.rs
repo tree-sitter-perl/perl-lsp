@@ -76,11 +76,15 @@ pub(crate) struct IndexCore {
     /// cannot reach. Written beside `records`, record first, so a sweep never
     /// meets a file without its role.
     pub(crate) all_files: DashMap<crate::util::canonical_path::CanonicalPath, Arc<CachedModule>>,
-    /// The `@INC` roots this process resolves from, canonical, most-
-    /// preferred first. Recorded ONCE by the resolver thread (discovery
-    /// shells out to `perl`, so no query path may re-derive it) and read by
-    /// every origin's `VisibilityAxis::for_origin`.
-    pub(crate) inc_roots: std::sync::RwLock<Arc<Vec<std::path::PathBuf>>>,
+    /// The dependency map this process locates from: the one owner of the
+    /// search roots (the visibility rank reads them, the landing locates
+    /// through it, the walk skips its tier roots). Read once per process by
+    /// the served language's reader (`dependency_map_for`); `None` until
+    /// then, which every reader takes as an empty map.
+    pub(crate) dependency_map: std::sync::RwLock<Option<Arc<crate::build::dependency_map::DependencyMap>>>,
+    /// Held across a read so concurrent first askers (the walk and the
+    /// resolver thread) read the map once.
+    map_read: Mutex<()>,
     pub(crate) queue: ResolveQueue,
     pub(crate) resolved: ResolveNotify,
     pub(crate) workspace_root: WorkspaceRootChannel,
@@ -160,7 +164,8 @@ impl IndexCore {
             leaf_defs: DashMap::new(),
             records: FileRecords::default(),
             all_files: DashMap::new(),
-            inc_roots: std::sync::RwLock::new(Arc::new(Vec::new())),
+            dependency_map: std::sync::RwLock::new(None),
+            map_read: Mutex::new(()),
             queue: ResolveQueue {
                 priority: Mutex::new(Vec::new()),
                 pending: Mutex::new(Vec::new()),
@@ -186,15 +191,34 @@ impl IndexCore {
         }
     }
 
-    /// Record the process `@INC`, canonicalized so the per-asker rank can
-    /// prefix-match candidate paths without query-time filesystem I/O.
-    pub(crate) fn set_inc_roots(&self, roots: &[std::path::PathBuf]) {
-        let canon: Vec<std::path::PathBuf> = roots
-            .iter()
-            .map(|p| crate::util::canonical_path::CanonicalPath::resolve(p.as_path()).into_path_buf())
-            .collect();
-        if let Ok(mut g) = self.inc_roots.write() {
-            *g = Arc::new(canon);
+    /// The map this process locates from, read on first ask by `driver`'s
+    /// reader for `root` (it shells out, so it is never re-read on a query
+    /// path). `None` when the language has no dependency tier.
+    pub(crate) fn dependency_map_for(
+        &self,
+        driver: &dyn crate::build::language_driver::LanguageDriver,
+        root: Option<&std::path::Path>,
+    ) -> Option<Arc<crate::build::dependency_map::DependencyMap>> {
+        if let Some(m) = self.dependency_map() {
+            return Some(m);
+        }
+        let _g = self.map_read.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(m) = self.dependency_map() {
+            return Some(m);
+        }
+        let map = Arc::new(crate::util::timings::phase("dependency_map::read", || driver.dependency_map(root))?);
+        self.set_dependency_map(Arc::clone(&map));
+        Some(map)
+    }
+
+    /// The map read so far, if any.
+    pub(crate) fn dependency_map(&self) -> Option<Arc<crate::build::dependency_map::DependencyMap>> {
+        self.dependency_map.read().ok().and_then(|g| g.clone())
+    }
+
+    pub(crate) fn set_dependency_map(&self, map: Arc<crate::build::dependency_map::DependencyMap>) {
+        if let Ok(mut g) = self.dependency_map.write() {
+            *g = Some(map);
         }
     }
 

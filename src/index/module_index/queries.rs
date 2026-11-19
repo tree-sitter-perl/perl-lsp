@@ -507,8 +507,8 @@ impl ModuleIndex {
     /// Test-only: publish an `@INC` without a resolver thread (discovery
     /// shells out to `perl`, and a unit net needs its own roots).
     #[cfg(test)]
-    pub fn set_inc_roots_for_test(&self, roots: &[std::path::PathBuf]) {
-        self.core.set_inc_roots(roots);
+    pub fn set_search_roots_for_test(&self, roots: &[std::path::PathBuf]) {
+        self.core.set_dependency_map(Arc::new(crate::build::inc::map_over(roots.to_vec())));
     }
 
     #[cfg(test)]

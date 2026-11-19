@@ -400,12 +400,27 @@ impl ModuleIndex {
     pub fn land_module(
         &self,
         rows: Option<&rusqlite::Connection>,
-        inc_paths: &[std::path::PathBuf],
+        map: &crate::build::dependency_map::DependencyMap,
         module_name: &str,
         parser: &mut tree_sitter::Parser,
         memo: &mut module_resolver::ParseMemo,
     ) -> (Option<Providers>, Option<Providers>) {
-        module_resolver::land_module(&self.core, rows, inc_paths, module_name, parser, memo, false)
+        module_resolver::land_module(&self.core, rows, map, module_name, parser, memo, false)
+    }
+
+    /// The dependency map read so far, if any.
+    pub fn dependency_map(&self) -> Option<Arc<crate::build::dependency_map::DependencyMap>> {
+        self.core.dependency_map()
+    }
+
+    /// The dependency map, read on first ask by `driver`'s reader for
+    /// `root` (`IndexCore::dependency_map_for`).
+    pub fn dependency_map_for(
+        &self,
+        driver: &dyn crate::build::language_driver::LanguageDriver,
+        root: Option<&std::path::Path>,
+    ) -> Option<Arc<crate::build::dependency_map::DependencyMap>> {
+        self.core.dependency_map_for(driver, root)
     }
 
     /// The workspace-registration reads that need the FULL analysis:

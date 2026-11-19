@@ -9,23 +9,21 @@ use std::collections::HashSet;
 /// protocol (memoization, persistence, strip, `insert_resolved`) has a
 /// single spelling and cannot drift between the two spawn fronts.
 pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>) {
-    let mut inc_paths = discover_inc_paths();
-
     // Wait for workspace root from initialize() for per-project cache path.
     let ws_root = wait_for_workspace_root(&core.workspace_root);
+    let root_path = ws_root.as_ref().and_then(|u| uri_to_path(u));
 
-    // Auto-discover project-local lib paths (lib/, local/lib/perl5/).
-    if let Some(root_path) = ws_root.as_ref().and_then(|u| uri_to_path(u)) {
-        add_project_lib_paths(&mut inc_paths, &root_path);
-    }
+    // The map, read before anything can query: an origin's visibility rank
+    // prefix-matches candidates against its search roots, and the reader
+    // shells out to `perl`, so no request path may re-derive it. The walk
+    // may have read it first; either way it is read once.
+    static PERL: crate::build::language_driver::PerlDriver = crate::build::language_driver::PerlDriver;
+    let map = core
+        .dependency_map_for(&PERL, root_path.as_deref())
+        .unwrap_or_else(|| Arc::new(crate::build::dependency_map::DependencyMap::empty()));
 
-    // Publish the resolved search path before anything can query: an
-    // origin's visibility rank prefix-matches candidates against it, and
-    // discovery shells out to `perl`, so no request path may re-derive it.
-    core.set_inc_roots(&inc_paths);
-
-    // Scan @INC for available module names (fast, no parsing — just readdir)
-    scan_inc_module_names(&inc_paths, &core.available_modules);
+    // Scan the search roots for available module names (fast, no parsing — just readdir)
+    scan_inc_module_names(&map, &core.available_modules);
     log::info!("@INC scan: {} modules available", core.available_modules.len());
 
     // The store's gates run before any landing reads a row. There is no
@@ -33,7 +31,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     // parsing it, so a warm start lands what a cold one would.
     let db = module_cache::open_cache_db(ws_root.as_deref(), "perl");
     if let Some(ref conn) = db {
-        let _ = module_cache::validate_inc_paths(conn, &inc_paths);
+        let _ = module_cache::validate_dependency_map(conn, &map.generation());
         let _ = module_cache::validate_plugin_fingerprint(
             conn,
             &crate::build::plugin::rhai_host::plugin_fingerprint(),
@@ -177,7 +175,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
             let (result, stored) = land_module(
                 &core,
                 db.as_ref(),
-                &inc_paths,
+                &map,
                 &module_name,
                 &mut parser,
                 &mut parse_memo,

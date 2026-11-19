@@ -269,22 +269,26 @@ impl ModuleIndex {
         if let Some(entry) = self.core.cache.get(module_name) {
             return entry.clone();
         }
-        let inc_paths = module_resolver::discover_inc_paths();
+        let map = crate::build::inc::read_map(None);
         let mut parser = module_resolver::create_parser();
-        let result = module_resolver::resolve_and_parse(&inc_paths, module_name, &mut parser);
+        let result = module_resolver::resolve_and_parse(&map, module_name, &mut parser);
         self.core.set_slot(module_name, result.clone());
         result
     }
 
     #[cfg(test)]
     pub(super) fn inc_paths(&self) -> Vec<PathBuf> {
-        module_resolver::discover_inc_paths()
+        crate::build::inc::discover_inc_paths()
     }
 
     #[cfg(test)]
     pub fn resolve_module(&self, module_name: &str) -> Option<PathBuf> {
-        let inc_paths = module_resolver::discover_inc_paths();
-        module_resolver::resolve_module_path(&inc_paths, module_name)
+        use crate::build::dependency_map::Ask;
+        crate::build::inc::read_map(None)
+            .locate(&Ask::Name(module_name.to_string()))
+            .into_iter()
+            .next()
+            .map(|l| l.path.into_path_buf())
     }
 }
 
@@ -729,12 +733,8 @@ impl CrossFileLookup for ModuleIndex {
         self.module_path_cached(module_name)
     }
 
-    fn inc_roots(&self) -> Arc<Vec<std::path::PathBuf>> {
-        self.core
-            .inc_roots
-            .read()
-            .map(|g| Arc::clone(&g))
-            .unwrap_or_default()
+    fn search_roots(&self) -> Arc<Vec<std::path::PathBuf>> {
+        self.core.dependency_map().map(|m| m.search_roots()).unwrap_or_default()
     }
 
     fn workspace_root_path(&self) -> Option<std::path::PathBuf> {

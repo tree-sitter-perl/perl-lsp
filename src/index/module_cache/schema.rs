@@ -281,33 +281,24 @@ pub fn strings_generation(conn: &Connection) -> i64 {
     .unwrap_or(0)
 }
 
-pub fn compute_inc_hash(inc_paths: &[PathBuf]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    for p in inc_paths {
-        p.hash(&mut hasher);
-    }
-    format!("{:016x}", hasher.finish())
-}
+/// The `meta` key the dependency map's generation is stamped under.
+const DEPENDENCY_MAP_KEY: &str = "dependency_map";
 
-pub fn validate_inc_paths(conn: &Connection, inc_paths: &[PathBuf]) -> rusqlite::Result<()> {
+/// The dependency tier's gate: `generation` is the map's
+/// (`DependencyMap::generation`), and a store written under another map
+/// loses its dependency rows.
+pub fn validate_dependency_map(conn: &Connection, generation: &str) -> rusqlite::Result<()> {
     // Same atomic check-and-stamp rationale as `validate_plugin_fingerprint`.
-    in_immediate_txn(conn, || validate_inc_paths_inner(conn, inc_paths))
+    in_immediate_txn(conn, || validate_dependency_map_inner(conn, generation))
 }
 
-fn validate_inc_paths_inner(conn: &Connection, inc_paths: &[PathBuf]) -> rusqlite::Result<()> {
-    let current_hash = compute_inc_hash(inc_paths);
+fn validate_dependency_map_inner(conn: &Connection, generation: &str) -> rusqlite::Result<()> {
     let stored: Option<String> = conn
-        .query_row(sql::META_GET.registered(), params!["inc_hash"], |row| row.get(0))
+        .query_row(sql::META_GET.registered(), params![DEPENDENCY_MAP_KEY], |row| row.get(0))
         .ok();
 
-    if stored.as_deref() != Some(&current_hash) {
-        log::info!(
-            "@INC changed (was {:?}, now {}), clearing module cache",
-            stored,
-            current_hash
-        );
+    if stored.as_deref() != Some(generation) {
+        log::info!("dependency map changed (was {:?}, now {}), clearing its rows", stored, generation);
         // Dependency tier only: a dependency's blob still reads the map (a
         // module that exports nothing borrows its first exporting parent's
         // lists, located through @INC), where workspace blobs bake plugin
@@ -320,7 +311,7 @@ fn validate_inc_paths_inner(conn: &Connection, inc_paths: &[PathBuf]) -> rusqlit
         conn.execute(sql::SYMS_CLEAR_DEPENDENCY.registered(), [])?;
         conn.execute(sql::HELD_CLEAR_DEPENDENCY.registered(), [])?;
         conn.execute(sql::FILES_CLEAR_DEPENDENCY.registered(), [])?;
-        conn.execute(sql::META_SET.registered(), params!["inc_hash", current_hash])?;
+        conn.execute(sql::META_SET.registered(), params![DEPENDENCY_MAP_KEY, generation])?;
     }
     Ok(())
 }
@@ -329,7 +320,7 @@ fn validate_inc_paths_inner(conn: &Connection, inc_paths: &[PathBuf]) -> rusqlit
 /// `perlfunc.pod` and writing rows on first use (or when the perl
 /// version tag changes since the last run). Returns the populated
 /// map. Keyed in `meta` under `builtins_perl_version`: mismatch wipes
-/// the table and re-parses, same pattern as `validate_inc_paths` /
+/// the table and re-parses, same pattern as `validate_dependency_map` /
 /// `validate_plugin_fingerprint`.
 pub fn hydrate_builtins(conn: &Connection) -> rusqlite::Result<DashMap<String, String>> {
     let map: DashMap<String, String> = DashMap::new();
@@ -426,7 +417,7 @@ fn validate_conclusion_fingerprint_inner(
 /// Without this check, a plugin author who edits a `.rhai`, restarts
 /// the LSP, and inspects a cross-file query will see the *old*
 /// plugin's emissions in the cached `FileAnalysis` blobs — making
-/// plugin QA impossible. Mirrors `validate_inc_paths`: same meta-row
+/// plugin QA impossible. Mirrors `validate_dependency_map`: same meta-row
 /// pattern, same hard-clear on mismatch.
 pub fn validate_plugin_fingerprint(conn: &Connection, fingerprint: &str) -> rusqlite::Result<()> {
     // IMMEDIATE: check-and-stamp must be atomic against the other writer
@@ -457,7 +448,7 @@ fn validate_plugin_fingerprint_inner(conn: &Connection, fingerprint: &str) -> ru
 /// Drop the modules table when the driver's external analysis inputs (the
 /// C++ toolchain: system include roots, predefined macros — or its probe
 /// FAILURE) changed since the rows were written. Same meta-row pattern as
-/// `validate_inc_paths`: a generation built under degraded/different inputs
+/// `validate_dependency_map`: a generation built under degraded/different inputs
 /// must not be served under the current ones (H8).
 pub fn validate_input_fingerprint(conn: &Connection, fingerprint: u64) -> rusqlite::Result<()> {
     // Same atomic check-and-stamp rationale as `validate_plugin_fingerprint`.

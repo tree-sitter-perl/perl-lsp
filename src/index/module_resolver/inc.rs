@@ -1,7 +1,9 @@
-//! The @INC tier: path discovery, module-file location, and the
-//! in-process parse with its parent-fallback memo.
+//! The @INC tier's landing: the files the dependency map locates for a
+//! name, parsed in process (or read from their rows) with a
+//! parent-fallback memo.
 
 use super::*;
+use crate::build::dependency_map::{Ask, DependencyMap};
 use crate::util::canonical_path::CanonicalPath;
 
 // ---- Module parsing ----
@@ -22,13 +24,13 @@ pub type ParseMemo = HashMap<String, Option<Providers>>;
 pub(crate) fn land_module(
     core: &IndexCore,
     rows: Option<&rusqlite::Connection>,
-    inc_paths: &[PathBuf],
+    map: &DependencyMap,
     module_name: &str,
     parser: &mut Parser,
     memo: &mut ParseMemo,
     strip: bool,
 ) -> (Option<Providers>, Option<Providers>) {
-    let whole = core.tier_providers(resolve_providers(inc_paths, module_name, parser, memo, rows));
+    let whole = core.tier_providers(resolve_providers(map, module_name, parser, memo, rows));
     let persisted = match (rows, &whole) {
         (Some(conn), Some(providers)) => providers.iter().all(|m| persist_dependency(conn, m)),
         _ => false,
@@ -37,62 +39,25 @@ pub(crate) fn land_module(
     (whole, stored)
 }
 
-// ---- Resolution ----
-
-/// EVERY `@INC` root that provides `module_name`, in `@INC` order — the
-/// `(name, inc-root)` relation's acquisition half. A name maps to a SET of
-/// files (XS/PP twins, a project `lib/` shadowing an installed copy,
-/// `t/lib` vs `lib` per entrypoint); stopping at the first hit is what made
-/// the tier answer from whichever root happened to win.
-pub fn resolve_module_paths(inc_paths: &[PathBuf], module_name: &str) -> Vec<CanonicalPath> {
-    let rel_path = crate::model::conventions::perl_module_rel_path(module_name);
-    let mut out: Vec<CanonicalPath> = Vec::new();
-    for inc in inc_paths {
-        let full = inc.join(&rel_path);
-        if full.is_file() {
-            // Canonical, so the relation holds FILES: distinct roots can
-            // name the same file (a symlinked `lib`, a duplicated @INC
-            // entry) and must dedup to one candidate. It also lets the
-            // per-asker search-path rank prefix-match a candidate against
-            // canonical roots with no query-time `canonicalize` — that is
-            // filesystem I/O, and it would land on a request path.
-            let canon = CanonicalPath::resolve(full);
-            if !out.contains(&canon) {
-                out.push(canon);
-            }
-        }
-    }
-    out
-}
-
-/// The `@INC`-order winner among `resolve_module_paths` — what a `require`
-/// would load. The relation's other providers stay reachable as candidates.
-/// Production resolves the whole set; this spelling is the winner alone,
-/// which only the test-side `ModuleIndex::resolve_module` still asks for.
-#[cfg(test)]
-pub fn resolve_module_path(inc_paths: &[PathBuf], module_name: &str) -> Option<PathBuf> {
-    resolve_module_paths(inc_paths, module_name).into_iter().next().map(PathBuf::from)
-}
-
 #[allow(dead_code)]
 pub fn resolve_and_parse(
-    inc_paths: &[PathBuf],
+    map: &DependencyMap,
     module_name: &str,
     parser: &mut Parser,
 ) -> Option<Arc<CachedModule>> {
-    resolve_and_parse_all(inc_paths, module_name, parser)
+    resolve_and_parse_all(map, module_name, parser)
         .and_then(|p| p.into_iter().next())
 }
 
 /// `resolve_and_parse` keeping the whole provider set.
 #[allow(dead_code)]
 pub fn resolve_and_parse_all(
-    inc_paths: &[PathBuf],
+    map: &DependencyMap,
     module_name: &str,
     parser: &mut Parser,
 ) -> Option<Providers> {
     let mut memo: ParseMemo = HashMap::new();
-    resolve_and_parse_with_memo(inc_paths, module_name, parser, &mut memo)
+    resolve_and_parse_with_memo(map, module_name, parser, &mut memo)
 }
 
 /// Parse a module while sharing a memo across calls. Callers that resolve
@@ -100,29 +65,29 @@ pub fn resolve_and_parse_all(
 /// one `ParseMemo` and reuse it so parent-fallback recursion doesn't
 /// re-parse the same ancestor for each child.
 pub fn resolve_and_parse_with_memo(
-    inc_paths: &[PathBuf],
+    map: &DependencyMap,
     module_name: &str,
     parser: &mut Parser,
     memo: &mut ParseMemo,
 ) -> Option<Providers> {
-    resolve_providers(inc_paths, module_name, parser, memo, None)
+    resolve_providers(map, module_name, parser, memo, None)
 }
 
 /// `resolve_and_parse_with_memo`, taking each file from its current row in
 /// `rows` when there is one.
 fn resolve_providers(
-    inc_paths: &[PathBuf],
+    map: &DependencyMap,
     module_name: &str,
     parser: &mut Parser,
     memo: &mut ParseMemo,
     rows: Option<&rusqlite::Connection>,
 ) -> Option<Providers> {
     let mut visiting: std::collections::HashSet<String> = std::collections::HashSet::new();
-    resolve_and_parse_inner(inc_paths, module_name, parser, &mut visiting, memo, rows)
+    resolve_and_parse_inner(map, module_name, parser, &mut visiting, memo, rows)
 }
 
 fn resolve_and_parse_inner(
-    inc_paths: &[PathBuf],
+    map: &DependencyMap,
     module_name: &str,
     parser: &mut Parser,
     visiting: &mut std::collections::HashSet<String>,
@@ -141,9 +106,14 @@ fn resolve_and_parse_inner(
     // carries its own subs and `@ISA`, and the candidate relation is only
     // as honest as its acquisition.
     let mut providers: Providers = Vec::new();
-    for path in resolve_module_paths(inc_paths, module_name) {
+    // A file the map places under a name it does not load as (an enclosing
+    // module) is not that name's provider.
+    for located in map.locate(&Ask::Name(module_name.to_string())) {
+        if located.loads_as.as_deref() != Some(module_name) {
+            continue;
+        }
         if let Some(cached) =
-            parse_one_provider(inc_paths, module_name, path, parser, visiting, memo, rows)
+            parse_one_provider(map, module_name, located.path, parser, visiting, memo, rows)
         {
             providers.push(cached);
         }
@@ -159,7 +129,7 @@ fn resolve_and_parse_inner(
 /// current row. Every provider runs this same body — the @INC winner has no
 /// privileged path (rule #10).
 fn parse_one_provider(
-    inc_paths: &[PathBuf],
+    map: &DependencyMap,
     module_name: &str,
     path: CanonicalPath,
     parser: &mut Parser,
@@ -200,7 +170,7 @@ fn parse_one_provider(
         let parents = crate::index::module_index::primary_package_parents(&analysis, module_name);
         for parent in &parents {
             let parent_primary =
-                resolve_and_parse_inner(inc_paths, parent, parser, visiting, memo, rows)
+                resolve_and_parse_inner(map, parent, parser, visiting, memo, rows)
                     .and_then(|p| p.into_iter().next());
             if let Some(parent_cached) = parent_primary {
                 if !parent_cached.analysis.export.is_empty()
@@ -222,41 +192,11 @@ fn parse_one_provider(
     Some(result)
 }
 
-// ---- @INC discovery ----
-
-pub fn discover_inc_paths() -> Vec<PathBuf> {
-    let output = std::process::Command::new("perl")
-        .args(["-e", r#"print join "\n", @INC"#])
-        .stdin(std::process::Stdio::null())
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(PathBuf::from)
-            .filter(|p| p.is_dir())
-            .collect(),
-        _ => vec![],
-    }
-}
-
-/// Add project-local lib paths (lib/, local/lib/perl5/) to the front of @INC.
-/// Called by the resolver thread, test resolver, and CLI tools.
-pub fn add_project_lib_paths(inc_paths: &mut Vec<PathBuf>, workspace_root: &std::path::Path) {
-    for local_lib in &["lib", "local/lib/perl5"] {
-        let p = workspace_root.join(local_lib);
-        if p.is_dir() {
-            log::info!("Auto-discovered project lib: {:?}", p);
-            inc_paths.insert(0, p);
-        }
-    }
-}
-
-/// Scan @INC directories for .pm files, populating the available_modules map.
-/// Fast — no file reads, just directory traversal + path→module name conversion.
-pub(super) fn scan_inc_module_names(inc_paths: &[PathBuf], available: &DashMap<String, PathBuf>) {
-    for inc in inc_paths {
+/// Scan the map's search roots for .pm files, populating the
+/// available_modules map. Fast — no file reads, just directory traversal +
+/// path→module name conversion.
+pub(super) fn scan_inc_module_names(map: &DependencyMap, available: &DashMap<String, PathBuf>) {
+    for inc in map.search_roots().iter() {
         if inc.is_dir() {
             scan_dir_recursive(inc, inc, available, 0);
         }
@@ -276,10 +216,9 @@ fn scan_dir_recursive(base: &std::path::Path, dir: &std::path::Path, available: 
         } else if path.extension().map(|e| e == "pm").unwrap_or(false) {
             if let Ok(rel) = path.strip_prefix(base) {
                 let module_name = crate::model::conventions::perl_module_from_rel_path(rel);
-                // Roots are walked in @INC order, so the FIRST one to claim a
-                // name is the one `require` would load. Overwriting here made
-                // the availability map name the LAST root — disagreeing with
-                // `resolve_module_paths` about which file a name means.
+                // Roots are walked in search order, so the FIRST one to claim
+                // a name is the one `require` would load — the map's own first
+                // answer for the name. Overwriting would name the LAST root.
                 available.entry(module_name).or_insert_with(|| path.clone());
             }
         }

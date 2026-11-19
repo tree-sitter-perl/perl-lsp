@@ -215,25 +215,22 @@ fn test_db_plugin_fingerprint_invalidation() {
 }
 
 /// A dependency's blob still reads the map (an exportless module borrows its
-/// first exporting parent's lists), so a moved `@INC` retires the tier's
+/// first exporting parent's lists), so a moved map retires the tier's
 /// rows — and only the tier's.
 #[test]
-fn test_db_inc_hash_invalidation() {
+fn test_db_dependency_map_invalidation() {
     let conn = test_db();
-    let paths1 = vec![PathBuf::from("/usr/lib/perl5")];
-    let paths2 = vec![
-        PathBuf::from("/usr/lib/perl5"),
-        PathBuf::from("/home/user/lib"),
-    ];
+    let map1 = crate::build::inc::map_over(vec![PathBuf::from("/usr/lib/perl5")]);
+    let map2 = crate::build::inc::map_over(vec![PathBuf::from("/usr/lib/perl5"), PathBuf::from("/home/user/lib")]);
     let foo = dep_fixture("IncHashFoo", "package Foo;\n1;\n");
     let ws = dep_fixture("IncHashWs", "package Ws;\n1;\n");
 
-    validate_inc_paths(&conn, &paths1).unwrap();
+    validate_dependency_map(&conn, &map1.generation()).unwrap();
     assert!(save_dep(&conn, &foo));
     save_to_db(&conn, &ws.path.to_string_lossy(), &Some(Arc::clone(&ws)), "workspace");
 
-    validate_inc_paths(&conn, &paths2).unwrap();
-    assert!(load_dependency_row(&conn, &foo.path).is_none(), "the tier's rows go when @INC moves");
+    validate_dependency_map(&conn, &map2.generation()).unwrap();
+    assert!(load_dependency_row(&conn, &foo.path).is_none(), "the tier's rows go when the map moves");
     assert!(load_one(&conn, &ws.path.to_string_lossy()).is_some(), "the walk's rows stay");
 
     let _ = std::fs::remove_file(&foo.path);
@@ -1050,11 +1047,11 @@ fn ref_rows_current_stamp_with_stale_shape_recreates_tables() {
 #[test]
 fn inc_clear_is_dependency_tier_scoped() {
     let conn = test_db();
-    validate_inc_paths(&conn, &[PathBuf::from("/lib/a")]).unwrap();
+    validate_dependency_map(&conn, "a").unwrap();
     shred_rows(&conn, "/ws/File.pm", "workspace", &[], &[]).unwrap();
     shred_rows(&conn, "/inc/Dep.pm", DEPENDENCY_SOURCE, &[], &[]).unwrap();
 
-    validate_inc_paths(&conn, &[PathBuf::from("/lib/CHANGED")]).unwrap();
+    validate_dependency_map(&conn, "CHANGED").unwrap();
     assert!(
         has_ref_rows(&conn, "/ws/File.pm"),
         "workspace rows must survive an @INC change"

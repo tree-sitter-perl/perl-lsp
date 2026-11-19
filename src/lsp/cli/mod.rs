@@ -337,14 +337,16 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
         return (ws, module_index);
     }
 
-    let mut inc_paths = timings::phase("cli::discover_inc", module_resolver::discover_inc_paths);
-    module_resolver::add_project_lib_paths(&mut inc_paths, &root_path);
+    // The walk above read the map; this is the same one.
+    let map = module_index
+        .dependency_map_for(served, Some(&root_path))
+        .unwrap_or_else(|| std::sync::Arc::new(crate::build::dependency_map::DependencyMap::empty()));
 
     // The store's gates run before any landing reads a row; there is no
     // warm lane (`module_resolver::land_module`).
     let db = module_cache::open_cache_db(Some(&root_uri), "perl");
     if let Some(ref conn) = db {
-        let _ = module_cache::validate_inc_paths(conn, &inc_paths);
+        let _ = module_cache::validate_dependency_map(conn, &map.generation());
         let _ = module_cache::validate_plugin_fingerprint(
             conn,
             &plugin::rhai_host::plugin_fingerprint(),
@@ -397,7 +399,7 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
             // One-shot copies stay whole: rehydration never amortizes here.
             let (_, stored) = module_index.land_module(
                 db.as_ref(),
-                &inc_paths,
+                &map,
                 &name,
                 &mut parser,
                 &mut parse_memo,

@@ -83,6 +83,11 @@ impl Backend {
             let conn = crate::index::module_cache::open_cache_db(ws_key.as_deref(), "perl");
             for (path, typ) in perl_changes {
                 let canon = crate::util::canonical_path::CanonicalPath::resolve(path.as_path()).into_path_buf();
+                // A file under the dependency map's tier root is the tier's,
+                // never a workspace file, though the watcher's glob hears it.
+                if module_index.dependency_map().is_some_and(|m| m.owns(&canon)) {
+                    continue;
+                }
                 if let Some(ref conn) = conn {
                     crate::index::module_cache::invalidate_generation(conn, &canon.to_string_lossy());
                     if canon != path {
