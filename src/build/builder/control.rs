@@ -3,6 +3,7 @@
 //! join builder reads one shape for every language (`docs/adr/cfg-tier.md`).
 
 use crate::build::query_extract::{Capture, CtlCap};
+use crate::cst::{Kind, NodeExt};
 use crate::model::file_analysis::{Arm, ArmRole, CallableBody, Construct, ControlKind, ControlView, Leave, LeaveKind, LeaveTarget, Span};
 use std::collections::HashMap;
 use tree_sitter::{Node, Point, Query};
@@ -162,8 +163,8 @@ fn captured<'t, 's>(caps: impl IntoIterator<Item = (CtlCap, Node<'t>)>, source: 
         .map(|(c, n)| {
             use crate::cst::NodeExt;
             let span = super::node_to_span(n);
-            let tail = match n.kind() {
-                "block" => n.elements().last().map_or(span.end, |s| s.end_position()),
+            let tail = match n.kind_of() {
+                Kind::Block => n.elements().last().map_or(span.end, |s| s.end_position()),
                 _ => span.end,
             };
             let text = match c {
@@ -180,7 +181,7 @@ fn captured<'t, 's>(caps: impl IntoIterator<Item = (CtlCap, Node<'t>)>, source: 
 pub(super) fn control_view_with_gates<'t>(
     nodes: impl IntoIterator<Item = Node<'t>>,
     source: &[u8],
-    gate: impl Fn(Node<'t>) -> bool,
+    gate: impl Fn(Node<'t>) -> Option<Node<'t>>,
 ) -> ControlView {
     let mut walk = ViewWalk::default();
     walk.walk(nodes, source, &gate);
@@ -204,13 +205,14 @@ impl<'s> ViewWalk<'s> {
     /// what decides whether an arm comes out at its end, and where a loop's
     /// `last` and `next` land. Each node is tried as a match's root and
     /// nothing below it starts one, so the cost is the nodes' own, not the
-    /// file's. A statement `gate` names is a call control comes back from
-    /// only if its callee does ([`ControlView::gates`]); it is returned.
+    /// file's. `gate` names the call a statement runs on its way through,
+    /// which control comes back from only if its callee does
+    /// ([`ControlView::gates`]); each is returned.
     pub(super) fn walk<'t>(
         &mut self,
         nodes: impl IntoIterator<Item = Node<'t>>,
         source: &'s [u8],
-        gate: &dyn Fn(Node<'t>) -> bool,
+        gate: &dyn Fn(Node<'t>) -> Option<Node<'t>>,
     ) -> Vec<Node<'t>> {
         use tree_sitter::StreamingIterator;
         let (query, caps) = ctl_query();
@@ -222,9 +224,9 @@ impl<'s> ViewWalk<'s> {
             if !self.seen.insert(node.id()) {
                 continue;
             }
-            if gate(node) {
-                self.gates.push(super::node_to_span(node));
-                gates.push(node);
+            if let Some(call) = gate(node) {
+                self.gates.push(super::node_to_span(call));
+                gates.push(call);
             }
             let mut it = cursor.matches(query, node, source);
             while let Some(m) = it.next() {
@@ -243,7 +245,7 @@ impl<'s> ViewWalk<'s> {
                     if matches!(caps[c.index as usize], CtlCap::TryBody | CtlCap::TryCatch | CtlCap::TryElse | CtlCap::TryFinally) {
                         self.out.extend(raises_in(c.node, source));
                     }
-                    if c.node.kind() == "block" {
+                    if c.node.is(Kind::Block) {
                         work.extend(statements_of(c.node));
                     } else {
                         work.push(c.node);
@@ -275,7 +277,7 @@ pub(super) fn statements_of(block: Node<'_>) -> Vec<Node<'_>> {
     let mut out = Vec::new();
     for stmt in block.elements() {
         out.push(stmt);
-        if stmt.kind() == "expression_statement" {
+        if stmt.is(Kind::ExpressionStatement) {
             out.extend(crate::cst::nth_element(stmt, 0));
         }
     }
@@ -304,8 +306,8 @@ pub(super) fn arm_around<'t>(syn: &crate::cst::SyntaxForest<'t>, source: &[u8], 
     cursor.set_max_start_depth(Some(0));
     let mut path = vec![node.id()];
     for p in syn.ancestors(node) {
-        let kind = p.kind();
-        if crate::cst::is_callable_boundary(kind) || kind == "source_file" || (bound == ArmBound::Block && kind == "block") {
+        let kind: Kind = p.kind_of();
+        if crate::cst::is_callable_boundary(kind) || kind == Kind::SourceFile || (bound == ArmBound::Block && kind == Kind::Block) {
             return None;
         }
         let mut it = cursor.matches(query, p, source);

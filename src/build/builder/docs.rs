@@ -12,8 +12,8 @@ impl<'a> Builder<'a> {
         let mut comment_lines: Vec<String> = Vec::new();
 
         while let Some(node) = prev {
-            match node.kind() {
-                "pod" => {
+            match node.kind_of() {
+                Kind::Pod => {
                     let text = &source_str[node.byte_range()];
                     // Try to extract just the section for this sub (=head2 or =item)
                     // extract_head2_section/extract_item_section return rendered markdown
@@ -34,7 +34,7 @@ impl<'a> Builder<'a> {
                     }
                     break;
                 }
-                "comment" => {
+                Kind::Comment => {
                     let text = source_str[node.byte_range()].trim();
                     let stripped = text.strip_prefix('#').unwrap_or(text).trim();
                     if !stripped.is_empty() {

@@ -131,7 +131,16 @@ impl PackBagCache {
     /// strict-residency tripwire can name WHY rehydration missed instead of
     /// collapsing every cause into "loader returned None".
     pub fn bag_for_diag(&self, path: &Path) -> Result<Arc<FileAnalysis>, RehydrateMiss> {
-        self.get_or_load(path, true)
+        self.get_or_load(path, true, true)
+    }
+
+    /// `bag_for_diag` / `rows_for_diag` for a reader that holds the answer
+    /// itself: an entry already resident answers, but a decode is handed
+    /// over without entering the LRU. A whole-corpus sweep reads each file
+    /// once as its own subject, and retaining those fills the cap with
+    /// entries nothing asks for again.
+    pub fn load_unretained(&self, path: &Path, want_bag: bool) -> Result<Arc<FileAnalysis>, RehydrateMiss> {
+        self.get_or_load(path, want_bag, false)
     }
 
     /// The rows-axes flavor of `bag_for`: refs + symbols GUARANTEED present,
@@ -143,16 +152,16 @@ impl PackBagCache {
     /// resident answers as-is (superset); a stripped entry never satisfies a
     /// later `bag_for` (it re-decodes whole and replaces the entry).
     pub fn rows_for(&self, path: &Path) -> Option<Arc<FileAnalysis>> {
-        self.get_or_load(path, false).ok()
+        self.get_or_load(path, false, true).ok()
     }
 
     /// `rows_for` with the discriminated miss, for the strict-residency
     /// tripwire — same pairing as `bag_for` / `bag_for_diag`.
     pub fn rows_for_diag(&self, path: &Path) -> Result<Arc<FileAnalysis>, RehydrateMiss> {
-        self.get_or_load(path, false)
+        self.get_or_load(path, false, true)
     }
 
-    fn get_or_load(&self, path: &Path, want_bag: bool) -> Result<Arc<FileAnalysis>, RehydrateMiss> {
+    fn get_or_load(&self, path: &Path, want_bag: bool, retain: bool) -> Result<Arc<FileAnalysis>, RehydrateMiss> {
         if let Some(hit) = self.entries.get(path) {
             let arc = hit.value().0.clone();
             drop(hit);
@@ -209,7 +218,7 @@ impl PackBagCache {
             loaded.evict_to(crate::model::file_analysis::Residency::RowsOnly);
         }
         let fa = Arc::new(loaded);
-        if self.cap_bytes() == 0 {
+        if !retain || self.cap_bytes() == 0 {
             return Ok(fa); // rehydrate-and-drop
         }
         // Retain only if no invalidation landed during the decode — the
