@@ -54,7 +54,18 @@ reap_servers() {
     [[ "$pgid" == "$our_pgid" ]] && kill -TERM "$pid" 2>/dev/null || true
   done
 }
-trap reap_servers EXIT
+
+# One throwaway cache for the whole run, shared by the warm-up below and every
+# suite's server (nvim's children and not_ready.py inherit the export). The
+# suites that build `tempname()` workspaces would otherwise each leave a new
+# hashed dir in the user's real ~/.cache/perl-lsp on every run, forever.
+e2e_cache=$(mktemp -d "${TMPDIR:-/tmp}/perl-lsp-e2e-cache.XXXXXX")
+export XDG_CACHE_HOME="$e2e_cache"
+cleanup() {
+  reap_servers
+  rm -rf "$e2e_cache"
+}
+trap cleanup EXIT
 
 # Warm the fixture cache synchronously before the suite loop. The cross-file
 # suites poll a fixed 10s for the workspace index; with a cold cache the async
@@ -63,9 +74,8 @@ trap reap_servers EXIT
 # same workspace-index + SQLite warm an LSP launch does), populating the cache
 # so every suite below starts warm and the poll is deterministic. The cache is
 # keyed on the canonicalized workspace root, so warm "$PWD" — the same root the
-# nvim test harness resolves via root_markers (`.git`), not `test_files`. Clear
-# first so the warm reflects the current build, not a stale blob.
-"$bin" --clear-cache "$PWD" >/dev/null 2>&1 || true
+# nvim test harness resolves via root_markers (`.git`), not `test_files`. The
+# cache dir is fresh, so the warm reflects the current build by construction.
 "$bin" --check "$PWD" --severity warning >/dev/null 2>&1 || true
 
 suites=(
