@@ -1089,12 +1089,25 @@
 ; A bare block's statements run where it stands.
 (compound_statement) @flow.block
 
-; How a call to a function ends is how its body does; a call that is a
-; whole statement lets control past it only if it comes back
+; How a call to a function ends is how its body does; a call a statement
+; runs (the statement itself, or the value an assignment or a declaration
+; stores) lets control past it only if it comes back
 ; (`docs/adr/cfg-tier.md` §Effects).
 (function_definition body: (compound_statement) @ctl.body)
 (lambda_expression body: (compound_statement) @ctl.body)
 (expression_statement (call_expression) @ctl.gate)
+(assignment_expression right: (call_expression) @ctl.gate)
+(parenthesized_expression (call_expression) @ctl.gate)
+(init_declarator value: (call_expression) @ctl.gate)
+; The `gate` walk, rooted at `@ctl.gate`: each node links to the one a
+; level out that runs it whenever it runs, so `a = (b = f())` gates at any
+; depth. The walk's end is the statement.
+(expression_statement (_) @link.from.gate) @link.outer
+(assignment_expression right: (_) @link.from.gate) @link.outer
+((parenthesized_expression (_) @link.from.gate) @link.outer
+ (#not-is-kind? @link.from.gate comment))
+(init_declarator value: (_) @link.from.gate) @link.outer
+(declaration declarator: (init_declarator) @link.from.gate) @link.outer
 
 ; ---- branch arms are lexical scopes (conditional-move soundness) ----
 ; if/else arm bodies each mint a @scope, so a `std::move` in one arm bounds its
