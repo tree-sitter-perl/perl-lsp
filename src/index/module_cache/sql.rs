@@ -303,11 +303,12 @@ registry! {
         "SELECT module_name, path, mtime_secs, file_size, analysis, extract_version, deps_stamp \
          FROM modules WHERE source = ?1";
     /// The stub BLOB is column 6, read only after the stamp checks pass;
-    /// `length(m.analysis)` reads the record header, not the blob.
+    /// `length(m.analysis)` reads the record header, not the blob. A
+    /// dependency row is its landing's, never the walk's.
     WARM_PACK_WITH_STUBS => NoScratch,
         "SELECT m.module_name, m.path, m.mtime_secs, m.file_size, m.extract_version, \
                 m.deps_stamp, s.stub, length(m.analysis) \
-         FROM modules m LEFT JOIN stubs s ON s.path = m.path";
+         FROM modules m LEFT JOIN stubs s ON s.path = m.path WHERE m.source = 'workspace'";
 
     // ---- stubs, surfaces, conclusions ----
     STUBS_CLEAR => NoScratch, "DELETE FROM stubs";

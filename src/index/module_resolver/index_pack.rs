@@ -39,9 +39,14 @@ pub fn index_pack_language(
 
     let lang = driver.id();
     let cap = driver.caps().file_cap;
+    // The dependency map first: its tier roots (Composer's `vendor/`) are
+    // the tier's, so the walk leaves them out whether or not the project
+    // ignores them.
+    let skip: Vec<PathBuf> =
+        index.dependency_map_for(driver, Some(root)).map(|m| m.tier_roots().to_vec()).unwrap_or_default();
     let walked = source_files::walk(
         root,
-        &source_files::Walk { extensions: driver.extensions(), cap, skip: &[], ignores: true },
+        &source_files::Walk { extensions: driver.extensions(), cap, skip: &skip, ignores: true },
     );
     source_files::report_oversize(&walked.oversize, cap);
     let paths = walked.files;

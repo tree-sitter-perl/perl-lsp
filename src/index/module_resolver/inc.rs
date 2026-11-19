@@ -1,9 +1,35 @@
-//! The @INC tier's landing: the files the dependency map locates for a
-//! name, parsed in process or read from their rows.
+//! The dependency tier's landing: the files the dependency map locates for
+//! a name, parsed in process or read from their rows, registered through
+//! the served language's front door.
 
 use super::*;
 use crate::build::dependency_map::{Ask, DependencyMap};
+use crate::index::module_index::FrontDoor;
 use crate::util::canonical_path::CanonicalPath;
+
+/// How the served language parses a landed file: the Perl hub through its
+/// own parser and builder, as its workspace walk does, a pack through the
+/// guarded parse every pack file goes through.
+pub(crate) enum Parse {
+    Hub(Parser),
+    Pack(&'static dyn crate::build::language_driver::LanguageDriver),
+}
+
+impl Parse {
+    pub(crate) fn of(driver: &'static dyn crate::build::language_driver::LanguageDriver) -> Self {
+        match FrontDoor::of(driver) {
+            FrontDoor::Hub => Parse::Hub(create_parser()),
+            FrontDoor::Pack => Parse::Pack(driver),
+        }
+    }
+
+    fn door(&self) -> FrontDoor {
+        match self {
+            Parse::Hub(_) => FrontDoor::Hub,
+            Parse::Pack(_) => FrontDoor::Pack,
+        }
+    }
+}
 
 // ---- Module parsing ----
 
@@ -24,20 +50,20 @@ pub(crate) fn land_module(
     map: &DependencyMap,
     map_gen: u64,
     module_name: &str,
-    parser: &mut Parser,
+    parse: &mut Parse,
     strip: bool,
 ) -> (Option<Providers>, Option<Providers>) {
     let located = located_as(map, module_name);
     if let Some(held) = core.restamp_placed(&located, module_name, map_gen) {
         return (None, Some(held));
     }
-    let parsed = parse_providers(module_name, located, parser, rows);
+    let parsed = parse_providers(module_name, located, parse, rows);
     let whole = core.tier_providers(parsed);
     let persisted = match (rows, &whole) {
         (Some(conn), Some(providers)) => providers.iter().all(|m| persist_dependency(conn, m)),
         _ => false,
     };
-    let stored = core.land_providers(module_name, whole.clone(), persisted, strip, map_gen);
+    let stored = core.land_providers(module_name, whole.clone(), persisted, strip, map_gen, parse.door());
     (whole, stored)
 }
 
@@ -60,7 +86,13 @@ pub fn resolve_and_parse_all(
     module_name: &str,
     parser: &mut Parser,
 ) -> Option<Providers> {
-    parse_providers(module_name, located_as(map, module_name), parser, None)
+    // The caller's parser, lent to the hub's parse and handed back.
+    let mut parse = Parse::Hub(std::mem::replace(parser, Parser::new()));
+    let out = parse_providers(module_name, located_as(map, module_name), &mut parse, None);
+    if let Parse::Hub(p) = parse {
+        *parser = p;
+    }
+    out
 }
 
 /// `resolve_and_parse_all`'s first provider.
@@ -79,11 +111,11 @@ pub fn resolve_and_parse(
 fn parse_providers(
     module_name: &str,
     located: Vec<CanonicalPath>,
-    parser: &mut Parser,
+    parse: &mut Parse,
     rows: Option<&rusqlite::Connection>,
 ) -> Option<Providers> {
     let providers: Providers =
-        located.into_iter().filter_map(|path| parse_one_provider(module_name, path, parser, rows)).collect();
+        located.into_iter().filter_map(|path| parse_one_provider(module_name, path, parse, rows)).collect();
     (!providers.is_empty()).then_some(providers)
 }
 
@@ -93,12 +125,21 @@ fn parse_providers(
 fn parse_one_provider(
     module_name: &str,
     path: CanonicalPath,
-    parser: &mut Parser,
+    parse: &mut Parse,
     rows: Option<&rusqlite::Connection>,
 ) -> Option<Arc<CachedModule>> {
     if let Some(fa) = rows.and_then(|conn| module_cache::load_dependency_row(conn, &path)) {
         return Some(Arc::new(CachedModule::new(path, Arc::new(fa))));
     }
+    let parser = match parse {
+        Parse::Hub(parser) => parser,
+        Parse::Pack(driver) => {
+            let start = std::time::Instant::now();
+            let analysis = crate::build::source_files::analyze_file(*driver, &path, driver.caps().file_cap)?;
+            crate::util::timings::record_built(module_name, std::time::Duration::ZERO, start.elapsed());
+            return Some(Arc::new(CachedModule::new(path, Arc::new(analysis))));
+        }
+    };
     let bench = std::env::var_os("PERL_LSP_BENCH").is_some();
     let bench_start = if bench { Some(std::time::Instant::now()) } else { None };
 

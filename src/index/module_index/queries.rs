@@ -27,7 +27,7 @@ impl ModuleIndex {
 
     pub fn new(client: Client, on_diagnostics_refresh: impl Fn() + Send + Sync + 'static) -> Self {
         let core = Arc::new(IndexCore::new());
-        if serves_perl() {
+        if has_dependency_tier() {
             module_resolver::spawn_resolver(
                 Arc::clone(&core),
                 client,
@@ -172,6 +172,12 @@ impl ModuleIndex {
             asks.extend(parents.iter().map(|p| Ask::Name(p.clone())));
         }
         self.core.ask(asks);
+    }
+
+    /// Whether a resolver thread serves this index: the served language has
+    /// a dependency tier.
+    pub fn serves_dependency_tier(&self) -> bool {
+        self.core.queue.served.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Block until the resolver thread has read its map and has nothing
@@ -595,7 +601,7 @@ impl ModuleIndex {
 
     pub fn new_for_cli() -> Self {
         let core = Arc::new(IndexCore::new());
-        if serves_perl() {
+        if has_dependency_tier() {
             module_resolver::spawn_test_resolver(Arc::clone(&core));
         }
         Self::from_core(core)
@@ -658,8 +664,14 @@ impl ModuleIndex {
 
 }
 
-/// The resolver thread is the Perl `@INC` tier: a pack process has no
-/// dependency tier for it to scan, so it never spawns.
+/// The resolver thread is the served language's dependency tier: a
+/// language with no reader of the dependency map has none, and the thread
+/// never spawns.
+fn has_dependency_tier() -> bool {
+    crate::build::language_driver::LanguageRegistry::served().has_dependency_map()
+}
+
+/// The Perl hub's store and its long-lived behaviours.
 fn serves_perl() -> bool {
     crate::build::language_driver::LanguageRegistry::served().caps().hub_enrichment
 }

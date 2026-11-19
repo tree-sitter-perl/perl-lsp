@@ -1,7 +1,7 @@
 use super::*;
 use crate::build::dependency_map::Ask;
 use crate::build::inc::{discover_inc_paths, map_over};
-use crate::index::module_index::strip_import_copy_one;
+use crate::index::module_index::{strip_import_copy_one, FrontDoor};
 
 /// The file a `require` of `name` loads under `roots`: the map's first.
 fn winner(roots: &[PathBuf], name: &str) -> Option<PathBuf> {
@@ -87,11 +87,11 @@ sub new {
     let cached = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/x/Demo/Has/Event.pm")), analysis));
 
     // Workspace-index style insert: a resolved module.
-    core.land_providers("Demo::Has::Event", Some(vec![cached]), false, false, 1);
+    core.land_providers("Demo::Has::Event", Some(vec![cached]), false, false, 1, FrontDoor::Hub);
     assert!(core.cache.get("Demo::Has::Event").as_deref().unwrap().is_some());
 
     // On-demand resolver miss: `None`. Must NOT clobber the indexed copy.
-    core.land_providers("Demo::Has::Event", None, false, false, 1);
+    core.land_providers("Demo::Has::Event", None, false, false, 1, FrontDoor::Hub);
     assert!(
         core.cache.get("Demo::Has::Event").as_deref().unwrap().is_some(),
         "a None on-demand miss clobbered an already-indexed module",
@@ -102,7 +102,7 @@ sub new {
     let tree2 = parser.parse(source, None).unwrap();
     let analysis2 = std::sync::Arc::new(crate::build::builder::build(&tree2, source.as_bytes()));
     let cached2 = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/y/Demo/Has/Event.pm")), analysis2));
-    core.land_providers("Demo::Has::Event", Some(vec![cached2]), false, false, 1);
+    core.land_providers("Demo::Has::Event", Some(vec![cached2]), false, false, 1, FrontDoor::Hub);
     assert_eq!(
         core.cache.get("Demo::Has::Event").as_deref().unwrap().as_ref().unwrap().path,
         crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/y/Demo/Has/Event.pm")),
@@ -722,7 +722,7 @@ fn a_landing_reads_the_files_row_in_place_of_parsing_it() {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     module_cache::init_schema(&conn).unwrap();
     let inc = map_over(vec![root.clone()]);
-    let mut parser = create_parser();
+    let mut parser = Parse::Hub(create_parser());
 
     let core = IndexCore::new();
     let (_, stored) = land_module(&core, Some(&conn), &inc, 1, "Row::Cached", &mut parser, false);
@@ -796,5 +796,54 @@ fn the_walk_leaves_the_map_s_tier_root_to_the_tier() {
     let (_, stored) = idx.land_module(None, &map, "Dep", &mut parser);
     assert!(stored.is_some());
     assert_eq!(idx.file_role(&dep), Some(FileRole::Dependency), "the map lands it as a dependency");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A php project's `vendor/` is the Composer map's tier root: the walk
+/// leaves it out though nothing ignores it, and a class the map places
+/// lands through the pack door as a dependency, its own parent edge
+/// published as a project file's would be.
+#[cfg(feature = "php")]
+#[test]
+fn a_vendor_class_lands_through_the_pack_door_from_composer_s_map() {
+    use crate::model::file_analysis::{CrossFileLookup, FileRole};
+    let php = crate::build::language_driver::LanguageRegistry::compiled().for_id("php").expect("php driver");
+    let dir = std::env::temp_dir().join(format!("d7_vendor_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let files = [
+        ("composer.json", r#"{"autoload": {"psr-4": {"App\\": "src/"}}}"#),
+        (
+            "vendor/composer/installed.json",
+            r#"{"packages": [{"name": "acme/base", "install-path": "../acme/base",
+                "autoload": {"psr-4": {"Acme\\": "src/"}}}]}"#,
+        ),
+        ("vendor/acme/base/src/Root.php", "<?php\nnamespace Acme;\nclass Root {}\n"),
+        ("vendor/acme/base/src/Base.php", "<?php\nnamespace Acme;\nclass Base extends Root { public function hello() {} }\n"),
+        ("src/User.php", "<?php\nnamespace App;\nuse Acme\\Base;\nclass User extends Base {}\n"),
+    ];
+    for (rel, body) in files {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = crate::util::canonical_path::CanonicalPath::resolve(dir).into_path_buf();
+    let canon = |rel: &str| crate::util::canonical_path::CanonicalPath::resolve(dir.join(rel));
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    index_pack_language(php, &dir, None, &idx, None, 0);
+    assert_eq!(idx.file_role(&canon("src/User.php")), Some(FileRole::Workspace));
+    assert_eq!(idx.file_role(&canon("vendor/acme/base/src/Base.php")), None, "the walk leaves `vendor/` to the tier");
+
+    let map = idx.dependency_map().expect("the walk read php's map");
+    let (_, stored) = idx.land_pack_module(&map, "Acme\\Base", php);
+    assert!(stored.is_some(), "Acme\\Base lands");
+    let base = canon("vendor/acme/base/src/Base.php");
+    assert_eq!(idx.file_role(&base), Some(FileRole::Dependency));
+    assert_eq!(idx.get_cached("Acme\\Base").map(|m| m.path.clone()), Some(base));
+    assert!(
+        idx.direct_children_of("Acme\\Root").iter().any(|(child, _)| child == "Acme\\Base"),
+        "a landed class's parent edge is published"
+    );
+    assert!(idx.land_pack_module(&map, "App\\User", php).1.is_none(), "the project's own class is the walk's");
     let _ = std::fs::remove_dir_all(&dir);
 }

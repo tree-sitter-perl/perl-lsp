@@ -446,7 +446,10 @@ impl IndexCore {
     ///
     /// Each placement is stamped with `map_gen`, the generation that located
     /// it. A miss touches nothing: it is the memo's (`IndexCore::asked`),
-    /// never the slot's.
+    /// never the slot's. `door` is the served language's front door, whose
+    /// projections a landed file gets, as a project file of that language
+    /// does.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn land_providers(
         &self,
         module_name: &str,
@@ -454,6 +457,7 @@ impl IndexCore {
         persisted: bool,
         strip: bool,
         map_gen: u64,
+        door: FrontDoor,
     ) -> Option<Providers> {
         let providers = self.tier_providers(result)?;
         crate::util::ghost_stats::count("epoch.shape.insert_resolved");
@@ -461,14 +465,24 @@ impl IndexCore {
         // One purge, then one push per provider: `record_loader_shapes`
         // clears the contributor's entries before pushing, so calling it
         // per provider would leave only the last one's shapes.
-        self.purge_loader_shapes(module_name);
+        if door == FrontDoor::Hub {
+            self.purge_loader_shapes(module_name);
+        }
         for m in &providers {
             if let Some(bc) = self.bag_cache.read().ok().and_then(|g| g.clone()) {
                 bc.invalidate(&m.path);
             }
             self.mint_registration_gen(&m.path);
-            self.edges.feed(module_name, &m.path, &m.analysis);
-            self.push_loader_shapes(module_name, &m.analysis);
+            match door {
+                FrontDoor::Hub => {
+                    self.edges.feed(module_name, &m.path, &m.analysis);
+                    self.push_loader_shapes(module_name, &m.analysis);
+                }
+                FrontDoor::Pack => {
+                    let (_, specs) = ModuleIndex::prepare_pack_feed(&m.analysis);
+                    self.publish_pack_edges(&m.path, &m.analysis, &specs);
+                }
+            }
         }
         let stored: Providers = providers
             .iter()
@@ -491,6 +505,32 @@ impl IndexCore {
             self.set_slot(module_name, stored.first().cloned());
         }
         Some(stored)
+    }
+
+    /// A pack file's edges: its specializations (`specs`, `(spec, primary)`
+    /// read off the whole analysis before any strip), its parents (parent →
+    /// child, the cross-file leg `direct_children_of` walks) and its
+    /// includes (header → includer), both of which survive every strip.
+    /// Each entry is a by-name key that self-heals at read, so a
+    /// re-registration only adds.
+    pub(crate) fn publish_pack_edges(
+        &self,
+        path: &crate::util::canonical_path::CanonicalPath,
+        analysis: &FileAnalysis,
+        specs: &[(String, String)],
+    ) {
+        for (spec, primary) in specs {
+            self.edges.publish_spec(primary, spec);
+        }
+        for (child, parents) in analysis.package_parent_edges() {
+            for parent in parents {
+                self.edges.publish_child(parent, child);
+            }
+        }
+        let includer = path.to_string_lossy();
+        for target in analysis.pack.include_directives.iter().filter_map(|d| d.target.as_deref()) {
+            self.edges.publish_includer(target, &includer);
+        }
     }
 
     /// Whether a project file holds `name`'s slot. Project code shadows an
@@ -754,6 +794,30 @@ impl IndexCore {
 /// the import tier is the follow-up in
 /// `docs/prompt-storage-residuals.md`. Degraded
 /// analyses keep the bag (their rows never persist).
+/// The registration door a language's files go through: the Perl hub's
+/// (`register_workspace_*`, edge feed plus loader-config shapes) or the
+/// pack front door (`register_symbols`, the pack edges). A dependency lands
+/// through its language's door, the same choice the workspace indexer
+/// makes (`index_workspace_with_index` vs `index_pack_language`).
+///
+/// TODO(single-registration-target): one door for every language
+/// (`docs/prompt-unify-language-paths.md`) retires this choice.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum FrontDoor {
+    Hub,
+    Pack,
+}
+
+impl FrontDoor {
+    pub(crate) fn of(driver: &dyn crate::build::language_driver::LanguageDriver) -> Self {
+        if driver.caps().hub_enrichment {
+            FrontDoor::Hub
+        } else {
+            FrontDoor::Pack
+        }
+    }
+}
+
 pub(crate) fn strip_import_copy_one(
     m: &Arc<CachedModule>,
     persisted: bool,

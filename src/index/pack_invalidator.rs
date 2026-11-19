@@ -363,6 +363,11 @@ impl PackInvalidator {
         }
         let lang = driver.id();
         let canon = CanonicalPath::resolve(path);
+        // A file under the dependency map's tier root is the tier's, never a
+        // workspace file, though the watcher's glob hears it.
+        if index.dependency_map().is_some_and(|m| m.owns(canon.as_path())) {
+            return Swept::default();
+        }
         let canon_str = canon.to_string_lossy().into_owned();
         let pack = index;
         let refiled = driver

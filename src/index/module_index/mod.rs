@@ -209,7 +209,7 @@ mod parts;
 pub use parts::*;
 
 mod index_core;
-pub(crate) use index_core::{IndexCore, Outcome};
+pub(crate) use index_core::{FrontDoor, IndexCore, Outcome};
 #[cfg(test)]
 pub(crate) use index_core::strip_import_copy_one;
 

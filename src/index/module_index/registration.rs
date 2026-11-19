@@ -391,7 +391,8 @@ impl ModuleIndex {
     /// single-copy front door above is this one with a one-element set —
     /// there is no separate one-provider path.
     pub fn insert_cache_providers(&self, module_name: &str, providers: Option<Providers>) {
-        self.core.land_providers(module_name, providers, false, false, self.core.map_generation());
+        let door = FrontDoor::of(crate::build::language_driver::LanguageRegistry::served());
+        self.core.land_providers(module_name, providers, false, false, self.core.map_generation(), door);
     }
 
     /// The resolver thread's landing of `module_name`
@@ -405,7 +406,24 @@ impl ModuleIndex {
         module_name: &str,
         parser: &mut tree_sitter::Parser,
     ) -> (Option<Providers>, Option<Providers>) {
-        module_resolver::land_module(&self.core, rows, map, self.core.map_generation(), module_name, parser, false)
+        let mut parse = module_resolver::Parse::Hub(std::mem::replace(parser, tree_sitter::Parser::new()));
+        let out = module_resolver::land_module(&self.core, rows, map, self.core.map_generation(), module_name, &mut parse, false);
+        if let module_resolver::Parse::Hub(p) = parse {
+            *parser = p;
+        }
+        out
+    }
+
+    /// `land_module` through a pack language's door.
+    #[cfg(test)]
+    pub fn land_pack_module(
+        &self,
+        map: &crate::build::dependency_map::DependencyMap,
+        module_name: &str,
+        driver: &'static dyn crate::build::language_driver::LanguageDriver,
+    ) -> (Option<Providers>, Option<Providers>) {
+        let mut parse = module_resolver::Parse::Pack(driver);
+        module_resolver::land_module(&self.core, None, map, self.core.map_generation(), module_name, &mut parse, false)
     }
 
     /// The dependency map read so far, if any.
@@ -1764,38 +1782,10 @@ impl ModuleIndex {
             let mut v = self.core.leaf_defs.entry(leaf).or_default();
             v.upsert(cached.clone());
         }
-        // Specialization family edges: primary → spec NAMES. A spec's Class
-        // symbol registered above makes `get_cached(spec_name)` resolve, so
-        // the reverse map's values are the same by-name keys the rest of the
-        // pack index uses. A stale entry (edited file dropped a spec)
-        // self-heals at read: `direct_specializations_of` re-checks the pair
-        // against the CURRENT analysis.
-        for (spec, primary) in specializes {
-            self.core.edges.publish_spec(primary, spec);
-        }
-        // Inverse inheritance edges: parent → child NAMES, so
-        // `direct_children_of` (the INHERITS_INV cross-file leg the
-        // implementations verb walks) can find the subclasses of a base. The
-        // Perl `feed()` path populates `children` via `parent_classes`; the
-        // pack path builds it here (it bypasses `feed`). Symmetric with the
-        // spec map above: the child NAME is a by-name key `get_cached`
-        // resolves, and `direct_children_of` re-checks each candidate's CURRENT
-        // `package_parents`, so a stale entry (an edit dropped a base)
-        // self-heals at read. `package_parents` survives every strip
-        // (`evict_to` leaves it) and rides the warm-stub skeleton, so the arc
-        // carries it on the fresh, warm, and whole paths alike.
-        for (child, parents) in analysis.package_parent_edges() {
-            for parent in parents {
-                self.core.edges.publish_child(parent, child);
-            }
-        }
-        // Include edges: header → this file. The directives ride every
-        // strip and the warm-stub skeleton (pack lane), so fresh, warm and
-        // whole registrations all publish them.
-        let includer = cached.path.to_string_lossy();
-        for target in analysis.pack.include_directives.iter().filter_map(|d| d.target.as_deref()) {
-            self.core.edges.publish_includer(target, &includer);
-        }
+        // Specialization, inverse-inheritance and include edges. They ride
+        // every strip and the warm-stub skeleton, so fresh, warm and whole
+        // registrations all publish them.
+        self.core.publish_pack_edges(&cached.path, &analysis, specializes);
     }
 
     /// Remove a pack file's registrations: its `all_files` entry, its

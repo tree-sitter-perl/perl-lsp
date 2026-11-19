@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::build::dependency_map::Ask;
-use crate::index::module_index::Outcome;
+use crate::index::module_index::{FrontDoor, Outcome};
 
 /// The ONE resolver loop, server and headless alike. Mode differences are
 /// explicit `server` gates inside this body — the per-module resolve
@@ -18,12 +18,17 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     let root_path = ws_root.as_ref().and_then(|u| uri_to_path(u));
 
     // The map, read before anything can query: an origin's visibility rank
-    // prefix-matches candidates against its search roots, and the reader
-    // shells out to `perl`, so no request path may re-derive it. The walk
-    // may have read it first; either way it is read once.
-    static PERL: crate::build::language_driver::PerlDriver = crate::build::language_driver::PerlDriver;
-    core.dependency_map_for(&PERL, root_path.as_deref());
+    // prefix-matches candidates against its search roots, and a reader may
+    // shell out (perl's) or read a generated table (php's classmap), so no
+    // request path may re-derive it. The walk may have read it first;
+    // either way it is read once.
+    let served = crate::build::language_driver::LanguageRegistry::served();
+    core.dependency_map_for(served, root_path.as_deref());
     let (mut map, mut map_gen) = core.current_map();
+    let mut parse = Parse::of(served);
+    // The hub's store gates, builtin docs, cpanfile demand and conclusion
+    // repair are its own; a pack's store has the one gate its indexer runs.
+    let hub = FrontDoor::of(served) == FrontDoor::Hub;
 
     // Scan the search roots for available module names (fast, no parsing — just readdir)
     scan_inc_module_names(&map, &core.available_modules);
@@ -34,8 +39,11 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     // parsing it, so a warm start lands what a cold one would. No gate reads
     // the map: a dependency row describes its file alone, valid by its own
     // stamp, whichever map located it.
-    let db = module_cache::open_cache_db(ws_root.as_deref(), "perl");
-    if let Some(ref conn) = db {
+    let db = module_cache::open_cache_db(ws_root.as_deref(), served.id());
+    if let (Some(conn), false) = (&db, hub) {
+        let _ = module_cache::validate_input_fingerprint(conn, served.analysis_input_fingerprint());
+    }
+    if let (Some(conn), true) = (&db, hub) {
         let _ = module_cache::validate_plugin_fingerprint(
             conn,
             &crate::build::plugin::rhai_host::plugin_fingerprint(),
@@ -63,15 +71,13 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         }
     }
 
-    let mut parser = create_parser();
-
     // Queue cpanfile dependencies (non-blocking).
     // Track total for progress reporting in the main loop. Server-only: a
     // one-shot session must not burn its wall resolving the dep tree in the
     // background.
     let mut cpanfile_total = 0usize;
     let mut cpanfile_done = 0usize;
-    if let Some(srv) = &server {
+    if let (Some(srv), true) = (&server, hub) {
         if let Some(root_path) = ws_root.as_ref().and_then(|u| uri_to_path(u)) {
             let cpanfile_modules = cpanfile::parse_cpanfile(&root_path);
             let to_resolve: Vec<Ask> = cpanfile_modules
@@ -129,6 +135,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     // un-repaired surfaces.
     let mut repair_frontier: Vec<String> = db
         .as_ref()
+        .filter(|_| hub)
         .map(|conn| {
             let at = module_cache::current_generation(conn);
             let f = module_cache::paths_needing_repair(
@@ -162,7 +169,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         let batch = drain_or_repair(&core, &core.queue, &mut repair_frontier, db.as_ref());
 
         if core.queue.map_inputs_moved.swap(false, std::sync::atomic::Ordering::AcqRel) {
-            core.reread_dependency_map(&PERL, root_path.as_deref());
+            core.reread_dependency_map(served, root_path.as_deref());
         }
         // A move: every ask is asked again against the new map, which
         // restamps what it still places and lands what it newly places; the
@@ -212,7 +219,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                     &map,
                     map_gen,
                     &module_name,
-                    &mut parser,
+                    &mut parse,
                     strip,
                 );
                 match &stored {
