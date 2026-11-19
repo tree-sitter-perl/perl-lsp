@@ -244,12 +244,15 @@ impl IndexCore {
     }
 
     /// The served language's store, where a map is kept between runs; `None`
-    /// before a workspace root is known, so nothing is kept under the global
-    /// cache by mistake.
+    /// for a language with no map, and before a workspace root is known, so
+    /// nothing is kept under the global cache by mistake.
     fn map_store(
         &self,
         driver: &dyn crate::build::language_driver::LanguageDriver,
     ) -> Option<rusqlite::Connection> {
+        if !driver.has_dependency_map() {
+            return None;
+        }
         let key = self.workspace_root.root.lock().unwrap_or_else(|e| e.into_inner()).clone()??;
         crate::index::module_cache::open_cache_db(Some(&key), driver.id())
     }
