@@ -33,7 +33,7 @@ struct SweepMemo {
     /// as long as its check runs, and by no cache that outlives it: every
     /// file is a subject exactly once, so a sweep-wide cache that admitted
     /// subjects would end the sweep holding the corpus.
-    subject: Option<std::path::PathBuf>,
+    subject: std::path::PathBuf,
     /// Bytes this file's memo holds (estimates) — the crest attribution:
     /// per-worker in-flight working sets are bounded by the largest single
     /// file's memo, and `sweep.memo_peak_file_bytes` reports the max seen.
@@ -370,16 +370,10 @@ impl SweepMemoGuard {
         let off = *OFF.get_or_init(|| {
             std::env::var("PERL_LSP_NO_SWEEP_MEMO").as_deref() == Ok("1")
         });
-        // `PERL_LSP_SWEEP_RETAIN_SUBJECT=1` sends the subject through the
-        // sweep-wide caches like any provider: the A/B control.
-        static RETAIN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let retain = *RETAIN.get_or_init(|| {
-            std::env::var("PERL_LSP_SWEEP_RETAIN_SUBJECT").as_deref() == Ok("1")
-        });
         if !off {
             SWEEP_MEMO.with(|c| {
                 *c.borrow_mut() = Some(SweepMemo {
-                    subject: (!retain).then(|| subject.to_path_buf()),
+                    subject: subject.to_path_buf(),
                     ..SweepMemo::default()
                 })
             });
@@ -1490,7 +1484,7 @@ impl ModuleIndex {
                 whole.or_else(|| memo.map.get(&(path, want_bag)).cloned())
             });
             let is_subject = SWEEP_MEMO.with(|c| {
-                c.borrow().as_ref().is_some_and(|m| m.subject.as_deref() == Some(cached.path.as_path()))
+                c.borrow().as_ref().is_some_and(|m| m.subject == cached.path.as_path())
             });
             if let Some(hit) = memoed {
                 crate::util::ghost_stats::count("sweep.memo_hit");
