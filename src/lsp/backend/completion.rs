@@ -66,27 +66,29 @@ pub fn pack_completion(
             Some(base_idx),
             crate::index::resolve::OverrideScope::default(),
         );
-        let candidates = if arm == crate::lsp::cursor_slot::DetectorArm::UseModule {
-            cs.complete_module_candidates(prefix)
-        } else {
-            cs.complete_qualified_path(xidx, prefix)
-        };
-        if !candidates.is_empty() {
-            return (
-                candidates.into_iter().map(symbols::candidate_to_completion_item).collect(),
-                false,
-            );
-        }
-        // The universe it falls through to is filtered by the word typed,
-        // as at any bare identifier.
         if arm == crate::lsp::cursor_slot::DetectorArm::UseModule {
+            let candidates = cs.complete_module_candidates(prefix);
+            if !candidates.is_empty() {
+                // A vendor tree lists thousands of names under a short
+                // prefix; the shared finisher ranks, cuts to the cap and
+                // marks the list incomplete, as on Perl's `use` line.
+                let items = candidates.into_iter().map(symbols::candidate_to_completion_item).collect();
+                return symbols::finish_completion(items, &slot, false, false);
+            }
+            // The universe it falls through to is filtered by the word
+            // typed, as at any bare identifier.
+            let cursor = crate::build::cursor_sentinel::point_to_byte(source, point);
             slot = crate::lsp::cursor_slot::Slot::Identifier {
-                prefix: crate::lsp::cursor_slot::identifier_prefix(
-                    source,
-                    crate::build::cursor_sentinel::point_to_byte(source, point),
-                )
-                .to_string(),
+                prefix: crate::lsp::cursor_slot::identifier_prefix(source, cursor).to_string(),
             };
+        } else {
+            let candidates = cs.complete_qualified_path(xidx, prefix);
+            if !candidates.is_empty() {
+                return (
+                    candidates.into_iter().map(symbols::candidate_to_completion_item).collect(),
+                    false,
+                );
+            }
         }
     }
     // `o->op_type == |` — the equality's field operand types the slot to
