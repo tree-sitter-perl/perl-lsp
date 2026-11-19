@@ -56,11 +56,10 @@ enum Slot {
   the file first, an imported member (`from a.b import C|`) is no module,
   and a relative import names the file's own package, so none of those
   is one. The prefix comes from the sentinel reparse
-  (`cursor_sentinel::identity_prefix_incremental`), so it is read from the
-  pack's own captures, never from text. When the listing has nothing for
-  it, completion falls back to the bare word typed. A PHP `use` the
-  buffer ends in before its `;` parses as an ERROR and gives no capture,
-  so it completes as that bare word.
+  (`cursor_sentinel::identity_prefix`, on the request's one
+  `SentinelParse`), so it is read from the pack's own captures, never
+  from text. When the listing has nothing for it, completion falls back
+  to the bare word typed.
 - **Each Slot variant declares its candidate question**: Identifier/
   ModulePath → CandidateSet projections; Member/Key → the entity-content
   seams (`Member`/`ReceiverGated`/keys); Import → the named

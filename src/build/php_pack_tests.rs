@@ -4895,10 +4895,8 @@ fn the_finished_buffer_is_analyzed_only_where_the_written_one_failed_to_parse() 
             analyzed.set(analyzed.get() + 1);
             driver.analyze(patched)
         };
-        let ctx = crate::build::cursor_sentinel::member_completion_ctx_incremental(
-            &mut parser, &php_pack(), src, &tree, cursor, &fa, None, &completed,
-        )
-        .unwrap();
+        let sp = crate::build::cursor_sentinel::sentinel_parse(&mut parser, &php_pack(), src, &tree, cursor).unwrap();
+        let ctx = crate::build::cursor_sentinel::member_completion_ctx(&sp, &php_pack(), &fa, None, &completed).unwrap();
         (ctx.receiver_type.and_then(|t| t.class_name().map(str::to_string)), analyzed.get())
     };
     let error = "<?php\nclass Foo { const X = 1; }\nfunction f() {\n  Foo::\n}\n";

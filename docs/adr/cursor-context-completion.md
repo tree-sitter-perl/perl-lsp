@@ -57,9 +57,14 @@ resolution together; a test-only `Receiver{text,start,end,arrow}` probe
 isolates just the sentinel mechanics for assertions:
 
 ```rust
-pub fn member_completion_ctx_incremental(parser, cfg, src, old_tree, cursor, analysis, module_index) -> Option<MemberCompletionCtx>
+pub fn sentinel_parse(parser, cfg, src, written_tree, cursor) -> Option<SentinelParse>
+pub fn member_completion_ctx(&SentinelParse, cfg, analysis, module_index, completed) -> Option<MemberCompletionCtx>
 pub struct MemberCompletionCtx { receiver_type: Option<InferredType>, op_fix: Option<(Span, String)>, op: MemberOp }
 ```
+
+`detect_slot` takes one `SentinelParse` per request and hands it to every
+arm that reads the finished buffer (member, identity, domain comparison),
+so a completion pays one reparse whichever arm answers.
 
 Two properties make it cheap and exact:
 

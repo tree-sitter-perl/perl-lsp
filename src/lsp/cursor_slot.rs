@@ -238,9 +238,11 @@ pub fn detect_slot(
     };
     let mut parser = driver.make_parser();
     let completed = |patched: &str| driver.analyze_with_path(patched, path);
-    if let Some(ctx) = crate::build::cursor_sentinel::member_completion_ctx_incremental(
-        &mut parser, &lang_pack, source, tree, cursor, analysis, module_index, &completed,
-    ) {
+    // One sentinel reparse serves every arm that reads the finished buffer.
+    let sp = crate::build::cursor_sentinel::sentinel_parse(&mut parser, &lang_pack, source, tree, cursor);
+    if let Some(ctx) = sp.as_ref().and_then(|sp| {
+        crate::build::cursor_sentinel::member_completion_ctx(sp, &lang_pack, analysis, module_index, &completed)
+    }) {
         return DetectedSlot {
             slot: Slot::Member {
                 receiver: ReceiverCtx {
@@ -271,18 +273,17 @@ pub fn detect_slot(
     // `use Vendor\Pa|` / `new \Vend|` / `import os.pa|` — an identity spelled
     // whole (an import, or a reference written absolute) names a module the
     // dependency map may place unparsed, so it completes from the listing.
-    if let Some(prefix) = crate::build::cursor_sentinel::identity_prefix_incremental(
-        &mut parser, &lang_pack, source, tree, cursor,
-    ) {
+    if let Some(prefix) = sp.as_ref().and_then(|sp| crate::build::cursor_sentinel::identity_prefix(sp, &lang_pack)) {
         return DetectedSlot { slot: Slot::ModulePath { prefix }, arm: DetectorArm::UseModule };
     }
     // `field == |` — the equality's field operand carries an enum DOMAIN.
     // The slot hands that expected type to completion so the domain's
     // members rank first (`docs/adr/cursor-slots.md`). No callee: this is
     // a comparison, not a call, but it wants the same `expected_type` seam.
-    if let Some(expected) = crate::build::cursor_sentinel::domain_compare_ctx_incremental(
-        &mut parser, &lang_pack, source, tree, cursor, analysis, module_index,
-    ) {
+    if let Some(expected) = sp
+        .as_ref()
+        .and_then(|sp| crate::build::cursor_sentinel::domain_compare_ctx(sp, &lang_pack, analysis, module_index))
+    {
         return DetectedSlot {
             slot: Slot::ArgPosition { callee: None, index: 0, expected: Some(expected) },
             arm: DetectorArm::DomainCompare,
