@@ -1929,6 +1929,7 @@ fn build_facts_are_not_keyed_by_position() {
         ("build/builder/pattern_dispatch.rs", 3, "plugin matches deduplicated by span (walk and fold); a pattern's owner by pattern index, not a position"),
         ("build/cpp_reparse/defs.rs", 1, "a sorted keyword table, not a position"),
         ("build/cpp_reparse/mod.rs", 1, "the splice map: a transformed byte offset to the source's, a map between two texts"),
+        ("build/dependency_map.rs", 1, "a dependency map's name table, searched by name, not a position"),
         ("build/language_driver.rs", 3, "the line index (a byte to its row, text not tree); macro expansion sites by span"),
         ("build/query_extract/extract/defs.rs", 2, "duplicate defs settled by their name's start"),
         ("build/query_extract/extract/flow.rs", 4, "reassigned names, declaration sites and constants by start point; member reads by span"),

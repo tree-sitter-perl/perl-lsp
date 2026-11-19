@@ -168,6 +168,12 @@ pub trait LanguageDriver: Send + Sync {
     fn dependency_map(&self, _root: Option<&Path>) -> Option<crate::build::dependency_map::DependencyMap> {
         None
     }
+    /// Whether this language has a reader of the dependency map at all —
+    /// asked before any project is open, so a process whose language has
+    /// none runs no dependency tier.
+    fn has_dependency_map(&self) -> bool {
+        false
+    }
 }
 
 /// How a language that names modules by path names one: the marker file
@@ -259,6 +265,9 @@ impl LanguageDriver for PerlDriver {
     fn dependency_map(&self, root: Option<&Path>) -> Option<crate::build::dependency_map::DependencyMap> {
         Some(crate::build::inc::read_map(root))
     }
+    fn has_dependency_map(&self) -> bool {
+        true
+    }
 }
 
 /// A pack-language driver — the generic, query-driven path. One value
@@ -329,6 +338,10 @@ pub struct PackDriver {
     /// (python). Asks the walk's marker snapshot, else the disk, so it
     /// runs in the gather phase.
     file_module: Option<FileModuleRule>,
+    /// The language's reader of the dependency map (php:
+    /// `build::composer`). `None` = no dependency tier; the walk is the
+    /// whole story.
+    dependency_map: Option<fn(Option<&Path>) -> Option<crate::build::dependency_map::DependencyMap>>,
 }
 
 /// Pre-parse external state gathered in phase 1 (`gather_pack_context`) and
@@ -435,6 +448,12 @@ impl LanguageDriver for PackDriver {
     }
     fn path_inputs_current(&self, path: &Path, analysis: &FileAnalysis) -> bool {
         self.file_module.is_none() || self.module_of(path) == analysis.pack.file_module
+    }
+    fn dependency_map(&self, root: Option<&Path>) -> Option<crate::build::dependency_map::DependencyMap> {
+        self.dependency_map.and_then(|read| read(root))
+    }
+    fn has_dependency_map(&self) -> bool {
+        self.dependency_map.is_some()
     }
 }
 
@@ -722,6 +741,7 @@ fn cpp_driver() -> PackDriver {
         input_fingerprint: Some(crate::build::cpp_reparse::toolchain_fingerprint),
         access_regions: Some(crate::build::cpp_reparse::access_regions),
         file_module: None,
+        dependency_map: None,
     }
 }
 
@@ -745,6 +765,7 @@ fn python_driver() -> PackDriver {
         input_fingerprint: None,
         access_regions: None,
         file_module: Some(FileModuleRule { marker: "__init__.py", name: crate::build::packs::python_file_module }),
+        dependency_map: None,
     }
 }
 
@@ -771,6 +792,7 @@ fn php_driver() -> PackDriver {
         input_fingerprint: None,
         access_regions: None,
         file_module: None,
+        dependency_map: Some(crate::build::composer::read_map),
     }
 }
 
@@ -794,6 +816,7 @@ fn r_driver() -> PackDriver {
         input_fingerprint: None,
         access_regions: None,
         file_module: None,
+        dependency_map: None,
     }
 }
 
@@ -818,6 +841,7 @@ fn cmake_driver() -> PackDriver {
         input_fingerprint: None,
         access_regions: None,
         file_module: None,
+        dependency_map: None,
     }
 }
 

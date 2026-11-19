@@ -2,7 +2,8 @@
 //! It is data — an ordered list of lanes, each a mechanism the engine
 //! knows, plus the directories the tier owns and the manifests the map was
 //! read from. A language owns only the reader that produces it (perl:
-//! `build::inc`); nothing here names a language or a package manager.
+//! `build::inc`, php: `build::composer`); nothing here names a language or
+//! a package manager.
 
 use crate::util::canonical_path::CanonicalPath;
 use std::path::{Path, PathBuf};
@@ -28,18 +29,28 @@ pub struct ModuleSpelling {
 /// TODO(dependency-custom-lane): a `Custom(LaneId)` lane, located by the
 /// language driver, for a mechanism no variant here expresses.
 pub enum Lane {
-    /// An exact name → file table.
-    #[allow(dead_code)] // no reader produces it: perl's map is search roots alone
+    /// An exact name → file table, one file per name (the first row a
+    /// reader gives for a name). Kept sorted by name, so a lookup is a
+    /// search, not a scan.
     Table(Vec<(String, PathBuf)>),
-    /// A name under `prefix` is a file under one of `dirs`, its remainder
-    /// spelled by `spelling`.
-    #[allow(dead_code)] // no reader produces it: perl's map is search roots alone
-    Prefix { prefix: String, dirs: Vec<PathBuf>, spelling: ModuleSpelling },
+    /// A name under `prefix` is a file under one of `dirs`, spelled by
+    /// `spelling` from what `spells` says.
+    Prefix { prefix: String, dirs: Vec<PathBuf>, spelling: ModuleSpelling, spells: Spells },
     /// A name is a file under one of `roots`, in root order.
     SearchRoots { roots: Vec<PathBuf>, spelling: ModuleSpelling },
     /// Files that load whatever is asked; no name places them.
-    #[allow(dead_code)] // no reader produces it: perl's map is search roots alone
     AlwaysLoad(Vec<PathBuf>),
+}
+
+/// What a `Prefix` lane's spelling spells under its dirs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum Spells {
+    /// The name past the prefix (`App\Models\User` under `App\` is
+    /// `Models/User.php`).
+    Remainder,
+    /// The whole name, the prefix too (`Old_Tool` under `Old_` is
+    /// `Old/Tool.php`).
+    WholeName,
 }
 
 /// What an asker hands the tier.
@@ -76,7 +87,14 @@ pub struct DependencyMap {
 }
 
 impl DependencyMap {
-    pub fn new(lanes: Vec<Lane>, tier_roots: Vec<PathBuf>, inputs: Vec<PathBuf>) -> Self {
+    pub fn new(mut lanes: Vec<Lane>, tier_roots: Vec<PathBuf>, inputs: Vec<PathBuf>) -> Self {
+        for lane in &mut lanes {
+            if let Lane::Table(rows) = lane {
+                // Stable, so a name's first row is the one that stays.
+                rows.sort_by(|a, b| a.0.cmp(&b.0));
+                rows.dedup_by(|later, first| later.0 == first.0);
+            }
+        }
         let mut search: Vec<PathBuf> = Vec::new();
         for lane in &lanes {
             if let Lane::SearchRoots { roots, .. } = lane {
@@ -122,16 +140,21 @@ impl DependencyMap {
             match ask {
                 Ask::Name(name) => match lane {
                     Lane::Table(rows) => {
-                        for (n, p) in rows {
-                            if n == name && p.is_file() {
+                        if let Ok(i) = rows.binary_search_by(|(n, _)| n.as_str().cmp(name.as_str())) {
+                            let p = &rows[i].1;
+                            if p.is_file() {
                                 push(CanonicalPath::resolve(p.as_path()), Some(name.clone()));
                             }
                         }
                     }
-                    Lane::Prefix { prefix, dirs, spelling } => {
+                    Lane::Prefix { prefix, dirs, spelling, spells } => {
                         let Some(rest) = name.strip_prefix(prefix.as_str()) else { continue };
+                        let spelled = match spells {
+                            Spells::Remainder => rest,
+                            Spells::WholeName => name.as_str(),
+                        };
                         for dir in dirs {
-                            for rel in (spelling.module_paths)(rest) {
+                            for rel in (spelling.module_paths)(spelled) {
                                 let p = dir.join(rel);
                                 if p.is_file() {
                                     push(CanonicalPath::resolve(p), Some(name.clone()));
@@ -153,17 +176,24 @@ impl DependencyMap {
                 },
                 Ask::File(path) => match lane {
                     Lane::Table(rows) => {
+                        // A table runs to thousands of rows: only a row
+                        // naming the same file name pays for a resolve.
+                        let leaf = path.as_path().file_name();
                         for (n, p) in rows {
-                            if CanonicalPath::resolve(p.as_path()) == *path {
+                            if p.file_name() == leaf && CanonicalPath::resolve(p.as_path()) == *path {
                                 push(path.clone(), Some(n.clone()));
                             }
                         }
                     }
-                    Lane::Prefix { prefix, dirs, spelling } => {
+                    Lane::Prefix { prefix, dirs, spelling, spells } => {
                         for dir in dirs {
-                            if let Some(name) = spelled_under(dir, path, spelling) {
-                                push(path.clone(), Some(format!("{prefix}{name}")));
-                            }
+                            let Some(name) = spelled_under(dir, path, spelling) else { continue };
+                            let name = match spells {
+                                Spells::Remainder => format!("{prefix}{name}"),
+                                Spells::WholeName if name.starts_with(prefix.as_str()) => name,
+                                Spells::WholeName => continue,
+                            };
+                            push(path.clone(), Some(name));
                         }
                     }
                     Lane::SearchRoots { roots, spelling } => {
@@ -223,7 +253,7 @@ impl DependencyMap {
         for lane in &self.lanes {
             match lane {
                 Lane::Table(rows) => (0u8, rows).hash(&mut h),
-                Lane::Prefix { prefix, dirs, .. } => (1u8, prefix, dirs).hash(&mut h),
+                Lane::Prefix { prefix, dirs, spells, .. } => (1u8, prefix, dirs, spells).hash(&mut h),
                 Lane::SearchRoots { roots, .. } => (2u8, roots).hash(&mut h),
                 Lane::AlwaysLoad(files) => (3u8, files).hash(&mut h),
             }

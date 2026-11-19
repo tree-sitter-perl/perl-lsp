@@ -34,7 +34,7 @@ fn a_name_s_files_come_back_in_lane_order_then_each_lane_s_order() {
     let map = DependencyMap::new(
         vec![
             Lane::Table(vec![("A::B".into(), dir.join("table/Pinned.pm"))]),
-            Lane::Prefix { prefix: "A::".into(), dirs: vec![dir.join("src")], spelling: spelling() },
+            Lane::Prefix { prefix: "A::".into(), dirs: vec![dir.join("src")], spelling: spelling(), spells: Spells::Remainder },
             Lane::SearchRoots { roots: vec![dir.join("a"), dir.join("b"), dir.join("a")], spelling: spelling() },
             Lane::AlwaysLoad(vec![dir.join("table/Pinned.pm")]),
         ],
@@ -61,7 +61,7 @@ fn a_file_ask_names_what_the_file_loads_as_in_each_lane() {
     let map = DependencyMap::new(
         vec![
             Lane::Table(vec![("Alias".into(), dir.join("inc/X/Y.pm"))]),
-            Lane::Prefix { prefix: "P::".into(), dirs: vec![dir.join("inc")], spelling: spelling() },
+            Lane::Prefix { prefix: "P::".into(), dirs: vec![dir.join("inc")], spelling: spelling(), spells: Spells::Remainder },
             Lane::SearchRoots { roots: vec![dir.join("inc")], spelling: spelling() },
             Lane::AlwaysLoad(vec![dir.join("boot.pm")]),
         ],
@@ -88,4 +88,36 @@ fn the_generation_moves_with_an_input_s_stamp_and_the_tier_owns_its_roots() {
     assert_ne!(before, map().generation());
     assert!(map().owns(&dir.join("local/lib/X.pm")));
     assert!(!map().owns(&dir.join("lib/Y.pm")));
+}
+
+#[test]
+fn a_whole_name_prefix_lane_spells_the_prefix_too_and_places_only_names_under_it() {
+    let dir = tree("whole", &["lib/Old/Tool.pm", "lib/New/Tool.pm"]);
+    let map = DependencyMap::new(
+        vec![Lane::Prefix { prefix: "Old::".into(), dirs: vec![dir.join("lib")], spelling: spelling(), spells: Spells::WholeName }],
+        Vec::new(),
+        Vec::new(),
+    );
+    assert_eq!(map.locate(&Ask::Name("Old::Tool".into())), [at(&dir, "lib/Old/Tool.pm", Some("Old::Tool"))]);
+    assert!(map.locate(&Ask::Name("New::Tool".into())).is_empty());
+    let old = CanonicalPath::resolve(dir.join("lib/Old/Tool.pm"));
+    assert_eq!(map.locate(&Ask::File(old)), [at(&dir, "lib/Old/Tool.pm", Some("Old::Tool"))]);
+    let new = CanonicalPath::resolve(dir.join("lib/New/Tool.pm"));
+    assert!(map.locate(&Ask::File(new)).is_empty(), "a file whose name is not under the prefix is not the lane's");
+}
+
+#[test]
+fn a_table_keeps_a_name_s_first_row() {
+    let dir = tree("table", &["first.pm", "second.pm"]);
+    let map = DependencyMap::new(
+        vec![Lane::Table(vec![
+            ("Z".into(), dir.join("second.pm")),
+            ("A".into(), dir.join("first.pm")),
+            ("A".into(), dir.join("second.pm")),
+        ])],
+        Vec::new(),
+        Vec::new(),
+    );
+    assert_eq!(map.locate(&Ask::Name("A".into())), [at(&dir, "first.pm", Some("A"))]);
+    assert_eq!(map.locate(&Ask::Name("Z".into())), [at(&dir, "second.pm", Some("Z"))]);
 }
