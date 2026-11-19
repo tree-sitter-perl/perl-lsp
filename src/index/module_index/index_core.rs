@@ -872,7 +872,9 @@ pub(crate) fn read_and_keep(
 ) -> Option<crate::build::dependency_map::DependencyMap> {
     let map = crate::util::timings::phase("dependency_map::read", || driver.dependency_map(root))?;
     if let (Some(conn), Some(root)) = (conn, root) {
-        crate::index::module_cache::save_dependency_map(conn, &root.to_string_lossy(), &map);
+        crate::util::timings::phase("dependency_map::keep", || {
+            crate::index::module_cache::save_dependency_map(conn, &root.to_string_lossy(), &map)
+        });
     }
     Some(map)
 }
