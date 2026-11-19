@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use tree_sitter::{Node, Point, Tree};
 
+pub(super) use crate::cst::{Field, Kind, NodeExt};
 use crate::cst::{fq_tail_span, node_to_span};
 use crate::model::file_analysis::*;
 use crate::model::witnesses::TypeObservation;
@@ -135,10 +136,6 @@ struct CallSite<'a> {
 /// Every call site the walk minted, as facts on the main tree.
 type CallSites<'a> = crate::cst::NodeFacts<CallSite<'a>>;
 
-/// The Perl grammar's kind ids for `names`; callers cache them in a static.
-fn perl_kind_ids(names: &[&str]) -> Vec<u16> {
-    crate::cst::kind_ids(&ts_parser_perl::LANGUAGE.into(), names)
-}
 
 /// Which chain-typing tasks the reducer should apply on this call.
 ///
@@ -456,6 +453,11 @@ struct Builder<'a> {
     /// paths produce byte-identical witnesses (same span, same
     /// `expression` source tag).
     unresolved_expr_nodes: Vec<Node<'a>>,
+    /// The calls the joins' gates name. Each needs its `Expr` witness, which
+    /// the walk gives only a call something reads; they are emitted with
+    /// the forward references, so no pass before the fold types a stored
+    /// call's value through a callee the walk had not reached.
+    gate_calls: Vec<Node<'a>>,
     /// Per-package framework fact, computed from `framework_modes` once
     /// the walk finishes. Available before `resolve_return_types` so
     /// the bag-aware return-arm fold can ask the framework-aware

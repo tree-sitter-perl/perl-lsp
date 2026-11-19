@@ -17,17 +17,15 @@ impl<'a> Builder<'a> {
     /// branch around it. A construct is minted once per place, however many
     /// of its arms write.
     pub(super) fn assemble_joins(&mut self) {
-        static ASSIGNMENT: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
-        let kinds = ASSIGNMENT.get_or_init(|| perl_kind_ids(&["assignment_expression"]));
         // A declaration binds fresh: there is no old value to join. Only a
         // variable's rebind joins; a write to a part of one is a place's.
         let assignments: Vec<(Node<'a>, String)> = self
             .syntax
-            .file_nodes_of_kind(kinds)
+            .file_nodes_of_kind(&[Kind::AssignmentExpression])
             .into_iter()
             .map(|n| n.ts())
             .filter_map(|n| {
-                let left = n.child_by_field_name("left").filter(|l| l.kind() != "variable_declaration")?;
+                let left = n.field(Field::Left).filter(|l| !l.is(Kind::VariableDeclaration))?;
                 Some((n, self.get_var_text_from_lhs(left)?))
             })
             .collect();
@@ -48,7 +46,7 @@ impl<'a> Builder<'a> {
         // one elsewhere by what its file says (the effect lane, at query
         // time). A builtin's call states its own effect.
         let local = self.local_callables();
-        let gate = |n: Node<'a>| self.gate_callee(&local, n);
+        let gate = |n: Node<'a>| self.statement_call(n).filter(|&c| self.gate_callee(&local, c));
         let mut walk = super::control::ViewWalk::default();
         let mut gates = walk.walk(around, source, &gate);
         let bodies: Vec<(SymbolId, Node<'a>)> = self
@@ -61,20 +59,16 @@ impl<'a> Builder<'a> {
         for &(_, body) in &bodies {
             // A named sub exists before its text runs; an anonymous one
             // where its expression does.
-            let hoisted = self.syntax.parent(body).is_some_and(|d| d.child_by_field_name("name").is_some());
+            let hoisted = self.syntax.parent(body).is_some_and(|d| d.field(Field::Name).is_some());
             let made_before = self.syntax.parent(body).and_then(|made| self.syntax.parent(made)).and_then(|around| self.runs_before(around)).map(|s| s.start);
             walk.body(node_to_span(body), !body.has_error(), hoisted, made_before);
             gates.extend(walk.walk(super::control::statements_of(body), source, &gate));
         }
         let mut view = walk.finish();
         drop(local);
-        for g in gates {
-            self.emit_expr_witness(g);
-        }
+        self.gate_calls = gates;
         if !bodies.is_empty() {
-            static RETURNS: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
-            let kinds = RETURNS.get_or_init(|| perl_kind_ids(&["return_expression", "goto_expression"]));
-            view.returns = self.syntax.file_nodes_of_kind(kinds).into_iter().map(|n| node_to_span(n.ts())).collect();
+            view.returns = self.syntax.file_nodes_of_kind(&[Kind::ReturnExpression, Kind::GotoExpression]).into_iter().map(|n| node_to_span(n.ts())).collect();
         }
         let plan = JoinPlan::new(&view);
         // A body the parser could not read states nothing, the top.
@@ -228,21 +222,32 @@ impl<'a> Builder<'a> {
         out
     }
 
+    /// The call a statement runs on its way through: the statement itself,
+    /// or the value an assignment stores (`my $r = f();`, `$a = $b = f();`).
+    /// Control reaches what follows only if that call comes back.
+    pub(super) fn statement_call(&self, node: Node<'a>) -> Option<Node<'a>> {
+        let mut node = crate::cst::peel_groups(node);
+        while node.is(Kind::AssignmentExpression) {
+            node = crate::cst::peel_groups(node.field(Field::Right)?);
+        }
+        Some(node)
+    }
+
     /// Whether a call at `node` gates what follows it: a method call, a
     /// plain call to a sub of this file or elsewhere, or a builtin the
     /// language says does not come back (`die`, `exit`), whose call states
     /// how it ends on itself.
     fn gate_callee(&self, local: &HashMap<String, Vec<(SymbolId, Option<String>)>>, node: Node<'a>) -> bool {
-        if node.kind() == "method_call_expression" {
+        if node.is(Kind::MethodCallExpression) {
             return true;
         }
-        let name = match node.kind() {
-            "function_call_expression" | "ambiguous_function_call_expression"
+        let name = match node.kind_of() {
+            Kind::FunctionCallExpression | Kind::AmbiguousFunctionCallExpression
                 if !self.is_bless_call(node) && self.indirect_method_call(node).is_none() =>
             {
                 self.forward_callee_name(node)
             }
-            "func1op_call_expression" | "func0op_call_expression" | "function" => self.builtin_call_name(node),
+            Kind::Func1opCallExpression | Kind::Func0opCallExpression | Kind::Function => self.builtin_call_name(node),
             _ => None,
         };
         let Some(name) = name else { return false };
@@ -259,7 +264,7 @@ impl<'a> Builder<'a> {
     fn callable_body(&self, sid: SymbolId, root: Node<'a>) -> Option<Node<'a>> {
         let scope = &self.scopes[self.owner_scope.get(&sid)?.0 as usize];
         let decl = root.descendant_for_point_range(scope.span.start, scope.span.end)?;
-        decl.child_by_field_name("body").filter(|b| b.kind() == "block")
+        decl.field(Field::Body).filter(|b| b.is(Kind::Block))
     }
 
     /// The joins of a variable, each landing as a write (`Reset` and its
