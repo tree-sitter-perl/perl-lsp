@@ -10,12 +10,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// How a language spells a module as a file under a directory: the files a
-/// module name may be, most-preferred first, and the name a root-relative
-/// file spells (`None`: no module's file).
+/// module name may be, most-preferred first, the name a root-relative file
+/// spells (`None`: no module's file), and the module a name is a member of
+/// when a module's members are named through it (python's
+/// `pkg.models.Base` is `Base` in `pkg.models`; `None` where a name only
+/// ever spells a module).
 #[derive(Clone, Copy)]
 pub struct ModuleSpelling {
     pub module_paths: fn(module: &str) -> Vec<String>,
     pub module_of: fn(rel: &Path) -> Option<String>,
+    pub member_of: fn(name: &str) -> Option<&str>,
 }
 
 /// One mechanism of a map. Lane order is precedence: a name's files come
@@ -36,7 +40,9 @@ pub enum Lane {
     /// A name under `prefix` is a file under one of `dirs`, spelled by
     /// `spelling` from what `spells` says.
     Prefix { prefix: String, dirs: Vec<PathBuf>, spelling: ModuleSpelling, spells: Spells },
-    /// A name is a file under one of `roots`, in root order.
+    /// A name is a file under one of `roots`, in root order. A name no
+    /// file spells is placed by the longest module its spelling says it is
+    /// a member of, loading as that module.
     SearchRoots { roots: Vec<PathBuf>, spelling: ModuleSpelling },
     /// Files that load whatever is asked; no name places them.
     AlwaysLoad(Vec<PathBuf>),
@@ -163,13 +169,19 @@ impl DependencyMap {
                         }
                     }
                     Lane::SearchRoots { roots, spelling } => {
-                        for root in roots {
-                            for rel in (spelling.module_paths)(name) {
-                                let p = root.join(rel);
-                                if p.is_file() {
-                                    push(CanonicalPath::resolve(p), Some(name.clone()));
+                        let mut module = Some(name.as_str());
+                        while let Some(m) = module {
+                            let mut placed = false;
+                            for root in roots {
+                                for rel in (spelling.module_paths)(m) {
+                                    let p = root.join(rel);
+                                    if p.is_file() {
+                                        push(CanonicalPath::resolve(p), Some(m.to_string()));
+                                        placed = true;
+                                    }
                                 }
                             }
+                            module = if placed { None } else { (spelling.member_of)(m) };
                         }
                     }
                     Lane::AlwaysLoad(_) => {}

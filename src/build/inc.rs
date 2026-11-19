@@ -22,6 +22,8 @@ pub const SPELLING: ModuleSpelling = ModuleSpelling {
     module_of: |rel| {
         (rel.extension().is_some_and(|e| e == "pm")).then(|| crate::model::conventions::perl_module_from_rel_path(rel))
     },
+    // A package is never loaded through the file of a module enclosing it.
+    member_of: |_| None,
 };
 
 /// The process `@INC`, as the `perl` on PATH reports it (`PERL5LIB`

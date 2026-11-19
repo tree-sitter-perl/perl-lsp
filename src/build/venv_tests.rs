@@ -47,7 +47,11 @@ fn an_environment_s_site_packages_is_searched_and_the_environment_is_the_tier_s(
     assert_eq!(at(&map, "acme"), [(s.join("acme/__init__.py"), Some("acme".into()))]);
     assert_eq!(at(&map, "acme.models"), [(s.join("acme/models.py"), Some("acme.models".into()))]);
     assert_eq!(at(&map, "six"), [(s.join("six.py"), Some("six".into()))]);
-    assert!(at(&map, "acme.models.Base").is_empty(), "a class is not a file");
+    // a member is placed by the longest module it lies in, loading as that
+    // module, never by a package that merely encloses it
+    assert_eq!(at(&map, "acme.models.Base"), [(s.join("acme/models.py"), Some("acme.models".into()))]);
+    assert_eq!(at(&map, "acme.Missing"), [(s.join("acme/__init__.py"), Some("acme".into()))]);
+    assert!(at(&map, "nowhere.Thing").is_empty());
     // asked by path, a file names the module it is
     let models = CanonicalPath::resolve(s.join("acme/models.py"));
     assert_eq!(map.locate(&Ask::File(models.clone())), [Located { path: models, loads_as: Some("acme.models".into()) }]);

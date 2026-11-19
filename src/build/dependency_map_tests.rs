@@ -10,6 +10,7 @@ fn spelling() -> ModuleSpelling {
                 .is_some_and(|e| e == "pm")
                 .then(|| rel.with_extension("").to_string_lossy().replace('/', "::"))
         },
+        member_of: |_| None,
     }
 }
 

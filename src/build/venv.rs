@@ -52,6 +52,7 @@ pub const SPELLING: ModuleSpelling = ModuleSpelling {
         }
         (!segments.is_empty()).then(|| segments.join(sep()))
     },
+    member_of: |name| name.rsplit_once(sep()).map(|(module, _)| module),
 };
 
 /// The map for a project at `root` (none: no project, no environment).

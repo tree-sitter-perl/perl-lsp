@@ -152,6 +152,7 @@ fn sep() -> &'static str {
 const PSR_4: ModuleSpelling = ModuleSpelling {
     module_paths: |rest| vec![format!("{}.php", rest.replace(sep(), "/"))],
     module_of: |rel| from_rel(rel),
+    member_of: |_| None,
 };
 
 /// PSR-0: the whole name, and a `_` in the class leaf (not the namespace)
@@ -164,6 +165,7 @@ const PSR_0: ModuleSpelling = ModuleSpelling {
         vec![format!("{dir}{}.php", leaf.replace('_', "/"))]
     },
     module_of: |rel| from_rel(rel),
+    member_of: |_| None,
 };
 
 fn from_rel(rel: &Path) -> Option<String> {

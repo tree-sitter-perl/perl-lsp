@@ -200,7 +200,23 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                 continue;
             }
             let names: Vec<String> = match &ask {
-                Ask::Name(n) => vec![n.clone()],
+                // A project file answers the name as written. Otherwise the
+                // name lands as the modules the map places it under: itself,
+                // or the module it is a member of (`pkg.models.Base` loads
+                // `pkg.models`).
+                Ask::Name(n) if core.project_answers(n) => vec![n.clone()],
+                Ask::Name(n) => {
+                    let mut names: Vec<String> = Vec::new();
+                    for l in map.locate(&ask) {
+                        if let Some(m) = l.loads_as.filter(|m| !names.contains(m)) {
+                            names.push(m);
+                        }
+                    }
+                    if names.is_empty() {
+                        names.push(n.clone());
+                    }
+                    names
+                }
                 // A file asks for the names the map places it under.
                 Ask::File(_) => map.locate(&ask).into_iter().filter_map(|l| l.loads_as).collect(),
             };
