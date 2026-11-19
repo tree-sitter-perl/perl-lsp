@@ -226,9 +226,11 @@ fn lanes_answer_in_composer_s_order_and_files_load_under_no_name() {
     assert!(map.owns(&v("acme/model/src/Base.php")));
     assert!(!map.owns(&root.join("src/Models/User.php")));
 
-    // a `files` entry loads whatever is asked: no name places it
+    // a `files` entry loads whatever is asked: no name places it, and the
+    // map declares it, so every session asks for it by path
     let helpers = CanonicalPath::resolve(v("acme/model/helpers.php"));
-    assert_eq!(map.locate(&Ask::File(helpers.clone())), [Located { path: helpers, loads_as: None }]);
+    assert_eq!(map.locate(&Ask::File(helpers.clone())), [Located { path: helpers.clone(), loads_as: None }]);
+    assert_eq!(map.declared(), [Ask::File(helpers)]);
     // asked by path, a PSR-4 file names the class it loads as
     let base = CanonicalPath::resolve(v("acme/model/src/Base.php"));
     assert!(map

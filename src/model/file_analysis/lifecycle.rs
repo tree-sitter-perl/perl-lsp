@@ -109,6 +109,7 @@ impl FileAnalysis {
             export_tags,
             reexport_modules,
             lib_roots,
+            referenced_identities: Vec::new(),
             type_provenance,
             witnesses,
             bag_evicted: false,
@@ -133,6 +134,7 @@ impl FileAnalysis {
             export_lookup: HashSet::new(),
         };
         fa.build_indices();
+        fa.referenced_identities = fa.mint_referenced_identities();
         fa
     }
 
@@ -1444,6 +1446,7 @@ impl FileAnalysis {
             + vcap(&self.export)
             + vcap(&self.export_ok)
             + vcap(&self.reexport_modules)
+            + vcap(&self.referenced_identities)
             + vcap(&self.unrowed_attachment_names);
 
         h

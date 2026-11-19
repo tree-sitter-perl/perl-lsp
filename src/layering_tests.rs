@@ -1740,8 +1740,8 @@ fn query_paths_never_canonicalize() {
     let files = layer_files(&[Layer::Util, Layer::Model, Layer::Cst, Layer::Build, Layer::Index, Layer::Lsp]);
     let seen = count_lines(&files, &|l| l.contains("CanonicalPath::from_stored("));
     let allow: &[(&str, usize, &str)] = &[
-        ("index/module_index/lookup.rs", 3, "ref-row retrieval hands back the paths registration shredded the rows under; \
-          the included-by edge holds registered paths"),
+        ("index/module_index/lookup.rs", 4, "ref-row retrieval hands back the paths registration shredded the rows under; \
+          the included-by and module-member edges hold registered paths"),
         ("index/resolve/definitions.rs", 1, "an include target is the canonical spelling the build minted"),
     ];
     drift.extend(allowlist_drift("CanonicalPath::from_stored", &seen, allow));

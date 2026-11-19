@@ -2,7 +2,7 @@
 
 use crate::build::query_extract::*;
 use crate::model::file_analysis::{
-    join_all, ClassCall, ClassSpelling, ConstructionKey, ImportPrefix, InstanceSlots, ImportReach, ImportRule, InferredType,
+    join_all, ClassCall, ClassSpelling, ConstructionKey, ImportBinding, ImportPrefix, InstanceSlots, ImportReach, ImportRule, InferredType,
     MemberSpaces, NameSpellings,
 };
 use crate::build::walk_markers::MarkedDirs;
@@ -20,7 +20,9 @@ pub fn python_pack() -> LangPack {
         // and its own module say it does (`User` after `from pkg.models
         // import User`). An import is a statement that runs, so it binds
         // from where it is written; a leading `.` climbs from the file's
-        // package. Calling a class constructs it, so the call is keyed by
+        // package. A module's top-level import is a member of that module,
+        // so a package's `__init__` re-exports what it imports. Calling a
+        // class constructs it, so the call is keyed by
         // the class and runs its `__init__`. One member namespace: the
         // nearest declaration of a name wins, whether it is a data member
         // or a member function. An instance holds its own attributes (the
@@ -28,7 +30,11 @@ pub fn python_pack() -> LangPack {
         names: NameSpellings {
             namespace_sep: Some(std::borrow::Cow::Borrowed(".")),
             class_spelling: ClassSpelling::UseMap,
-            imports: ImportRule { reach: ImportReach::FromImport, prefix: ImportPrefix::PackageRelative },
+            imports: ImportRule {
+                reach: ImportReach::FromImport,
+                prefix: ImportPrefix::PackageRelative,
+                binds: ImportBinding::ModuleMember,
+            },
             class_call: ClassCall::Constructs,
             instance_slots: InstanceSlots::BeforeClass,
             ..NameSpellings::NONE

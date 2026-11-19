@@ -55,7 +55,7 @@ pub fn rehydration_miss_count() -> usize {
 /// The linkage-visible feed a registration extracts from a WHOLE analysis:
 /// (name, declares-a-Class) per visible symbol. Collected before any strip
 /// so the feeds and tie-breaks never read an emptied `symbols`.
-fn collect_linkage_feed(analysis: &FileAnalysis) -> Vec<(String, bool)> {
+pub(crate) fn collect_linkage_feed(analysis: &FileAnalysis) -> Vec<(String, bool)> {
     let mut index: std::collections::HashMap<std::borrow::Cow<'_, str>, usize> = std::collections::HashMap::new();
     let mut feed: Vec<(String, bool)> = Vec::new();
     for sym in analysis.symbols() {

@@ -162,6 +162,9 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     let strip = eviction_enabled()
         && (server.is_some() || core.long_lived.load(std::sync::atomic::Ordering::Relaxed));
     let mut sweep_owed = false;
+    // What the map loads in every session is asked in every session, a
+    // server's and a one-shot run's alike.
+    core.ask(map.declared());
     core.queue.started.store(true, std::sync::atomic::Ordering::Release);
     notify_resolved(&core);
 
@@ -183,6 +186,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
             scan_inc_module_names(&map, &core.available_modules);
             let again: Vec<Ask> = core.asked.iter().map(|e| e.key().clone()).collect();
             core.queue.ask(again);
+            core.ask(map.declared());
             sweep_owed = true;
         }
 
@@ -197,6 +201,18 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         let mut resolved_any = false;
         for ask in batch {
             if core.asked.get(&ask).is_some_and(|e| e.0 == map_gen) {
+                continue;
+            }
+            if let Ask::File(path) = &ask {
+                crate::util::ghost_stats::count("resolver.file_landed");
+                let (whole, stored) = land_file(&core, db.as_ref(), &map, map_gen, path, &mut parse, strip);
+                if let Some(providers) = &whole {
+                    core.ask(descent(providers, prefetch));
+                }
+                let outcome = if stored.is_some() { Outcome::Landed } else { Outcome::Miss };
+                core.asked.insert(ask, (map_gen, outcome));
+                notify_resolved(&core);
+                resolved_any = true;
                 continue;
             }
             let names: Vec<String> = match &ask {
@@ -217,8 +233,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                     }
                     names
                 }
-                // A file asks for the names the map places it under.
-                Ask::File(_) => map.locate(&ask).into_iter().filter_map(|l| l.loads_as).collect(),
+                Ask::File(_) => unreachable!("a file lands by path, above"),
             };
             let mut landed = false;
             for module_name in names {
@@ -248,12 +263,12 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                     ),
                     None => log::info!("No exports found for '{}'", module_name),
                 }
-                landed |= match (&ask, &stored) {
-                    (Ask::File(p), Some(providers)) => providers.iter().any(|m| m.path == *p),
-                    (_, stored) => stored.is_some(),
-                };
+                landed |= stored.is_some();
                 if let Some(providers) = &whole {
                     core.ask(descent(providers, prefetch));
+                }
+                if let (Ask::Name(n), Some(providers)) = (&ask, &stored) {
+                    core.ask(member_targets(providers, n));
                 }
             }
             let label = match &ask {
@@ -366,6 +381,22 @@ fn descent(providers: &[Arc<CachedModule>], prefetch: bool) -> Vec<Ask> {
     }
     asks.retain(|n| !n.is_empty());
     asks.into_iter().map(Ask::Name).collect()
+}
+
+/// An ask for a module MEMBER (`jinja2.Environment`, which lands `jinja2`)
+/// asks for what the member names: the module only imports it, and the
+/// asker means the class its own module declares. Read off the stored
+/// copies, so a module an earlier ask landed still answers.
+pub(super) fn member_targets(providers: &[Arc<CachedModule>], asked: &str) -> Vec<Ask> {
+    let mut asks: Vec<Ask> = Vec::new();
+    for m in providers {
+        for (_, target) in m.analysis.module_members().filter(|(member, _)| member == asked) {
+            if !asks.iter().any(|a| matches!(a, Ask::Name(t) if *t == target)) {
+                asks.push(Ask::Name(target));
+            }
+        }
+    }
+    asks
 }
 
 fn notify_resolved(core: &IndexCore) {

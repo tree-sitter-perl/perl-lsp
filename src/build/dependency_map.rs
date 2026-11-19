@@ -67,8 +67,8 @@ pub enum Spells {
 pub enum Ask {
     /// A module name or identity, as the language spells it.
     Name(String),
-    /// A file by path.
-    #[allow(dead_code)] // no asker yet: perl asks by name
+    /// A file by path: it lands under every name it declares, and every
+    /// name the map places it under.
     File(CanonicalPath),
 }
 
@@ -353,6 +353,19 @@ impl DependencyMap {
     /// The search path, canonical, in precedence order.
     pub fn search_roots(&self) -> Arc<Vec<PathBuf>> {
         Arc::clone(&self.search_roots)
+    }
+
+    /// What the map loads in every session whatever is asked (Composer's
+    /// `files`): a function such a file declares is called with no import
+    /// to ask for it.
+    pub fn declared(&self) -> Vec<Ask> {
+        let mut out: Vec<Ask> = Vec::new();
+        for lane in &self.lanes {
+            if let Lane::AlwaysLoad(files) = lane {
+                out.extend(files.iter().map(|f| Ask::File(CanonicalPath::resolve(f.as_path()))));
+            }
+        }
+        out
     }
 
     /// The directories whose files are the tier's: the workspace walk and

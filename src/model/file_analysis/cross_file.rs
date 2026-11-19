@@ -603,6 +603,13 @@ pub trait CrossFileLookup {
     fn leaf_def_candidates(&self, _leaf: &str) -> Vec<std::sync::Arc<CachedModule>> {
         Vec::new()
     }
+    /// The identity a module member names (`click.Group` → `click.core.Group`,
+    /// `FileAnalysis::module_members`) in the files this lookup holds; one
+    /// hop — `ScopedLookup::use_map_candidates` follows a chain. Default:
+    /// none, so no member resolves.
+    fn module_member_target(&self, _member: &str) -> Option<String> {
+        None
+    }
     /// `def_candidates` AS SEEN from the querying scope — the forward-
     /// resolution face of the candidate table. Raw indexes pass the full
     /// relation through; `ScopedLookup` narrows a CLOSURE-scoped origin
@@ -615,16 +622,18 @@ pub trait CrossFileLookup {
     fn visible_def_candidates(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
         self.def_candidates(name)
     }
-    /// `visible_def_candidates` with its WIDENING verdict: `true` when the
-    /// name is an identity nothing indexed declares and the candidates are
-    /// the same-leaf classes of other namespaces — the over-approximation
-    /// dirty code wants, which every answer built on it must say out loud
-    /// (`MethodResolution::CrossFile::widened`). A raw index never widens.
+    /// `visible_def_candidates` with its verdict: `Widened` when the name is
+    /// an identity nothing indexed declares and the candidates are the
+    /// same-leaf classes of other namespaces — the over-approximation dirty
+    /// code wants, which every answer built on it must say out loud
+    /// (`MethodResolution::CrossFile::widened`); `Member` when the name is a
+    /// module member and the candidates declare what it names. A raw index
+    /// never widens.
     fn visible_def_candidates_widening(
         &self,
         name: &str,
-    ) -> (Vec<std::sync::Arc<CachedModule>>, bool) {
-        (self.visible_def_candidates(name), false)
+    ) -> (Vec<std::sync::Arc<CachedModule>>, CandidateVerdict) {
+        (self.visible_def_candidates(name), CandidateVerdict::Exact)
     }
     /// Among the files declaring `pkg`, the one that DEFINES sub/method
     /// `member` — package-attributed first (a reopened package's sub lives
@@ -863,8 +872,11 @@ pub trait CrossFileLookup {
     /// raw candidate analyses answer without rehydration.
     fn parents_cached(&self, module_name: &str) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
-        for c in self.visible_def_candidates(module_name) {
-            for p in c.analysis.declared_parents(module_name) {
+        // A module member's parents are those of the class it names.
+        let (cands, verdict) = self.visible_def_candidates_widening(module_name);
+        let declared = verdict.identity(module_name);
+        for c in cands {
+            for p in c.analysis.declared_parents(declared) {
                 if !out.iter().any(|x| x == p) {
                     out.push(p.clone());
                 }
@@ -1329,11 +1341,11 @@ impl<'a> ScopedLookup<'a> {
         &self,
         pins: &UseMapPins,
         name: &str,
-    ) -> (Vec<std::sync::Arc<CachedModule>>, bool) {
+    ) -> (Vec<std::sync::Arc<CachedModule>>, CandidateVerdict) {
         if let (Some(ns), leaf) = split_qualified(name, &pins.names) {
             let exact = self.inner.def_candidates(name);
             if !exact.is_empty() {
-                return (exact, false);
+                return (exact, CandidateVerdict::Exact);
             }
             let mut agree: Vec<std::sync::Arc<CachedModule>> = Vec::new();
             let mut rest: Vec<std::sync::Arc<CachedModule>> = Vec::new();
@@ -1344,22 +1356,25 @@ impl<'a> ScopedLookup<'a> {
                 }
             }
             if !agree.is_empty() {
-                return (agree, false);
+                return (agree, CandidateVerdict::Exact);
             }
-            let widened = !rest.is_empty();
-            return (rest, widened);
+            if let Some((target, cands)) = self.member_declarations(name) {
+                return (cands, CandidateVerdict::Member(target));
+            }
+            let verdict = if rest.is_empty() { CandidateVerdict::Exact } else { CandidateVerdict::Widened };
+            return (rest, verdict);
         }
         let cands = self.inner.def_candidates(name);
         // One candidate has nothing to disambiguate; the table read
         // below rehydrates symbols, so only a genuinely ambiguous
         // leaf pays it.
         if cands.len() < 2 {
-            return (cands, false);
+            return (cands, CandidateVerdict::Exact);
         }
                 let want = pins.namespace_of(name);
                 let visible = pins.visible.get(name);
                 if want.is_none() && visible.is_none() {
-                    return (cands, false);
+                    return (cands, CandidateVerdict::Exact);
                 }
                 // A declaration under a namespace the file can NAME this leaf
                 // in (its pin, or an aliased import of the same leaf) is a
@@ -1390,7 +1405,58 @@ impl<'a> ScopedLookup<'a> {
                 let mut out: Vec<std::sync::Arc<CachedModule>> =
                     agree.into_iter().map(|(_, c)| c).collect();
                 out.extend(rest);
-                (out, false)
+                (out, CandidateVerdict::Exact)
+    }
+
+    /// The declarations a module member names, and their identity: the
+    /// member's chain followed (`flask.Response` → `flask.wrappers.Response`,
+    /// itself a class) to the first identity something indexed declares.
+    /// A cycle or a chain past its cap names nothing.
+    fn member_declarations(&self, member: &str) -> Option<(String, Vec<std::sync::Arc<CachedModule>>)> {
+        const MAX_HOPS: usize = 8;
+        let mut seen: Vec<String> = vec![member.to_string()];
+        let mut at = member.to_string();
+        for _ in 0..MAX_HOPS {
+            let target = self.inner.module_member_target(&at)?;
+            if seen.contains(&target) {
+                return None;
+            }
+            let cands = self.inner.def_candidates(&target);
+            if !cands.is_empty() {
+                return Some((target, cands));
+            }
+            seen.push(target.clone());
+            at = target;
+        }
+        None
+    }
+}
+
+/// How a candidate set answers the identity it was asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CandidateVerdict {
+    /// The identity's own declarations, or none.
+    Exact,
+    /// The asked identity is a module member: the candidates declare the
+    /// identity it names, which every match against them uses.
+    Member(String),
+    /// Nothing indexed declares the identity: same-leaf classes of other
+    /// namespaces stand in, each under its own identity.
+    Widened,
+}
+
+impl CandidateVerdict {
+    pub fn widened(&self) -> bool {
+        matches!(self, CandidateVerdict::Widened)
+    }
+
+    /// The identity the candidates declare, for an `Exact` or `Member`
+    /// answer to `asked`.
+    pub fn identity<'a>(&'a self, asked: &'a str) -> &'a str {
+        match self {
+            CandidateVerdict::Member(target) => target,
+            _ => asked,
+        }
     }
 }
 
@@ -1441,13 +1507,16 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn leaf_def_candidates(&self, leaf: &str) -> Vec<std::sync::Arc<CachedModule>> {
         self.inner.leaf_def_candidates(leaf)
     }
+    fn module_member_target(&self, member: &str) -> Option<String> {
+        self.inner.module_member_target(member)
+    }
     fn visible_def_candidates_widening(
         &self,
         name: &str,
-    ) -> (Vec<std::sync::Arc<CachedModule>>, bool) {
+    ) -> (Vec<std::sync::Arc<CachedModule>>, CandidateVerdict) {
         match &self.axis {
             VisibilityAxis::UseMap(pins) => self.use_map_candidates(pins, name),
-            _ => (self.visible_def_candidates(name), false),
+            _ => (self.visible_def_candidates(name), CandidateVerdict::Exact),
         }
     }
     fn visible_def_candidates(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
@@ -1796,8 +1865,8 @@ pub fn widened_class_stand_ins(
     identity: &str,
     names: &NameSpellings,
 ) -> Vec<WidenedStandIn> {
-    let (cands, widened) = index.visible_def_candidates_widening(identity);
-    if !widened {
+    let (cands, verdict) = index.visible_def_candidates_widening(identity);
+    if !verdict.widened() {
         return Vec::new();
     }
     let leaf = name_match_key(identity, names);

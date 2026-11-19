@@ -80,6 +80,47 @@ pub(crate) fn land_module(
     (whole, stored)
 }
 
+/// THE landing of one file the map loads by path (`Ask::File`: Composer's
+/// `files`, which no name places): parsed or read from its row, persisted,
+/// and landed under every name the map places it under and every name it
+/// declares — a function it defines is called by name with nothing asking
+/// for its file. A file that offers no name lands nothing.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn land_file(
+    core: &IndexCore,
+    rows: Option<&rusqlite::Connection>,
+    map: &DependencyMap,
+    map_gen: u64,
+    path: &CanonicalPath,
+    parse: &mut Parse,
+    strip: bool,
+) -> (Option<Providers>, Option<Providers>) {
+    let label = path.to_string_lossy().into_owned();
+    let Some(whole) = core.tier_providers(parse_providers(&label, vec![path.clone()], parse, rows)) else {
+        return (None, None);
+    };
+    let mut names: Vec<String> = map.locate(&Ask::File(path.clone())).into_iter().filter_map(|l| l.loads_as).collect();
+    for m in &whole {
+        for (name, _) in crate::index::module_index::collect_linkage_feed(&m.analysis) {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    let Some((first, rest)) = names.split_first() else {
+        return (None, None);
+    };
+    let persisted = match rows {
+        Some(conn) => whole.iter().all(|m| persist_dependency(conn, m)),
+        None => false,
+    };
+    let stored = core.land_providers(first, Some(whole.clone()), persisted, strip, map_gen, parse.door());
+    for name in rest {
+        core.place_name(path, name, 0, map_gen);
+    }
+    (Some(whole), stored)
+}
+
 /// The files the map places under `module_name` that load as it, in the
 /// map's order. A file placed under a name it does not load as (an
 /// enclosing module) is not that name's provider.

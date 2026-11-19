@@ -162,16 +162,11 @@ impl ModuleIndex {
         self.core.ask([ask]);
     }
 
-    /// `request` for what one file names: its imports and its packages'
-    /// parents — an opened, edited or saved document, or a one-shot
-    /// query's file.
+    /// `request` for everything one file names across files
+    /// (`FileAnalysis::used_identities`) — an opened, edited or saved
+    /// document, a one-shot run's project file, or a query's file.
     pub fn request_demand_of(&self, fa: &FileAnalysis) {
-        use crate::build::dependency_map::Ask;
-        let mut asks: Vec<Ask> = fa.imports.iter().map(|i| Ask::Name(i.module_name.clone())).collect();
-        for (_pkg, parents) in fa.package_parent_edges() {
-            asks.extend(parents.iter().map(|p| Ask::Name(p.clone())));
-        }
-        self.core.ask(asks);
+        self.core.ask(fa.used_identities().into_iter().map(crate::build::dependency_map::Ask::Name));
     }
 
     /// Whether a resolver thread serves this index: the served language has

@@ -671,7 +671,9 @@ impl FileAnalysis {
             // the same-leaf classes of other namespaces stand in. Each
             // then answers under its OWN identity — the member lives on
             // the stranger — and the verdict rides the result.
-            let (cands, widened) = idx.visible_def_candidates_widening(cls);
+            let (cands, verdict) = idx.visible_def_candidates_widening(cls);
+            let widened = verdict.widened();
+            let declared = verdict.identity(cls);
             let leaf = name_match_key(cls, self.names());
             for cached in cands {
                 // Rows-backed pre-filter (`docs/prompt-relational-iteration.md`):
@@ -682,7 +684,7 @@ impl FileAnalysis {
                 // The rows carry names, not roles: a by-role ask reads the
                 // candidate's symbols.
                 let may_declare = widened
-                    || member.name().is_none_or(|n| idx.candidate_may_declare(&cached, n, cls));
+                    || member.name().is_none_or(|n| idx.candidate_may_declare(&cached, n, declared));
                 if !may_declare {
                     crate::util::ghost_stats::count("mroc.candidate_prefiltered");
                     if !member_prefilter_equiv() {
@@ -712,7 +714,7 @@ impl FileAnalysis {
                         .map(|s| s.name.clone())
                         .unwrap_or_else(|| cls.to_string())
                 } else {
-                    cls.to_string()
+                    declared.to_string()
                 };
                 let found = whole.symbols.iter().find(|s| {
                     member.admits(s)

@@ -553,6 +553,9 @@ impl IndexCore {
         for target in analysis.pack.include_directives.iter().filter_map(|d| d.target.as_deref()) {
             self.edges.publish_includer(target, &includer);
         }
+        for (member, _) in analysis.module_members() {
+            self.edges.publish_member(&member, &includer);
+        }
     }
 
     /// Whether a project file holds `name`'s slot. Project code shadows an
@@ -723,10 +726,36 @@ impl IndexCore {
                 if !here {
                     continue;
                 }
-                self.records.place(path, file_records::Placement { name: name.clone(), precedence, map_gen });
-                self.all_defs.entry(name.clone()).or_default().upsert(held.clone());
-                self.derive_slot(&name);
+                self.place_held(path, &held, &name, precedence, map_gen);
             }
+        }
+    }
+
+    /// Place a held dependency under one more name (`place_members` for a
+    /// module's members, a by-path landing for every name its file offers).
+    pub(crate) fn place_name(
+        &self,
+        path: &crate::util::canonical_path::CanonicalPath,
+        name: &str,
+        precedence: usize,
+        map_gen: u64,
+    ) {
+        if let Some(held) = self.all_files.get(path).map(|e| e.clone()) {
+            self.place_held(path, &held, name, precedence, map_gen);
+        }
+    }
+
+    fn place_held(
+        &self,
+        path: &crate::util::canonical_path::CanonicalPath,
+        held: &Arc<CachedModule>,
+        name: &str,
+        precedence: usize,
+        map_gen: u64,
+    ) {
+        if self.records.place(path, file_records::Placement { name: name.to_string(), precedence, map_gen }) {
+            self.all_defs.entry(name.to_string()).or_default().upsert(held.clone());
+            self.derive_slot(name);
         }
     }
 

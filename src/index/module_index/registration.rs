@@ -426,6 +426,18 @@ impl ModuleIndex {
         module_resolver::land_module(&self.core, None, map, self.core.map_generation(), module_name, &mut parse, false)
     }
 
+    /// `land_file` through a pack language's door.
+    #[cfg(test)]
+    pub fn land_pack_file(
+        &self,
+        map: &crate::build::dependency_map::DependencyMap,
+        path: &crate::util::canonical_path::CanonicalPath,
+        driver: &'static dyn crate::build::language_driver::LanguageDriver,
+    ) -> (Option<Providers>, Option<Providers>) {
+        let mut parse = module_resolver::Parse::Pack(driver);
+        module_resolver::land_file(&self.core, None, map, self.core.map_generation(), path, &mut parse, false)
+    }
+
     /// The dependency map read so far, if any.
     pub fn dependency_map(&self) -> Option<Arc<crate::build::dependency_map::DependencyMap>> {
         self.core.dependency_map()

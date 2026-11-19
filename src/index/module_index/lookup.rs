@@ -785,6 +785,20 @@ impl CrossFileLookup for ModuleIndex {
         self.core.leaf_defs.get(leaf).map(|c| c.to_vec()).unwrap_or_default()
     }
 
+    fn module_member_target(&self, member: &str) -> Option<String> {
+        let mut paths: Vec<String> =
+            self.core.edges.members.get(member).map(|b| b.as_slice().to_vec()).unwrap_or_default();
+        // Smallest path first, so two files binding one member answer the
+        // same on every run.
+        paths.sort();
+        paths.iter().find_map(|p| {
+            let p = crate::util::canonical_path::CanonicalPath::from_stored(p.into());
+            let c = CrossFileLookup::cached_by_path(self, &p)?;
+            let target = c.analysis.module_members().find(|(m, _)| m == member).map(|(_, target)| target);
+            target
+        })
+    }
+
     fn for_each_workspace_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) {
         self.for_each_registered_file(f)
     }

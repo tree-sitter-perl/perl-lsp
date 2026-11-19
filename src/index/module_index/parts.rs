@@ -169,6 +169,11 @@ pub struct ModuleEdgeIndexes {
     /// member (an edit dropped the directive, the file went) is rechecked
     /// against the includer's current analysis at read.
     pub(super) includers: DashMap<String, ModuleBucket>,
+    /// module member → paths of the files whose module binds it to an
+    /// import (`FileAnalysis::module_members`): `click.Group` names
+    /// `click.core.Group` because `click/__init__.py` imports it. Path-keyed
+    /// like `includers`, for the same reason, and rechecked the same way.
+    pub(super) members: DashMap<String, ModuleBucket>,
     /// The indexable-name list each FILE last fed — the symbols-derived
     /// half of `feed`, recorded from the WHOLE analysis so a re-feed over
     /// symbol-EVICTED cache copies (a deferred registration after the
@@ -261,6 +266,7 @@ impl ModuleEdgeIndexes {
             specs: DashMap::new(),
             providers: DashMap::new(),
             includers: DashMap::new(),
+            members: DashMap::new(),
             name_records: DashMap::new(),
             fed_modules: DashMap::new(),
             ends: DashMap::new(),
@@ -379,6 +385,11 @@ impl ModuleEdgeIndexes {
         self.includers.entry(header.to_string()).or_default().insert(includer);
     }
 
+    /// Publish ONE module-member edge (member → the file binding it).
+    pub fn publish_member(&self, member: &str, path: &str) {
+        self.members.entry(member.to_string()).or_default().insert(path);
+    }
+
     /// Test-only REFERENCE implementation: the whole-map sweep the reverse
     /// record replaced. Kept so the record-driven purge can be checked
     /// against it directly rather than against hand-written expectations —
@@ -413,6 +424,7 @@ impl ModuleEdgeIndexes {
             ("specs", &self.specs),
             ("providers", &self.providers),
             ("includers", &self.includers),
+            ("members", &self.members),
         ] {
             for e in map.iter() {
                 let mut members = e.value().as_slice().to_vec();

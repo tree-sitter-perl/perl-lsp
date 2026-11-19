@@ -848,6 +848,95 @@ fn a_vendor_class_lands_through_the_pack_door_from_composer_s_map() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A Composer `files` entry is declared demand: the map hands it out by
+/// path, and it lands under every name it declares — a guarded global
+/// helper and a namespaced one — so a call with no import resolves. A
+/// class a project file only references (no `use`, no `extends`) is
+/// demand too.
+#[cfg(feature = "php")]
+#[test]
+fn a_composer_files_entry_lands_under_every_name_it_declares() {
+    use crate::build::dependency_map::Ask;
+    use crate::model::file_analysis::{CrossFileLookup, FileRole};
+    let php = crate::build::language_driver::LanguageRegistry::compiled().for_id("php").expect("php driver");
+    let dir = std::env::temp_dir().join(format!("d9_files_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let files = [
+        ("composer.json", r#"{"autoload": {"psr-4": {"App\\": "src/"}}}"#),
+        (
+            "vendor/composer/installed.json",
+            r#"{"packages": [{"name": "acme/support", "install-path": "../acme/support",
+                "autoload": {"psr-4": {"Acme\\": "src/"}, "files": ["src/helpers.php"]}}]}"#,
+        ),
+        (
+            "vendor/acme/support/src/helpers.php",
+            "<?php\nnamespace Acme {\nfunction tap($v) { return $v; }\n}\nnamespace {\nif (! function_exists('env')) {\n    function env($k) { return $k; }\n}\n}\n",
+        ),
+        ("src/Config.php", "<?php\nnamespace App;\nclass Config { function get() { return \\Acme\\Str::of(env('X')); } }\n"),
+    ];
+    for (rel, body) in files {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = crate::util::canonical_path::CanonicalPath::resolve(dir).into_path_buf();
+    let canon = |rel: &str| crate::util::canonical_path::CanonicalPath::resolve(dir.join(rel));
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    index_pack_language(php, &dir, None, &idx, None, 0);
+    let config = idx.workspace_file_for_test(&dir.join("src/Config.php")).unwrap();
+    assert!(config.used_identities().iter().any(|u| u == "Acme\\Str"), "a referenced-only class is demand: {:?}", config.used_identities());
+
+    let map = idx.dependency_map().expect("the walk read php's map");
+    let helpers = canon("vendor/acme/support/src/helpers.php");
+    assert_eq!(map.declared(), [Ask::File(helpers.clone())]);
+    let (_, stored) = idx.land_pack_file(&map, &helpers, php);
+    assert!(stored.is_some(), "the files entry lands");
+    assert_eq!(idx.file_role(&helpers), Some(FileRole::Dependency));
+    for name in ["env", "Acme\\tap"] {
+        assert_eq!(
+            idx.def_candidates(name).iter().map(|m| m.path.clone()).collect::<Vec<_>>(),
+            [helpers.clone()],
+            "{name} answers from the files entry"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An ask for a module MEMBER lands its module, which only imports it:
+/// the acquisition then asks for the identity the member names.
+#[cfg(feature = "python")]
+#[test]
+fn an_ask_for_a_module_member_asks_for_what_it_names() {
+    use crate::build::dependency_map::Ask;
+    let python = crate::build::language_driver::LanguageRegistry::compiled().for_id("python").expect("python driver");
+    let dir = std::env::temp_dir().join(format!("d9_member_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    const SITE: &str = ".venv/lib/python3.12/site-packages";
+    let files = [
+        (".venv/pyvenv.cfg".to_string(), "home = /usr/bin\n"),
+        (format!("{SITE}/acme/__init__.py"), "from .models import Base as Base\n"),
+        (format!("{SITE}/acme/models.py"), "class Base:\n    pass\n"),
+        ("app.py".to_string(), "import acme\n\nclass User(acme.Base):\n    pass\n"),
+    ];
+    for (rel, body) in &files {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = crate::util::canonical_path::CanonicalPath::resolve(dir).into_path_buf();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    index_pack_language(python, &dir, None, &idx, None, 0);
+    let map = idx.dependency_map().expect("the walk read python's map");
+    let located = map.locate(&Ask::Name("acme.Base".into()));
+    assert_eq!(located.iter().filter_map(|l| l.loads_as.as_deref()).collect::<Vec<_>>(), ["acme"], "the member loads its module");
+    let (_, stored) = idx.land_pack_module(&map, "acme", python);
+    let stored = stored.expect("acme lands");
+    assert_eq!(member_targets(&stored, "acme.Base"), [Ask::Name("acme.models.Base".into())]);
+    assert!(member_targets(&stored, "acme.Other").is_empty(), "a name the module does not bind asks nothing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Python's map is each environment's `site-packages`: the walk leaves the
 /// environment out, an import the map places lands as a dependency, and a
 /// module outside any package is named from its search root, not from the

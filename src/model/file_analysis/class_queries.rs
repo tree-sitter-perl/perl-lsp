@@ -1390,6 +1390,19 @@ impl FileAnalysis {
         UseMap::at(&self.pack.use_rows, &self.namespace_ranges, &self.scopes, &self.pack.names, site, self)
     }
 
+    /// The names this file's module gives what it imports, each with the
+    /// identity it names (`click.Group` → `click.core.Group`): what another
+    /// file reaches through this module. A row naming the module itself
+    /// (`from . import core` in `pkg`) binds nothing new.
+    pub fn module_members(&self) -> impl Iterator<Item = (String, String)> + '_ {
+        let sep = self.pack.names.use_map_sep();
+        self.pack.use_rows.iter().filter_map(move |row| {
+            let sep = sep?;
+            let (member, target) = (row.member.as_ref()?.identity(sep), row.name.identity(sep));
+            (member != target).then_some((member, target))
+        })
+    }
+
     /// `use_map_at` for a spelling whose scope is in hand — a ref's, which
     /// extraction minted (a header's code, a base class's, is the header
     /// scope's, outside the def's own).
