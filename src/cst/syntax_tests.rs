@@ -97,7 +97,7 @@ fn a_file_order_scan_reads_each_injection_in_place_of_its_string() {
             Injection { host: 0, replaces: r0.clone(), root: c0.root_node() },
         ],
     );
-    let assign = kind_ids(&ts_parser_perl::LANGUAGE.into(), &["assignment_expression"]);
+    let assign = [crate::cst::Kind::AssignmentExpression];
     let got: Vec<&str> = forest
         .file_nodes_of_kind(&assign)
         .iter()
@@ -167,6 +167,18 @@ fn facts_sit_on_their_nodes_in_arrival_order() {
     assert!(facts.on(ids[0]).is_empty());
 }
 
+/// A bare kind id, so the scan test covers the ids no vocabulary names.
+#[derive(Clone, Copy, PartialEq)]
+struct RawKind(u16);
+impl crate::cst::GrammarKind for RawKind {
+    fn from_id(id: u16) -> Self {
+        RawKind(id)
+    }
+    fn id(self) -> u16 {
+        self.0
+    }
+}
+
 #[test]
 fn a_kind_scan_finds_what_a_walk_finds_under_every_node() {
     let tree = parse(SRC);
@@ -180,7 +192,7 @@ fn a_kind_scan_finds_what_a_walk_finds_under_every_node() {
         for k in &kinds {
             let want: Vec<_> =
                 every_node(*n).into_iter().skip(1).filter(|d| d.kind_id() == *k).collect();
-            let got: Vec<_> = lifted.descendants_of_kind(&[*k]).map(|d| d.ts()).collect();
+            let got: Vec<_> = lifted.descendants_of_kind(&[RawKind(*k)]).map(|d| d.ts()).collect();
             assert_eq!(got, want, "kind {k} under {n:?}");
         }
     }
@@ -226,4 +238,53 @@ fn a_climb_runs_from_injected_code_on_through_its_host() {
     let at = climb.iter().position(|n| *n == repl).expect("the climb reaches the replaced node");
     assert_eq!(climb[at - 1], code.root_node(), "the injected root stands in for it");
     assert_eq!(climb.last(), Some(&main.root_node()));
+}
+
+/// The generated vocabulary names what the grammar does: every node's
+/// `Kind` spells the node's own kind, and every `Field` id reads the child
+/// its name does.
+#[test]
+fn the_generated_vocabulary_agrees_with_the_grammar() {
+    use crate::cst::{Kind, NodeExt};
+    let src = "package Foo;\nuse parent 'Bar';\nsub new { my ($class, %args) = @_; my $self = bless { %args }, $class; return $self }\n\
+               my @xs = map { $_->{k} // 0 } grep { defined } @{ $h->{list} };\nfor my $x (@xs) { print \"$x\\n\" if $x > 1 }\n\
+               $obj->method(a => 1)->[0]{b} = <<\"EOT\";\ntext\nEOT\n__END__\npod\n";
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(src, None).unwrap();
+    let mut stack = vec![tree.root_node()];
+    let mut named = 0;
+    while let Some(node) = stack.pop() {
+        if node.is_named() {
+            named += 1;
+            let kind: Kind = node.kind_of();
+            assert_eq!(kind.name(), node.kind(), "kind id {}", node.kind_id());
+            assert_eq!(kind as u16, node.kind_id(), "a named node reports its kind's discriminant");
+            assert!(node.is(kind));
+        } else {
+            assert_eq!(node.kind_of::<Kind>(), Kind::Token, "{}", node.kind());
+        }
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                if let Some(id) = cursor.field_id() {
+                    let lang = node.language();
+                    let name = lang.field_name_for_id(id.get()).unwrap();
+                    // The first child in a field is what a read of it answers.
+                    let by_name = node.child_by_field_name(name);
+                    let by_id = node.child_by_field_id(id.get());
+                    assert_eq!(by_name.map(|n| n.id()), by_id.map(|n| n.id()), "field {name}");
+                }
+                stack.push(child);
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+    assert!(named > 60, "the sample exercises the grammar: {named} named nodes");
+    let lang: tree_sitter::Language = ts_parser_perl::LANGUAGE.into();
+    assert_eq!(lang.field_id_for_name(crate::cst::Field::Right.name()).map(|i| i.get()), Some(crate::cst::Field::Right as u16));
+    assert_eq!(lang.id_for_node_kind(Kind::Block.name(), true), Kind::Block as u16);
 }

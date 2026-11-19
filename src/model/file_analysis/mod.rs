@@ -394,6 +394,13 @@ pub struct PackageFacts {
     /// parent-less base class (DateTime, Path::Tiny) offers.
     #[serde(default)]
     pub blesses: bool,
+
+    /// The class-flavor flags (`INTERFACE` / `TRAIT` / `ABSTRACT`) the
+    /// package's class declaration carries. Stated here as well as on the
+    /// symbol because a resident copy keeps this table and drops its
+    /// symbols: a flavor question must not cost a decode.
+    #[serde(default)]
+    pub flavor: SymbolFlags,
 }
 
 impl PackageFacts {
