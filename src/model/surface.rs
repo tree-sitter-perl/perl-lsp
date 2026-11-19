@@ -42,6 +42,10 @@ pub struct PackageSurface {
     pub parents: Vec<String>,
     /// Is this package a role (plugin-declared role-maker verdict)?
     pub is_role: bool,
+    /// Class-flavor flag bits (`PackageFacts::flavor`): a class turning
+    /// into an interface or a trait changes how a consumer resolves
+    /// through it.
+    pub flavor: u32,
     /// Cross-file-callable members, sorted by (name, kind).
     pub methods: Vec<MethodSurface>,
     /// Cross-file-visible non-callables owned by this package (class
@@ -197,6 +201,7 @@ impl Surface {
                 // ---- Cross-file-visible: projected below.
                 parents,
                 is_role,
+                flavor,
                 // ---- File-internal: shape THIS file's own answers, not
                 // what another file observes of it.
                 uses: _uses, // per-package plugin-trigger view; the `use` edges themselves ride `imports`
@@ -214,6 +219,7 @@ impl Surface {
             parents.dedup();
             entry.parents = parents;
             entry.is_role = *is_role;
+            entry.flavor = flavor.bits();
         }
         // A class the pack named for it (`ANONYMOUS`) has no spelling another
         // file could write (`is_linkage_visible`), and its minted name
