@@ -765,13 +765,24 @@ fn a_prepared_batch_lands_what_a_serial_one_does() {
     }
     std::fs::write(a.join("Prep/One.pm"), "package Prep::One;\nsub aa { 1 }\n1;\n").unwrap();
     std::fs::write(a.join("Prep/Two.pm"), "package Prep::Two;\nuse parent 'Twin';\nsub two { 1 }\n1;\n").unwrap();
+    // More files than the pool has workers, so a full budget has parses to hold back.
+    let extra: Vec<String> = (0..12).map(|i| format!("Prep::More{i}")).collect();
+    for (i, name) in extra.iter().enumerate() {
+        std::fs::write(a.join(format!("Prep/More{i}.pm")), format!("package {name};\nsub m{i} {{ 1 }}\n1;\n")).unwrap();
+    }
     let db_path = root.join("modules.db");
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     module_cache::init_schema(&conn).unwrap();
     let map = map_over(vec![a.clone(), b.clone()]);
-    let batch: Vec<Ask> = ["Prep::One", "Twin", "Prep::Two", "Prep::Absent"].map(|n| Ask::Name(n.to_string())).to_vec();
+    let batch: Vec<Ask> = ["Prep::One", "Twin", "Prep::Two", "Prep::Absent"]
+        .iter()
+        .map(|n| n.to_string())
+        .chain(extra.iter().cloned())
+        .map(Ask::Name)
+        .collect();
     let driver = crate::build::language_driver::LanguageRegistry::served();
-    let reader = module_cache::RetainedReader::new();
+    let reader = std::sync::Arc::new(module_cache::RetainedReader::new());
+    let stock = crate::index::cache_policy::PREPARE_AHEAD_STOCK;
 
     let land_all = |core: &IndexCore, prepared: &mut Prepared| -> Vec<(String, Vec<String>)> {
         let mut parse = Parse::of(driver);
@@ -791,13 +802,20 @@ fn a_prepared_batch_lands_what_a_serial_one_does() {
     };
 
     let serial = land_all(&IndexCore::new(), &mut Prepared::new());
-    assert_eq!(serial.len(), 4, "One, both Twins, Two: {serial:?}");
+    assert_eq!(serial.len(), 16, "One, both Twins, Two, the twelve: {serial:?}");
 
     let core = IndexCore::new();
-    let mut prepared = prepare_batch(&core, &map, 1, &batch, driver, None, &reader);
-    assert_eq!(prepared.len(), 4, "every located file is prepared once");
+    let mut prepared = prepare_batch(&core, &map, 1, &batch, driver, None, &reader, stock);
+    assert_eq!(prepared.outstanding(), 16, "every located file is prepared once");
     assert_eq!(land_all(&core, &mut prepared), serial, "parsed in the pool");
-    assert!(prepared.is_empty(), "every prepared file was landed");
+    assert_eq!(prepared.outstanding(), 0, "every prepared file was landed");
+
+    // A budget the first finished parse fills holds the parse-ahead back;
+    // the landings still get every file, in order.
+    let core = IndexCore::new();
+    let mut prepared = prepare_batch(&core, &map, 1, &batch, driver, None, &reader, 1);
+    assert_eq!(land_all(&core, &mut prepared), serial, "parsed under a full budget");
+    assert_eq!(prepared.outstanding(), 0);
 
     // Same size, same stamp, new body: only a row read answers `aa`.
     let one = a.join("Prep/One.pm");
@@ -805,13 +823,13 @@ fn a_prepared_batch_lands_what_a_serial_one_does() {
     std::fs::write(&one, "package Prep::One;\nsub bb { 1 }\n1;\n").unwrap();
     std::fs::File::options().write(true).open(&one).unwrap().set_modified(mtime).unwrap();
     let core = IndexCore::new();
-    let mut prepared = prepare_batch(&core, &map, 1, &batch, driver, Some(&db_path), &reader);
+    let mut prepared = prepare_batch(&core, &map, 1, &batch, driver, Some(&db_path), &reader, stock);
     assert_eq!(land_all(&core, &mut prepared), serial, "read from the rows");
 
     // A held file is left to its landing.
     let core = IndexCore::new();
     land_all(&core, &mut Prepared::new());
-    assert!(prepare_batch(&core, &map, 1, &batch, driver, None, &reader).is_empty());
+    assert_eq!(prepare_batch(&core, &map, 1, &batch, driver, None, &reader, stock).outstanding(), 0);
     let _ = std::fs::remove_dir_all(&root);
 }
 

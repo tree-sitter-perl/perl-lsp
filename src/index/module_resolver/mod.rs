@@ -72,6 +72,8 @@ mod index_perl;
 pub use index_perl::*;
 mod persist;
 pub(crate) use persist::*;
+mod prepare;
+pub(crate) use prepare::*;
 mod thread;
 pub use thread::uri_to_path;
 use thread::*;

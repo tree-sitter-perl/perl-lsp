@@ -43,7 +43,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     // The batch's parses read rows through their own connections, checked
     // out of one pool for the thread's life (`prepare_batch`).
     let db_path: Option<std::path::PathBuf> = db.as_ref().and_then(|c| c.path()).filter(|p| !p.is_empty()).map(std::path::PathBuf::from);
-    let readers = module_cache::RetainedReader::new();
+    let readers = Arc::new(module_cache::RetainedReader::new());
     if let (Some(conn), false) = (&db, hub) {
         let _ = module_cache::validate_input_fingerprint(conn, served.analysis_input_fingerprint());
     }
@@ -203,7 +203,16 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         // always ends with a fire — diagnostics converge once the queue
         // drains.
         let mut resolved_any = false;
-        let mut prepared = prepare_batch(&core, &map, map_gen, &batch, served, db_path.as_deref(), &readers);
+        let mut prepared = prepare_batch(
+            &core,
+            &map,
+            map_gen,
+            &batch,
+            served,
+            db_path.as_deref(),
+            &readers,
+            crate::index::cache_policy::PREPARE_AHEAD_STOCK,
+        );
         for ask in batch {
             if core.asked.get(&ask).is_some_and(|e| e.0 == map_gen) {
                 continue;

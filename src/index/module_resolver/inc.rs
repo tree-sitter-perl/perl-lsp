@@ -126,7 +126,7 @@ pub(crate) fn land_file(
 /// The files the map places under `module_name` that load as it, in the
 /// map's order. A file placed under a name it does not load as (an
 /// enclosing module) is not that name's provider.
-fn located_as(map: &DependencyMap, module_name: &str) -> Vec<CanonicalPath> {
+pub(super) fn located_as(map: &DependencyMap, module_name: &str) -> Vec<CanonicalPath> {
     map.locate(&Ask::Name(module_name.to_string()))
         .into_iter()
         .filter(|l| l.loads_as.as_deref() == Some(module_name))
@@ -176,7 +176,7 @@ fn parse_providers(
     let providers: Providers = crate::util::ghost_stats::timed("resolver.parse", || {
         located
             .into_iter()
-            .filter_map(|path| match prepared.remove(&path) {
+            .filter_map(|path| match prepared.take(&path) {
                 Some(done) => done,
                 None => parse_one_provider(module_name, path, parse, rows),
             })
@@ -184,12 +184,6 @@ fn parse_providers(
     });
     (!providers.is_empty()).then_some(providers)
 }
-
-/// A batch's reads and parses, run ahead of its landings: each located
-/// file's analysis (or `None` when it reads as nothing), by path. A landing
-/// takes its file from here and parses only what is missing, so what lands,
-/// in what order, and what the memo records are the serial landing's.
-pub(crate) type Prepared = std::collections::HashMap<CanonicalPath, Option<Arc<CachedModule>>>;
 
 /// The module names an ask for `name` lands, as the map places it: itself,
 /// or the modules it is a member of (`pkg.models.Base` loads `pkg.models`).
@@ -210,79 +204,10 @@ pub(crate) fn landing_names(core: &IndexCore, map: &DependencyMap, name: &str) -
     names
 }
 
-/// Read and parse, in the global Rayon pool the workspace indexer also runs
-/// in, every file the batch's unsettled asks would land that the tier does
-/// not hold yet. Each worker parses with its own parser and reads rows
-/// through `reader`'s checkout pool, so no worker waits on the resolver's
-/// own connection. Only the parse moves: the landings stay on the resolver
-/// thread, in ask order. A held file is left to its landing (a restamp, or
-/// a re-parse if it changed), and one file is parsed where it lands.
-///
-/// The shared pool, not one of its own: declared asks arrive while the
-/// walk holds every worker, and a second pool of that size oversubscribed
-/// the cores (laravel-app cold: 1.9 s shared, 2.5 s apart).
-pub(crate) fn prepare_batch(
-    core: &IndexCore,
-    map: &DependencyMap,
-    map_gen: u64,
-    batch: &[Ask],
-    driver: &'static dyn crate::build::language_driver::LanguageDriver,
-    db_path: Option<&std::path::Path>,
-    reader: &module_cache::RetainedReader,
-) -> Prepared {
-    use rayon::prelude::*;
-    let mut jobs: Vec<(String, CanonicalPath)> = Vec::new();
-    let mut seen: std::collections::HashSet<CanonicalPath> = std::collections::HashSet::new();
-    let mut job = |label: &str, path: CanonicalPath| {
-        if core.records.role_of(&path).is_none() && seen.insert(path.clone()) {
-            jobs.push((label.to_string(), path));
-        }
-    };
-    for ask in batch {
-        if core.asked.get(ask).is_some_and(|e| e.0 == map_gen) {
-            continue;
-        }
-        match ask {
-            Ask::File(path) => job(&path.to_string_lossy(), path.clone()),
-            Ask::Name(name) => {
-                for module_name in landing_names(core, map, name) {
-                    if core.project_answers(&module_name) {
-                        continue;
-                    }
-                    for path in located_as(map, &module_name) {
-                        job(&module_name, path);
-                    }
-                }
-            }
-        }
-    }
-    if jobs.len() < 2 {
-        return Prepared::new();
-    }
-    crate::util::ghost_stats::count_by("resolver.prepared", jobs.len() as u64);
-    let open = || db_path.and_then(|p| module_cache::open_reader_retrying(p).ok());
-    crate::util::ghost_stats::timed("resolver.prepare", || {
-        jobs.into_par_iter()
-            .map_init(
-                || Parse::of(driver),
-                |parse, (label, path)| {
-                    let done = match db_path {
-                        Some(_) => reader
-                            .with(open, |conn| parse_one_provider(&label, path.clone(), parse, Some(conn)))
-                            .unwrap_or_else(|| parse_one_provider(&label, path.clone(), parse, None)),
-                        None => parse_one_provider(&label, path.clone(), parse, None),
-                    };
-                    (path, done)
-                },
-            )
-            .collect()
-    })
-}
-
 /// Read + parse ONE provider file into a `CachedModule`, or take it from its
 /// current row. Every provider runs this same body — the @INC winner has no
 /// privileged path (rule #10).
-fn parse_one_provider(
+pub(super) fn parse_one_provider(
     module_name: &str,
     path: CanonicalPath,
     parse: &mut Parse,

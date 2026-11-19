@@ -1770,7 +1770,7 @@ fn file_roles_are_read_from_the_record() {
           `mark_doc_closed` re-records only the front door's copy"),
         ("index/resolve/refs.rs", 1, "`index_role`: the role as a `RoleMask`, the one projection resolve's \
           consumers read"),
-        ("index/module_resolver/inc.rs", 1, "`prepare_batch` leaves a file the index holds, in either role, to \
+        ("index/module_resolver/prepare.rs", 1, "`prepare_batch` leaves a file the index holds, in either role, to \
           its landing"),
     ];
     let mut drift = allowlist_drift("file role read", &seen, allow);
