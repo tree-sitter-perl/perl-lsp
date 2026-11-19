@@ -1904,6 +1904,55 @@ fn positional_reads_skip_grammar_extras() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// A tree field is read by its generated id (`NodeExt::field` with a
+/// grammar's `Field`), so a field the grammar lacks fails the build and no
+/// read searches the grammar's name table (`docs/adr/grammar-vocabulary.md`).
+/// The by-name sites left read a tree whose grammar this build may not link.
+/// Shrink-only.
+#[test]
+fn tree_fields_are_read_by_id() {
+    let files = layer_files(&[Layer::Build, Layer::Cst, Layer::Lsp, Layer::Index, Layer::Model]);
+    let seen = count_lines(&files, &|l| {
+        l.contains("child_by_field_name(") || l.contains("children_by_field_name(") || l.contains("field_id_for_name(")
+    });
+    let allow: &[(&str, usize, &str)] = &[
+        ("build/cpp_reparse/defs.rs", 16, "the C++ reparse compiles in builds that do not link its grammar: legacy"),
+        ("build/cpp_reparse/synthetic.rs", 6, "the C++ reparse compiles in builds that do not link its grammar: legacy"),
+        ("build/cpp_reparse/validate.rs", 3, "the C++ reparse compiles in builds that do not link its grammar: legacy"),
+    ];
+    let drift = allowlist_drift("by-name field reads (NodeExt::field)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// A node's kind is read as its grammar's `Kind` (`NodeExt::kind_of` /
+/// `NodeExt::is`), so a kind the grammar lacks fails the build and no read
+/// decodes a kind string (`docs/adr/grammar-vocabulary.md`). What is left
+/// reads a token, which a vocabulary does not name, or a kind a query
+/// document or another grammar names. Shrink-only.
+#[test]
+fn node_kinds_are_read_by_id() {
+    let files = layer_files(&[Layer::Build, Layer::Cst, Layer::Lsp, Layer::Index, Layer::Model]);
+    let seen = count_lines(&files, &|l| l.contains(".kind()") && !l.contains("ErrorKind"));
+    let allow: &[(&str, usize, &str)] = &[
+        ("build/builder/extract.rs", 1, "the declarator keyword (`my` / `our` / `state` / `field`): a token"),
+        ("build/builder/frameworks.rs", 1, "the kind's name, handed to a plugin as text"),
+        ("build/builder/joins.rs", 1, "a suffix every statement kind's name shares: legacy"),
+        ("build/builder/narrowing.rs", 1, "the `until` keyword: a token"),
+        ("build/builder/visit_decl.rs", 1, "the `sub` keyword: a token"),
+        ("build/cpp_reparse/defs.rs", 11, "the C++ reparse compiles in builds that do not link its grammar: legacy"),
+        ("build/cpp_reparse/synthetic.rs", 7, "the C++ reparse compiles in builds that do not link its grammar: legacy"),
+        ("build/cpp_reparse/validate.rs", 9, "the C++ reparse compiles in builds that do not link its grammar: legacy"),
+        ("build/cursor_sentinel.rs", 5, "kinds a pack declares by name, for any grammar"),
+        ("build/query_predicates.rs", 3, "kinds a query document names, for any grammar"),
+        ("cst.rs", 4, "tokens: the assignment operator, `no`, `{`, and a func1op's keyword"),
+        ("cst/syntax.rs", 2, "`SyntaxNode::kind`, the name itself, and its Debug"),
+        ("lsp/cli/mod.rs", 1, "`--parse` prints the kind's name"),
+        ("lsp/cursor_context.rs", 5, "the Perl cursor detector (rule #6): `->`, brackets and commas are tokens"),
+    ];
+    let drift = allowlist_drift("kind-string reads (NodeExt::kind_of)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// A fact about a node hangs off the node: a `NodeFacts` column keyed by
 /// `NodeId`, nested by the tree's own parent links
 /// (`docs/adr/core-syntax-tree.md`). A side index keyed by where a node sits
@@ -2486,4 +2535,62 @@ fn source_files_are_read_through_read_source() {
         "read source text with crate::util::text::read_source, not read_to_string:\n{}",
         violations.join("\n")
     );
+}
+
+/// A bag walk that recurses on its own — directly, or through one helper in
+/// the same file — follows edges `query_rec` never frames, so it carries its
+/// own cycle guard and grows its own stack (`with_stack_headroom` marks the
+/// pair). The bag is not a DAG: a span several nodes collapse onto (a C macro
+/// expansion) edges to itself, and a walk without both aborts the process.
+#[test]
+fn recursive_bag_walks_grow_their_own_stack() {
+    let mut unguarded = Vec::new();
+    for (path, layer, _stem) in source_files() {
+        if layer != Layer::Model {
+            continue;
+        }
+        let text = fs::read_to_string(&path).unwrap();
+        let mut bodies: HashMap<String, String> = HashMap::new();
+        let mut at = 0;
+        while let Some(off) = text[at..].find("fn ") {
+            let start = at + off + 3;
+            at = start;
+            if text[..start - 3].chars().last().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                continue;
+            }
+            let name: String = text[start..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            let (Some(open), semi) = (text[start..].find('{'), text[start..].find(';')) else { continue };
+            if name.is_empty() || semi.is_some_and(|s| s < open) {
+                continue;
+            }
+            let open = start + open;
+            let end = balanced_from(&text, open, b'{', b'}');
+            bodies.entry(name).or_default().push_str(&text[open..end]);
+        }
+        let calls = |body: &str, callee: &str| {
+            body.match_indices(callee).any(|(i, _)| {
+                let before = body[..i].chars().last();
+                let after = body[i + callee.len()..].chars().next();
+                !before.is_some_and(|c| c.is_alphanumeric() || c == '_') && matches!(after, Some('(') | Some(':'))
+            })
+        };
+        for (name, body) in &bodies {
+            let reads_edges = (body.contains("iter_attachment(") || body.contains("for_attachment("))
+                && body.contains("WitnessPayload::Edge(");
+            if !reads_edges {
+                continue;
+            }
+            let cycle: Vec<&String> = bodies
+                .iter()
+                .filter(|(other, other_body)| {
+                    if *other == name { calls(body, name) } else { calls(body, other) && calls(other_body, name) }
+                })
+                .map(|(other, _)| other)
+                .collect();
+            if !cycle.is_empty() && !std::iter::once(name).chain(cycle).any(|f| bodies[f].contains("with_stack_headroom(")) {
+                unguarded.push(format!("{}::{name}", path.display()));
+            }
+        }
+    }
+    assert!(unguarded.is_empty(), "recursive bag walks without their own guard: {unguarded:?}");
 }

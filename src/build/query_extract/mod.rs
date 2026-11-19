@@ -51,12 +51,19 @@ fn cached_query(language: &Language, pack: &LangPack) -> Result<&'static Compile
     let source = pack.query_source;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<usize, &'static CompiledPack>>> = OnceLock::new();
+    type Cell = OnceLock<Result<CompiledPack, String>>;
+    static CACHE: OnceLock<Mutex<HashMap<usize, &'static Cell>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let key = source.as_ptr() as usize;
-    if let Some(q) = cache.lock().unwrap().get(&key) {
-        return Ok(q);
-    }
+    // The map's lock covers only finding the document's cell. The compile
+    // runs under the cell, so index workers that arrive together wait for
+    // one compile instead of each running their own.
+    let cell: &'static Cell = *cache.lock().unwrap().entry(key).or_insert_with(|| Box::leak(Box::new(OnceLock::new())));
+    cell.get_or_init(|| compile(language, pack)).as_ref().map_err(String::clone)
+}
+
+fn compile(language: &Language, pack: &LangPack) -> Result<CompiledPack, String> {
+    let source = pack.query_source;
     let query = Query::new(language, source).map_err(|e| format!("query: {e}"))?;
     crate::build::query_predicates::check_source(source).map_err(|e| format!("query: {e}"))?;
     let captures = vocab::capture_table(query.capture_names(), &pack.member_spaces).map_err(|e| format!("query: {e}"))?;
@@ -72,9 +79,7 @@ fn cached_query(language: &Language, pack: &LangPack) -> Result<&'static Compile
             format!("query: @link.from.{w} links for a walk whose root @{} the document never captures", w.root())
         }
     })?;
-    let leaked: &'static CompiledPack = Box::leak(Box::new(CompiledPack { query, captures }));
-    cache.lock().unwrap().insert(key, leaked);
-    Ok(leaked)
+    Ok(CompiledPack { query, captures })
 }
 
 /// Every capture `pack`'s document mints, through the extractor's own

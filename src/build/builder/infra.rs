@@ -127,17 +127,13 @@ impl<'a> Builder<'a> {
     // (`$o = Bar->new if do { 1 if $o->alive }`) is evaluated before both
     // statements; a `ReadPoint` skips one, so the outer one still reaches it.
     fn statement_run_before(&self, node: crate::cst::SyntaxNode<'_, 'a>) -> Option<Span> {
-        static KINDS: std::sync::OnceLock<(Vec<u16>, Vec<u16>)> = std::sync::OnceLock::new();
-        let (callables, modifiers) = KINDS.get_or_init(|| {
-            (perl_kind_ids(crate::cst::CALLABLE_KINDS), perl_kind_ids(crate::cst::MODIFIER_KINDS))
-        });
         let mut below: Option<Node<'a>> = None;
         for n in self.syntax.climb_in_file(node) {
-            let kind = n.kind_id();
-            if callables.contains(&kind) {
+            let kind: Kind = n.kind_of();
+            if crate::cst::is_callable_boundary(kind) {
                 return None;
             }
-            if modifiers.contains(&kind) {
+            if crate::cst::MODIFIER_KINDS.contains(&kind) {
                 if let Some((stmt, head)) = crate::cst::modifier_runs_head_first(n.ts()) {
                     if below == Some(head) {
                         return Some(node_to_span(stmt));
@@ -482,14 +478,14 @@ impl<'a> Builder<'a> {
         &self,
         node: Node<'a>,
     ) -> Option<crate::model::witnesses::WitnessAttachment> {
-        match node.kind() {
-            "anonymous_subroutine_expression" => {
+        match node.kind_of() {
+            Kind::AnonymousSubroutineExpression => {
                 // The only caller (`expr_payload`) mints the symbol first.
                 self.anon_sub_symbol_by_span
                     .get(&node_to_span(node))
                     .map(|sym_id| crate::model::witnesses::WitnessAttachment::Symbol(*sym_id))
             }
-            "refgen_expression" => {
+            Kind::RefgenExpression => {
                 let names = self.extract_names_from_refgen(node);
                 let raw = names.into_iter().next()?;
                 let (class, name) = match crate::model::file_analysis::split_qualified(&raw, &crate::model::conventions::PERL_SPELLINGS) {
@@ -500,7 +496,7 @@ impl<'a> Builder<'a> {
             }
             // `__SUB__` is the callable it runs in — that symbol itself, so a
             // same-named sub elsewhere can never answer for it.
-            "func0op_call_expression"
+            Kind::Func0opCallExpression
                 if node
                     .child(0)
                     .and_then(|t| t.utf8_text(self.source).ok())
