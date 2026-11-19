@@ -255,12 +255,34 @@ impl IndexCore {
     }
 
     /// The map read so far, if any.
+    ///
+    /// The visibility rank reads it on request paths, from every worker, so
+    /// the read is a generation load and a per-thread copy; the lock is
+    /// taken only when the generation moved since this thread last looked.
+    /// A lock read per call writes the lock word from every worker.
     pub(crate) fn dependency_map(&self) -> Option<Arc<crate::build::dependency_map::DependencyMap>> {
-        self.dependency_map
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(|p| Arc::clone(&p.map))
+        type Seen = Option<(u64, u64, Arc<crate::build::dependency_map::DependencyMap>)>;
+        thread_local! {
+            static SEEN: std::cell::RefCell<Seen> = const { std::cell::RefCell::new(None) };
+        }
+        let gen = self.map_generation();
+        if gen == 0 {
+            return None;
+        }
+        SEEN.with(|seen| {
+            if let Some((core, at, map)) = seen.borrow().as_ref() {
+                if *core == self.core_id && *at == gen {
+                    return Some(Arc::clone(map));
+                }
+            }
+            let slot = self.dependency_map.read().unwrap_or_else(|e| e.into_inner());
+            let published = slot.as_ref()?;
+            let map = Arc::clone(&published.map);
+            // Keyed by the generation read under the lock: the publish
+            // advances both together.
+            *seen.borrow_mut() = Some((self.core_id, self.map_generation(), Arc::clone(&map)));
+            Some(map)
+        })
     }
 
     /// Publish `map`. The first is generation 1; a later one whose
