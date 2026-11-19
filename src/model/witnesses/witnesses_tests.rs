@@ -1491,3 +1491,65 @@ fn an_element_of_a_mixed_sequence_is_any_of_its_values() {
     assert!(matches!(want, InferredType::Union(_)));
     assert_eq!(ReducerRegistry::with_defaults().query(&bag, &q), ReducedValue::Type(want));
 }
+
+// ---- How an expression ends: the walk's own cycle guard ----
+
+fn wexpr(at: Span, payload: WitnessPayload) -> Witness {
+    Witness {
+        attachment: WitnessAttachment::Expr(at),
+        source: WitnessSource::Builder("test".into()),
+        payload,
+        span: at,
+    }
+}
+
+fn row_span(row: usize) -> Span {
+    span(row, 0, row, 1)
+}
+
+/// A span several nodes collapse onto (a C macro expansion remapped onto its
+/// call site) edges to itself. The edge adds nothing: what the expression
+/// states answers, and an expression whose only witness is the edge is the
+/// top, never "does not complete".
+#[test]
+fn an_expression_edging_to_itself_ends_as_it_states() {
+    let s = row_span(0);
+    let mut bag = WitnessBag::new();
+    bag.push(wexpr(s, WitnessPayload::Edge(WitnessAttachment::Expr(s))));
+    assert_eq!(query_expr_ends(&bag, &WitnessAttachment::Expr(s), None), Ends::all(), "the edge alone is no evidence");
+    bag.push(wexpr(s, WitnessPayload::Effect(Effect::Ends(Ends::EXITS))));
+    assert_eq!(query_expr_ends(&bag, &WitnessAttachment::Expr(s), None), Ends::EXITS);
+}
+
+/// A longer cycle joins what every expression on it states.
+#[test]
+fn a_cycle_of_expressions_joins_what_each_states() {
+    let (a, b) = (row_span(0), row_span(1));
+    let mut bag = WitnessBag::new();
+    bag.push(wexpr(a, WitnessPayload::Edge(WitnessAttachment::Expr(b))));
+    bag.push(wexpr(b, WitnessPayload::Edge(WitnessAttachment::Expr(a))));
+    bag.push(wexpr(b, WitnessPayload::Effect(Effect::Ends(Ends::UNWINDS))));
+    assert_eq!(query_expr_ends(&bag, &WitnessAttachment::Expr(a), None), Ends::UNWINDS);
+    assert_eq!(query_expr_ends(&bag, &WitnessAttachment::Expr(b), None), Ends::UNWINDS);
+}
+
+/// A chain of edges far longer than a small thread's stack holds degrades to
+/// the top past the depth budget instead of aborting the process.
+#[test]
+fn a_long_chain_of_expressions_does_not_overflow_the_stack() {
+    let answer = std::thread::Builder::new()
+        .stack_size(SMALL_STACK)
+        .spawn(|| {
+            const HOPS: usize = 5_000;
+            let mut bag = WitnessBag::new();
+            for row in 0..HOPS {
+                bag.push(wexpr(row_span(row), WitnessPayload::Edge(WitnessAttachment::Expr(row_span(row + 1)))));
+            }
+            bag.push(wexpr(row_span(HOPS), WitnessPayload::Effect(Effect::Ends(Ends::EXITS))));
+            query_expr_ends(&bag, &WitnessAttachment::Expr(row_span(0)), None)
+        })
+        .expect("spawn")
+        .join()
+        .expect("the walk must not overflow the stack");
+    assert_eq!(answer, Ends::all(), "past the depth budget the answer is the top");
+}

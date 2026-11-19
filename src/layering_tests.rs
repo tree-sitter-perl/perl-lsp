@@ -2453,3 +2453,61 @@ fn source_files_are_read_through_read_source() {
         violations.join("\n")
     );
 }
+
+/// A bag walk that recurses on its own — directly, or through one helper in
+/// the same file — follows edges `query_rec` never frames, so it carries its
+/// own cycle guard and grows its own stack (`with_stack_headroom` marks the
+/// pair). The bag is not a DAG: a span several nodes collapse onto (a C macro
+/// expansion) edges to itself, and a walk without both aborts the process.
+#[test]
+fn recursive_bag_walks_grow_their_own_stack() {
+    let mut unguarded = Vec::new();
+    for (path, layer, _stem) in source_files() {
+        if layer != Layer::Model {
+            continue;
+        }
+        let text = fs::read_to_string(&path).unwrap();
+        let mut bodies: HashMap<String, String> = HashMap::new();
+        let mut at = 0;
+        while let Some(off) = text[at..].find("fn ") {
+            let start = at + off + 3;
+            at = start;
+            if text[..start - 3].chars().last().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                continue;
+            }
+            let name: String = text[start..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            let (Some(open), semi) = (text[start..].find('{'), text[start..].find(';')) else { continue };
+            if name.is_empty() || semi.is_some_and(|s| s < open) {
+                continue;
+            }
+            let open = start + open;
+            let end = balanced_from(&text, open, b'{', b'}');
+            bodies.entry(name).or_default().push_str(&text[open..end]);
+        }
+        let calls = |body: &str, callee: &str| {
+            body.match_indices(callee).any(|(i, _)| {
+                let before = body[..i].chars().last();
+                let after = body[i + callee.len()..].chars().next();
+                !before.is_some_and(|c| c.is_alphanumeric() || c == '_') && matches!(after, Some('(') | Some(':'))
+            })
+        };
+        for (name, body) in &bodies {
+            let reads_edges = (body.contains("iter_attachment(") || body.contains("for_attachment("))
+                && body.contains("WitnessPayload::Edge(");
+            if !reads_edges {
+                continue;
+            }
+            let cycle: Vec<&String> = bodies
+                .iter()
+                .filter(|(other, other_body)| {
+                    if *other == name { calls(body, name) } else { calls(body, other) && calls(other_body, name) }
+                })
+                .map(|(other, _)| other)
+                .collect();
+            if !cycle.is_empty() && !std::iter::once(name).chain(cycle).any(|f| bodies[f].contains("with_stack_headroom(")) {
+                unguarded.push(format!("{}::{name}", path.display()));
+            }
+        }
+    }
+    assert!(unguarded.is_empty(), "recursive bag walks without their own guard: {unguarded:?}");
+}
