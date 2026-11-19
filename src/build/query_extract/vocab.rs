@@ -413,8 +413,9 @@ spelled! {
         /// A callable's body: its statements run in sequence, and how it
         /// ends is how a call to the callable ends.
         Body = "body",
-        /// A call that is a whole statement: control reaches what follows
-        /// it only if the call comes back.
+        /// A call a statement runs: control reaches what follows the
+        /// statement only if the call comes back. The `gate` walk leads from
+        /// the call out to that statement.
         Gate = "gate",
         /// Where code may unwind to a handler, at any depth: a call, or an
         /// operation the language's runtime raises from. A tried body stops
@@ -687,6 +688,8 @@ spelled! {
         /// A `@ref.spelled` reference, down its spelling's levels to the
         /// token it rewrites.
         Spelled = "spelled",
+        /// A `@ctl.gate` call, out to the statement that runs it.
+        Gate = "gate",
     }
 }
 
@@ -698,6 +701,7 @@ impl LinkWalk {
             LinkWalk::Qualifier => Capture::Qualifier,
             LinkWalk::Deref => Capture::NestedTarget,
             LinkWalk::Spelled => Capture::RefSpelled,
+            LinkWalk::Gate => Capture::Ctl(CtlCap::Gate),
         }
     }
 }
@@ -717,6 +721,9 @@ spelled! {
         Name = "name",
         /// A templated name's base name (`Buf` in `Buf<T>`).
         Base = "base",
+        /// The node one level out that runs this one whenever it runs (the
+        /// statement around an expression, the assignment storing a value).
+        Outer = "outer",
     }
 }
 

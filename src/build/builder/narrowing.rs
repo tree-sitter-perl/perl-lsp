@@ -13,7 +13,7 @@
 
 use tree_sitter::{Node, Point};
 
-use crate::cst::node_to_span;
+use crate::cst::{node_to_span, Field, Kind, NodeExt};
 use crate::model::file_analysis::{Access, Binding, InferredType, Place, PlaceDisturbanceIndex, ScopeId, Span};
 
 use super::extract::ListSlot;
@@ -274,10 +274,10 @@ fn tag_string_to_type(via: crate::model::file_analysis::RefTagFn, s: &str) -> Op
 
 /// A narrowable subject node: a plain scalar, or a constant hash/array
 /// place element (`$self->{x}`).
-fn is_subject_node_kind(kind: &str) -> bool {
+fn is_subject_node_kind(kind: Kind) -> bool {
     matches!(
         kind,
-        "scalar" | "hash_element_expression" | "array_element_expression"
+        Kind::Scalar | Kind::HashElementExpression | Kind::ArrayElementExpression
     )
 }
 
@@ -298,13 +298,13 @@ enum Logical<'a> {
 }
 
 fn logical_shape<'a>(cond: Node<'a>, source: &[u8]) -> Option<Logical<'a>> {
-    match cond.kind() {
-        "unary_expression" if raw_leading_op(cond, source) == "!" => {
-            cond.child_by_field_name("operand").map(Logical::Not)
+    match cond.kind_of() {
+        Kind::UnaryExpression if raw_leading_op(cond, source) == "!" => {
+            cond.field(Field::Operand).map(Logical::Not)
         }
-        "logical_not_expression" => cond.child_by_field_name("operand").map(Logical::Not),
-        "binary_expression" | "lowprec_logical_expression" => {
-            let (l, r) = (cond.child_by_field_name("left")?, cond.child_by_field_name("right")?);
+        Kind::LogicalNotExpression => cond.field(Field::Operand).map(Logical::Not),
+        Kind::BinaryExpression | Kind::LowprecLogicalExpression => {
+            let (l, r) = (cond.field(Field::Left)?, cond.field(Field::Right)?);
             match raw_mid_op(cond, source).as_str() {
                 "&&" | "and" => Some(Logical::And(l, r)),
                 "||" | "or" => Some(Logical::Or(l, r)),
@@ -392,13 +392,13 @@ fn guard_literal<'a>(builder: &Builder<'a>, cond: Node<'a>) -> Option<GuardFact<
 /// The guard fact a single (non-connective) condition states, if any.
 fn recognize_atom<'a>(builder: &Builder<'a>, cond: Node<'a>) -> Option<GuardFact<'a>> {
     let source = builder.source;
-    match cond.kind() {
-        "method_call_expression" => {
+    match cond.kind_of() {
+        Kind::MethodCallExpression => {
             recognize_isa_guard(builder, cond, source).or_else(|| recognize_type_check(builder, cond).map(|(f, _)| f))
         }
-        "equality_expression" => recognize_ref_eq_guard(builder, cond, source),
-        "func1op_call_expression" => recognize_defined_guard(builder, cond, source),
-        "ambiguous_function_call_expression" | "function_call_expression" => {
+        Kind::EqualityExpression => recognize_ref_eq_guard(builder, cond, source),
+        Kind::Func1opCallExpression => recognize_defined_guard(builder, cond, source),
+        Kind::AmbiguousFunctionCallExpression | Kind::FunctionCallExpression => {
             recognize_blessed_guard(builder, cond).or_else(|| recognize_type_check(builder, cond).map(|(f, _)| f))
         }
         _ => None,
@@ -412,8 +412,8 @@ fn recognize_atom<'a>(builder: &Builder<'a>, cond: Node<'a>) -> Option<GuardFact
 fn recognize_type_check<'a>(builder: &Builder<'a>, call: Node<'a>) -> Option<(GuardFact<'a>, bool)> {
     if let Some(mc) = crate::cst::MethodCall::cast(call) {
         let check = builder.plugins.type_check_method(mc.method()?.utf8_text(builder.source).ok()?)?;
-        let arg = crate::cst::peel_groups(call.child_by_field_name("arguments")?);
-        if !is_subject_node_kind(arg.kind()) {
+        let arg = crate::cst::peel_groups(call.field(Field::Arguments)?);
+        if !is_subject_node_kind(arg.kind_of()) {
             return None;
         }
         let constraint = crate::model::witnesses::WitnessAttachment::Expr(node_to_span(mc.invocant()?));
@@ -487,7 +487,7 @@ fn recognize_isa_guard<'a>(builder: &Builder<'a>, call: Node<'a>, source: &[u8])
     }
     let read = mc.invocant()?;
     let subject = builder.narrow_subject_of(read)?;
-    let arg = call.child_by_field_name("arguments")?;
+    let arg = call.field(Field::Arguments)?;
     let class = crate::cst::plain_string_literal_text(arg, source)
         .or_else(|| builder.folded_class_name_arg(arg))
         .or_else(|| builder.current_package_literal(arg))?;
@@ -508,8 +508,8 @@ fn recognize_ref_eq_guard<'a>(builder: &Builder<'a>, eq: Node<'a>, source: &[u8]
     if raw_mid_op(eq, source) != "eq" {
         return None;
     }
-    let left = eq.child_by_field_name("left")?;
-    let right = eq.child_by_field_name("right")?;
+    let left = eq.field(Field::Left)?;
+    let right = eq.field(Field::Right)?;
     let call = |n: Node<'a>| builder.ref_tag_call(crate::cst::peel_groups(n));
     if let Some(((via, operand), lit)) = call(left).map(|c| (c, right)).or_else(|| call(right).map(|c| (c, left))) {
         let ty = match crate::cst::plain_string_literal_text(lit, source) {
@@ -525,7 +525,7 @@ fn recognize_ref_eq_guard<'a>(builder: &Builder<'a>, eq: Node<'a>, source: &[u8]
     }
     let tagged = |var: Node<'a>, lit: Node<'a>| {
         let var = crate::cst::peel_groups(var);
-        if var.kind() != "scalar" {
+        if !var.is(Kind::Scalar) {
             return None;
         }
         let name = crate::cst::canonical_var_name(var, source)?;
@@ -574,7 +574,7 @@ impl<'a> Builder<'a> {
     /// a single dispatch class, so it doesn't narrow. `None` for non-scalar
     /// args (literals are handled by `plain_string_literal_text`).
     fn folded_class_name_arg(&self, arg: Node<'a>) -> Option<String> {
-        if arg.kind() != "scalar" {
+        if !arg.is(Kind::Scalar) {
             return None;
         }
         let key = crate::cst::canonical_var_name(arg, self.source)?;
@@ -732,7 +732,7 @@ impl<'a> Builder<'a> {
     /// before any test. A loop's fall-through is not narrowed: `last` leaves
     /// with G unchanged.
     pub(super) fn narrow_postfix(&mut self, postfix: Node<'a>) {
-        let Some(condition) = postfix.child_by_field_name("condition") else { return };
+        let Some(condition) = postfix.field(Field::Condition) else { return };
         let Some(modified) = postfix.named_child(0) else { return };
         let Some(kw) = connector_keyword_between(modified, condition, self.source) else { return };
         let (runs_when_true, is_loop) = match kw.as_str() {
@@ -744,7 +744,7 @@ impl<'a> Builder<'a> {
         };
         // TODO(do-loop-node): the grammar gives `do BLOCK while G` the same
         // node as `STMT while G`; a node of its own would make this a kind.
-        if is_loop && modified.kind() == "do_expression" {
+        if is_loop && modified.is(Kind::DoExpression) {
             return;
         }
         let mut subjects = self.narrow_arm(condition, modified, runs_when_true);
@@ -757,7 +757,7 @@ impl<'a> Builder<'a> {
             self.prove_untaken(subject, op, read, of);
         }
         self.seed_guard_joins(postfix, subjects);
-        self.record_guard_sites(condition, Some(node_to_span(modified)));
+        self.record_guard_sites(condition, self.statement_call(modified).map(node_to_span));
     }
 
     /// `while (G) BLOCK` / `for (…; G; …) BLOCK` — G is tested before every
@@ -766,13 +766,13 @@ impl<'a> Builder<'a> {
     /// where G failed carry its negation; a `last` leaves with G unknown, so
     /// where one can reach past the loop nothing narrows there.
     pub(super) fn narrow_loop(&mut self, stmt: Node<'a>) {
-        let (Some(condition), Some(body)) = (stmt.child_by_field_name("condition"), stmt.child_by_field_name("block"))
+        let (Some(condition), Some(body)) = (stmt.field(Field::Condition), stmt.field(Field::Block))
         else {
             return;
         };
         // The C-style condition is an `expression_statement` around the test.
-        let condition = match condition.kind() {
-            "expression_statement" => match crate::cst::nth_element(condition, 0) {
+        let condition = match condition.kind_of() {
+            Kind::ExpressionStatement => match crate::cst::nth_element(condition, 0) {
                 Some(test) => test,
                 None => return,
             },
@@ -790,11 +790,11 @@ impl<'a> Builder<'a> {
 
     /// `G ? A : B` — A runs where G holds, B where it fails.
     pub(super) fn narrow_ternary(&mut self, expr: Node<'a>) {
-        let Some(condition) = expr.child_by_field_name("condition") else { return };
-        if let Some(a) = expr.child_by_field_name("consequent") {
+        let Some(condition) = expr.field(Field::Condition) else { return };
+        if let Some(a) = expr.field(Field::Consequent) {
             self.narrow_arm(condition, a, true);
         }
-        if let Some(b) = expr.child_by_field_name("alternative") {
+        if let Some(b) = expr.field(Field::Alternative) {
             self.narrow_arm(condition, b, false);
         }
     }
@@ -845,14 +845,14 @@ impl<'a> Builder<'a> {
             Some(Logical::Or(l, r) | Logical::And(l, r)) => (l, r),
             _ => return,
         };
-        self.record_guard_sites(left, Some(node_to_span(right)));
+        self.record_guard_sites(left, self.statement_call(right).map(node_to_span));
     }
 
     /// `assert_X($x);` / `$type->assert_valid($x);` — a statement that dies
     /// unless its check passes is `die unless is_X($x)`: the path that comes
     /// back out of it is the one where the check held.
     pub(super) fn narrow_assertion(&mut self, call: Node<'a>) {
-        if self.syntax.parent(call).is_none_or(|p| p.kind() != "expression_statement") {
+        if self.syntax.parent(call).is_none_or(|p| !p.is(Kind::ExpressionStatement)) {
             return;
         }
         if !recognize_type_check(self, call).is_some_and(|(_, asserts)| asserts) {
@@ -902,7 +902,7 @@ impl<'a> Builder<'a> {
         obs: crate::model::witnesses::TypeObservation,
     ) {
         let operand = crate::cst::peel_groups(operand);
-        if !is_subject_node_kind(operand.kind()) {
+        if !is_subject_node_kind(operand.kind_of()) {
             return;
         }
         let Some(subject) = self.narrow_subject_of(operand) else { return };
@@ -1116,17 +1116,17 @@ impl<'a> Builder<'a> {
             let mut binder = SurveyBinder { builder: self, scopes: super::infra::ScopeCursor::new(&self.scopes), wanted };
             let mut read_through = std::collections::HashSet::new();
             super::pipeline::survey(root, |node| {
-                let kind = node.kind();
+                let kind: Kind = node.kind_of();
                 if !matches!(
                     kind,
-                    "hash_element_expression"
-                        | "array_element_expression"
-                        | "slice_expression"
-                        | "keyval_expression"
-                        | "scalar"
-                        | "array"
-                        | "hash"
-                        | "coderef_call_expression"
+                    Kind::HashElementExpression
+                        | Kind::ArrayElementExpression
+                        | Kind::SliceExpression
+                        | Kind::KeyvalExpression
+                        | Kind::Scalar
+                        | Kind::Array
+                        | Kind::Hash
+                        | Kind::CoderefCallExpression
                 ) {
                     return;
                 }
@@ -1146,7 +1146,7 @@ impl<'a> Builder<'a> {
                         });
                     }
                 }
-                if kind == "coderef_call_expression" {
+                if kind == Kind::CoderefCallExpression {
                     return;
                 }
                 // Preorder reaches an access before what it reads through,
@@ -1162,11 +1162,11 @@ impl<'a> Builder<'a> {
                 // names, and classifying the access is the costly half.
                 let Some(read) = crate::cst::read_place(self.syntax, node, self.source, &mut binder) else { return };
                 let access = match kind {
-                    "hash_element_expression" | "array_element_expression" => {
+                    Kind::HashElementExpression | Kind::ArrayElementExpression => {
                         if self.element_write_kind(node).is_some() { Access::Write } else { Access::Opaque }
                     }
                     // A slice can write every slot it names, read or not.
-                    "slice_expression" | "keyval_expression" => Access::Write,
+                    Kind::SliceExpression | Kind::KeyvalExpression => Access::Write,
                     _ => {
                         if crate::cst::is_assignment_target(self.syntax, node) { Access::Write } else { Access::Opaque }
                     }
@@ -1200,7 +1200,7 @@ impl<'a> Builder<'a> {
                 for name in self.bare_bind_names(bare) {
                     // `my %h;` is an empty hash, a closed shape its element
                     // writes extend — the same value as `my %h = ()`.
-                    if name.starts_with('%') && bare.kind() == "variable_declaration" {
+                    if name.starts_with('%') && bare.is(Kind::VariableDeclaration) {
                         self.push_type_constraint(crate::model::file_analysis::TypeConstraint {
                             variable: name.clone(),
                             scope: self.scope_at_point(at),
@@ -1243,7 +1243,7 @@ impl<'a> Builder<'a> {
             // The write lands where `assignment_write_point` says, and a
             // compound write stores the assignment's value, not the RHS.
             let mut write_at = None;
-            if let Some(assign) = self.syntax.parent(src).filter(|p| p.kind() == "assignment_expression") {
+            if let Some(assign) = self.syntax.parent(src).filter(|p| p.is(Kind::AssignmentExpression)) {
                 write_at = Some(crate::cst::assignment_write_point(assign));
                 if crate::cst::assign_op(assign) != Some(crate::cst::AssignOp::Plain) {
                     source_span = node_to_span(assign);
@@ -1256,11 +1256,11 @@ impl<'a> Builder<'a> {
                     // records its write with the same value.
                     let elem_nodes = self.list_element_nodes(src);
                     let at = write_at.unwrap_or_else(|| lhs_node.start_position());
-                    let reassigns = lhs_node.kind() != "variable_declaration";
+                    let reassigns = !lhs_node.is(Kind::VariableDeclaration);
                     let plain = self
                         .syntax
                         .parent(src)
-                        .filter(|p| p.kind() == "assignment_expression")
+                        .filter(|p| p.is(Kind::AssignmentExpression))
                         .map_or(true, |a| crate::cst::assign_op(a) == Some(crate::cst::AssignOp::Plain));
                     for slot in slots {
                         let (vt, extraction) = match slot {
@@ -1291,7 +1291,7 @@ impl<'a> Builder<'a> {
                         self.push_flow_edge(vt, at, source, extraction, reassigns);
                     }
                 } else if let Some(vt) = self.get_var_text_from_lhs(lhs_node) {
-                    let reassigns = lhs_node.kind() != "variable_declaration";
+                    let reassigns = !lhs_node.is(Kind::VariableDeclaration);
                     self.push_flow_edge(
                         vt,
                         write_at.unwrap_or_else(|| lhs_node.start_position()),
@@ -1319,7 +1319,7 @@ impl<'a> Builder<'a> {
     /// `variable_declaration` (single or paren list) or a `localization`
     /// name.
     pub(super) fn bare_bind_names(&self, bare: Node<'a>) -> Vec<String> {
-        if bare.kind() == "variable_declaration" {
+        if bare.is(Kind::VariableDeclaration) {
             if let Some(targets) = self.lhs_list_targets(bare) {
                 return targets.into_iter().map(|(n, _)| n).collect();
             }
