@@ -1870,6 +1870,26 @@ fn positional_reads_skip_grammar_extras() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// A tree field is read by its generated id (`NodeExt::field` with a
+/// grammar's `Field`), so a field the grammar lacks fails the build and no
+/// read searches the grammar's name table (`docs/adr/grammar-vocabulary.md`).
+/// The by-name sites left read a tree whose grammar this build may not link.
+/// Shrink-only.
+#[test]
+fn tree_fields_are_read_by_id() {
+    let files = layer_files(&[Layer::Build, Layer::Cst, Layer::Lsp, Layer::Index, Layer::Model]);
+    let seen = count_lines(&files, &|l| {
+        l.contains("child_by_field_name(") || l.contains("children_by_field_name(") || l.contains("field_id_for_name(")
+    });
+    let allow: &[(&str, usize, &str)] = &[
+        ("build/cpp_reparse/defs.rs", 16, "the C++ reparse compiles in builds that do not link its grammar: legacy"),
+        ("build/cpp_reparse/synthetic.rs", 6, "the C++ reparse compiles in builds that do not link its grammar: legacy"),
+        ("build/cpp_reparse/validate.rs", 3, "the C++ reparse compiles in builds that do not link its grammar: legacy"),
+    ];
+    let drift = allowlist_drift("by-name field reads (NodeExt::field)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// A fact about a node hangs off the node: a `NodeFacts` column keyed by
 /// `NodeId`, nested by the tree's own parent links
 /// (`docs/adr/core-syntax-tree.md`). A side index keyed by where a node sits

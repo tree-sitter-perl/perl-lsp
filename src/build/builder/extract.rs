@@ -105,7 +105,7 @@ impl<'a> Builder<'a> {
         }
         let Some(container) = crate::cst::deref_container_of(self.syntax, elem) else { return false };
         if let Some(p) = self.syntax.parent(container) {
-            if p.kind() == "assignment_expression" && p.child_by_field_name("left") == Some(container) {
+            if p.kind() == "assignment_expression" && p.field(Field::Left) == Some(container) {
                 return true;
             }
         }
@@ -124,7 +124,7 @@ impl<'a> Builder<'a> {
         let Some(call) = call else { return false };
         let name = match call.kind() {
             "function_call_expression" | "ambiguous_function_call_expression" => {
-                call.child_by_field_name("function").and_then(|f| f.utf8_text(self.source).ok())
+                call.field(Field::Function).and_then(|f| f.utf8_text(self.source).ok())
             }
             "func1op_call_expression" => call.child(0).and_then(|k| k.utf8_text(self.source).ok()),
             _ => None,
@@ -178,7 +178,7 @@ impl<'a> Builder<'a> {
     /// How a write targets `elem`, if one does.
     pub(super) fn element_write_kind(&self, elem: Node<'a>) -> Option<ElementWrite> {
         if let Some(p) = self.syntax.parent(elem).filter(|p| {
-            p.kind() == "assignment_expression" && p.child_by_field_name("left") == Some(elem)
+            p.kind() == "assignment_expression" && p.field(Field::Left) == Some(elem)
         }) {
             // An operator `assign_op` doesn't know still writes; reading
             // first is the safe side.
@@ -315,14 +315,14 @@ impl<'a> Builder<'a> {
     fn write_key_of(&self, elem: Node<'a>) -> (crate::model::file_analysis::WriteKey, Span) {
         use crate::model::file_analysis::WriteKey;
         let (field, key) = if elem.kind() == "array_element_expression" {
-            let idx = elem.child_by_field_name("index");
+            let idx = elem.field(Field::Index);
             let key = idx
                 .and_then(|i| i.utf8_text(self.source).ok())
                 .and_then(|t| t.parse::<i32>().ok())
                 .map_or(WriteKey::AnyIndex, WriteKey::Index);
             (idx, key)
         } else {
-            let k = elem.child_by_field_name("key");
+            let k = elem.field(Field::Key);
             let key = k
                 .and_then(|k| self.extract_key_text(k))
                 .and_then(|(t, dynamic)| (!dynamic).then_some(t))
@@ -338,7 +338,7 @@ impl<'a> Builder<'a> {
                 "variable_declaration" => return AccessKind::Declaration,
                 "assignment_expression" => {
                     // Check if we're on the left side
-                    if let Some(left) = parent.child_by_field_name("left") {
+                    if let Some(left) = parent.field(Field::Left) {
                         if node.start_byte() >= left.start_byte()
                             && node.end_byte() <= left.end_byte()
                         {
@@ -351,7 +351,7 @@ impl<'a> Builder<'a> {
             // Check grandparent for assignment
             if let Some(grandparent) = self.syntax.parent(parent) {
                 if grandparent.kind() == "assignment_expression" {
-                    if let Some(left) = grandparent.child_by_field_name("left") {
+                    if let Some(left) = grandparent.field(Field::Left) {
                         if node.start_byte() >= left.start_byte()
                             && node.end_byte() <= left.end_byte()
                         {
@@ -434,9 +434,8 @@ impl<'a> Builder<'a> {
         // `my ($a, $b)` is a `variable_declaration` with one `variables`
         // FIELD PER scalar (not a single list node); a bare `($a, $b)` LHS is
         // a grouping container whose scalars `list_elements` splices out.
-        let mut cursor = lhs.walk();
         let elems: Vec<Node<'a>> = match (crate::cst::literal_shape(lhs), lhs.kind()) {
-            (None, "variable_declaration") => lhs.children_by_field_name("variables", &mut cursor).collect(),
+            (None, "variable_declaration") => lhs.fields(Field::Variables),
             (Some(LiteralShape::List), _) => crate::cst::list_elements(lhs),
             _ => Vec::new(),
         };
@@ -468,7 +467,7 @@ impl<'a> Builder<'a> {
 
     pub(super) fn get_var_text_from_lhs(&self, lhs: Node<'a>) -> Option<String> {
         if lhs.kind() == "variable_declaration" {
-            if let Some(var) = lhs.child_by_field_name("variable") {
+            if let Some(var) = lhs.field(Field::Variable) {
                 return var.utf8_text(self.source).ok().map(|s| s.to_string());
             }
             // A paren list (`my ($x) = ...`, the `variables` field) binds in
@@ -522,11 +521,10 @@ impl<'a> Builder<'a> {
             // A single `my $x` uses the `variable` field; a list `my ($a, $b)`
             // uses the (repeated) `variables` field. The former is not a list.
             (None, "variable_declaration") => {
-                if lhs.child_by_field_name("variable").is_some() {
+                if lhs.field(Field::Variable).is_some() {
                     return None;
                 }
-                let mut cursor = lhs.walk();
-                lhs.children_by_field_name("variables", &mut cursor).collect()
+                lhs.fields(Field::Variables)
             }
             (Some(LiteralShape::List), _) => crate::cst::list_elements(lhs),
             _ => return None,
@@ -548,7 +546,7 @@ impl<'a> Builder<'a> {
                     out.push(ListSlot::Element(child, (!slurped).then_some(pos)));
                 }
                 "variable_declaration" => {
-                    let inner = child.child_by_field_name("variable");
+                    let inner = child.field(Field::Variable);
                     slurped |= inner.is_some_and(|v| matches!(v.kind(), "array" | "hash"));
                 }
                 _ => {}

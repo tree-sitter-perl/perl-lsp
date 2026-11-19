@@ -8,7 +8,7 @@ impl<'a> Builder<'a> {
     pub(super) fn is_bless_call(&self, node: Node<'a>) -> bool {
         let kind = node.kind();
         if kind == "function_call_expression" || kind == "ambiguous_function_call_expression" {
-            if let Some(func) = node.child_by_field_name("function") {
+            if let Some(func) = node.field(Field::Function) {
                 return func.utf8_text(self.source).ok() == Some("bless");
             }
         }

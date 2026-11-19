@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     grammar_vocabulary("perl", ts_parser_perl::LANGUAGE.into());
+    grammar_vocabulary("pod", ts_parser_pod::LANGUAGE.into());
     let mut files = Vec::new();
     collect(Path::new("src"), &mut files);
     // Dependencies change fold outcomes too — a grammar bump reshapes the CST,
@@ -207,6 +208,8 @@ fn grammar_vocabulary(lang_name: &str, lang: tree_sitter::Language) {
         writeln!(out, "            Field::{variant} => {name:?},").unwrap();
     }
     out.push_str("        }\n    }\n}\n\n");
+    // Field ids start at 1, so the conversion never fails.
+    out.push_str("impl super::GrammarField for Field {\n    fn id(self) -> std::num::NonZeroU16 {\n        std::num::NonZeroU16::new(self as u16).expect(\"a field id is nonzero\")\n    }\n}\n\n");
 
     // A name several symbols share (aliases) is one kind: the id a node
     // reports for it is the public one, which is the discriminant.

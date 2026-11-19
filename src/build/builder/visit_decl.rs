@@ -20,7 +20,7 @@ impl<'a> Builder<'a> {
             "postfix_for_expression" => self.visit_postfix_for(node),
             "use_statement" => self.visit_use(node),
             "use_version_statement" => {
-                if let Some(version) = node.child_by_field_name("version").and_then(|v| v.utf8_text(self.source).ok()) {
+                if let Some(version) = node.field(Field::Version).and_then(|v| v.utf8_text(self.source).ok()) {
                     if crate::model::conventions::version_enables_strict(version) {
                         self.switch_hint(node_to_span(node), crate::model::file_analysis::LexicalHint::RequireDeclaration, true);
                     }
@@ -110,7 +110,7 @@ impl<'a> Builder<'a> {
             // A builtin called with no arguments and no parens (`die;`): the
             // word alone is the call. Inside a call it is the call's name,
             // which the call states for.
-            "function" if self.syntax.parent(node).is_none_or(|p| p.child_by_field_name("function") != Some(node)) => {
+            "function" if self.syntax.parent(node).is_none_or(|p| p.field(Field::Function) != Some(node)) => {
                 self.push_builtin_ends(node);
                 self.queue_children(node);
             }
@@ -472,14 +472,14 @@ impl<'a> Builder<'a> {
     // ---- Node visitors ----
 
     pub(super) fn visit_package(&mut self, node: Node<'a>) {
-        let name = match node.child_by_field_name("name") {
+        let name = match node.field(Field::Name) {
             Some(n) => match n.utf8_text(self.source) {
                 Ok(s) => s.to_string(),
                 Err(_) => return,
             },
             None => return,
         };
-        let name_node = node.child_by_field_name("name").unwrap();
+        let name_node = node.field(Field::Name).unwrap();
         // Capture the pre-existing package BEFORE touching
         // current_package — the block form needs to restore to this
         // value after visiting children. The previous code took()
@@ -521,7 +521,7 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn visit_class(&mut self, node: Node<'a>) {
-        let name_node = match node.child_by_field_name("name") {
+        let name_node = match node.field(Field::Name) {
             Some(n) => n,
             None => return,
         };
@@ -533,13 +533,13 @@ impl<'a> Builder<'a> {
         // Parse :isa and :does
         let mut parent = None;
         let mut roles = Vec::new();
-        if let Some(attrlist) = node.child_by_field_name("attributes") {
+        if let Some(attrlist) = node.field(Field::Attributes) {
             for i in 0..attrlist.named_child_count() {
                 if let Some(attr) = attrlist.named_child(i) {
                     if attr.kind() == "attribute" {
-                        let attr_name = attr.child_by_field_name("name")
+                        let attr_name = attr.field(Field::Name)
                             .and_then(|n| n.utf8_text(self.source).ok());
-                        let attr_value = attr.child_by_field_name("value")
+                        let attr_value = attr.field(Field::Value)
                             .and_then(|n| n.utf8_text(self.source).ok());
                         match (attr_name, attr_value) {
                             (Some("isa"), Some(val)) => parent = Some(val.to_string()),
@@ -582,7 +582,7 @@ impl<'a> Builder<'a> {
             },
         );
 
-        let has_block = node.child_by_field_name("body").is_some()
+        let has_block = node.field(Field::Body).is_some()
             || (0..node.child_count()).any(|i| node.child(i).map_or(false, |c| c.kind() == "block"));
 
         if has_block {
@@ -624,7 +624,7 @@ impl<'a> Builder<'a> {
             let var_decl = if child.kind() == "variable_declaration" {
                 child
             } else if child.kind() == "assignment_expression" {
-                child.child_by_field_name("left").filter(|n| n.kind() == "variable_declaration")?
+                child.field(Field::Left).filter(|n| n.kind() == "variable_declaration")?
             } else {
                 continue;
             };
@@ -634,16 +634,16 @@ impl<'a> Builder<'a> {
                 return None;
             }
 
-            let var_node = var_decl.child_by_field_name("variable")?;
+            let var_node = var_decl.field(Field::Variable)?;
             let full_name = var_node.utf8_text(self.source).ok()?;
             let sigil = full_name.chars().next()?;
 
             let mut attributes = Vec::new();
-            if let Some(attrlist) = var_decl.child_by_field_name("attributes") {
+            if let Some(attrlist) = var_decl.field(Field::Attributes) {
                 for j in 0..attrlist.named_child_count() {
                     if let Some(attr) = attrlist.named_child(j) {
                         if attr.kind() == "attribute" {
-                            if let Some(name_node) = attr.child_by_field_name("name") {
+                            if let Some(name_node) = attr.field(Field::Name) {
                                 if let Ok(attr_name) = name_node.utf8_text(self.source) {
                                     attributes.push(attr_name.to_string());
                                 }
@@ -663,7 +663,7 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn visit_sub(&mut self, node: Node<'a>, is_method: bool) {
-        let name_node = match node.child_by_field_name("name") {
+        let name_node = match node.field(Field::Name) {
             Some(n) => n,
             None => { self.queue_children(node); return; }
         };
@@ -689,7 +689,7 @@ impl<'a> Builder<'a> {
         // the outline and shadow it in goto-def with a body-less target. Skip
         // it — the navigable symbol is the actual definition (in this file,
         // cross-file, or installed via AUTOLOAD/XS).
-        if node.child_by_field_name("body").is_none() {
+        if node.field(Field::Body).is_none() {
             return;
         }
 
@@ -729,7 +729,7 @@ impl<'a> Builder<'a> {
         // block-scoped sub: real in-file structure (document symbols
         // keep it) but not a workspace-addressable entity (workspace
         // search drops it).
-        let lexical = node.child_by_field_name("lexical").is_some();
+        let lexical = node.field(Field::Lexical).is_some();
         let sub_id = self.add_symbol_in_package(
             name.clone(),
             if is_method { SymKind::Method } else { SymKind::Sub },
@@ -876,7 +876,7 @@ impl<'a> Builder<'a> {
     pub(super) fn record_sub_tail(&mut self, sub: Node<'a>) {
         use crate::model::witnesses::tags::UndefArm;
         let Some(scope) = self.enclosing_sub_scope() else { return };
-        let Some(last) = sub.child_by_field_name("body").and_then(crate::cst::last_element) else {
+        let Some(last) = sub.field(Field::Body).and_then(crate::cst::last_element) else {
             return;
         };
         let mut arms = Vec::new();
@@ -1006,7 +1006,7 @@ impl<'a> Builder<'a> {
         }
 
         // Fallback: scan body for shift, @_, and $_[N] patterns
-        if let Some(body) = sub_node.child_by_field_name("body") {
+        if let Some(body) = sub_node.field(Field::Body) {
             let mut shift_params: Vec<ParamInfo> = Vec::new();
 
             for stmt in crate::cst::NodeExt::elements(&body) {
@@ -1025,10 +1025,10 @@ impl<'a> Builder<'a> {
                     None => break,
                 };
 
-                if let Some(right) = assign.child_by_field_name("right") {
+                if let Some(right) = assign.field(Field::Right) {
                     // Pattern: my (...) = @_
                     if right.kind() == "array" && crate::cst::names_arg_array(right, self.source) {
-                        if let Some(left) = assign.child_by_field_name("left") {
+                        if let Some(left) = assign.field(Field::Left) {
                             let at_params: Vec<ParamInfo> = self.collect_vars_from_decl(left)
                                 .into_iter()
                                 .map(|(name, span)| {
@@ -1051,12 +1051,12 @@ impl<'a> Builder<'a> {
                     // in order. Gate on every RHS element being a shift call so
                     // a real list value (`my ($a,$b) = foo()`) isn't misread.
                     let rhs_elems = assign
-                        .child_by_field_name("right")
+                        .field(Field::Right)
                         .and_then(|r| self.list_element_nodes(r));
                     let all_shifts = rhs_elems
                         .is_some_and(|elems| !elems.is_empty() && elems.iter().all(|c| self.is_shift_call(*c)));
                     if all_shifts {
-                        if let Some(left) = assign.child_by_field_name("left") {
+                        if let Some(left) = assign.field(Field::Left) {
                             let list_params: Vec<ParamInfo> = self.collect_vars_from_decl(left)
                                 .into_iter()
                                 .map(|(name, span)| {
@@ -1074,7 +1074,7 @@ impl<'a> Builder<'a> {
                     // Pattern: my $var = shift; or my $var = shift || default; or my $var = shift // default;
                     // The declared variable's own token binds either form.
                     let binding_site = assign
-                        .child_by_field_name("left")
+                        .field(Field::Left)
                         .and_then(|l| self.collect_vars_from_decl(l).into_iter().next())
                         .map(|(_, span)| span.start);
                     if let Some((var_name, default)) = self.extract_shift_param(assign, right) {
@@ -1141,7 +1141,7 @@ impl<'a> Builder<'a> {
         let _ = shift_node;
 
         // Get variable name from LHS
-        let left = assign.child_by_field_name("left")?;
+        let left = assign.field(Field::Left)?;
         let var_name = self.get_var_text_from_lhs(left)?;
         Some((var_name, default))
     }
@@ -1149,7 +1149,7 @@ impl<'a> Builder<'a> {
     /// Extract a $_[N]-based parameter: `my $var = $_[N]`.
     pub(super) fn extract_subscript_param(&self, assign: Node<'a>, right: Node<'a>) -> Option<String> {
         crate::cst::arg_slot_index(right, self.source)?;
-        let left = assign.child_by_field_name("left")?;
+        let left = assign.field(Field::Left)?;
         self.get_var_text_from_lhs(left)
     }
 
@@ -1168,7 +1168,7 @@ impl<'a> Builder<'a> {
                 "array" | "container_variable" => crate::cst::names_arg_array(n, self.source),
                 "goto_expression" => true,
                 "function_call_expression" => {
-                    n.child_by_field_name("arguments").is_none()
+                    n.field(Field::Arguments).is_none()
                         && n.utf8_text(self.source).is_ok_and(|t| t.starts_with('&') && !t.ends_with(')'))
                 }
                 _ => crate::cst::is_bare_call_of(n, self.source, "shift") || crate::cst::is_bare_call_of(n, self.source, "pop"),
@@ -1193,7 +1193,7 @@ impl<'a> Builder<'a> {
                     }
                     "optional_parameter" => {
                         let var = self.first_var_child(param);
-                        let default = param.child_by_field_name("default")
+                        let default = param.field(Field::Default)
                             .or_else(|| {
                                 let nc = param.named_child_count();
                                 if nc >= 2 { param.named_child(nc - 1) } else { None }
@@ -1280,7 +1280,7 @@ impl<'a> Builder<'a> {
         // Skip the CST walk + Vec alloc entirely when no loaded rule uses it.
         let has_action_attr = self.any_requires_action_attr
             && node
-                .child_by_field_name("attributes")
+                .field(Field::Attributes)
                 .map_or(false, |a| a.named_child_count() > 0);
 
         // Collect (variable, gate-class, type-class, from_loader) before
@@ -1548,7 +1548,7 @@ impl<'a> Builder<'a> {
                     .syntax
                     .parent(node)
                     .filter(|p| p.kind() == "assignment_expression")
-                    .and_then(|p| p.child_by_field_name("right"))
+                    .and_then(|p| p.field(Field::Right))
                     .filter(|r| rhs_kinds.contains(&r.kind()))
                 {
                     self.emit_lexical_hash_literal_keys(name, rhs);
@@ -1643,11 +1643,11 @@ impl<'a> Builder<'a> {
     /// Collect attribute names from a node's `attributes` field (e.g. `:param :reader`).
     pub(super) fn collect_attributes(&self, node: Node<'a>) -> Vec<String> {
         let mut attrs = Vec::new();
-        if let Some(attrlist) = node.child_by_field_name("attributes") {
+        if let Some(attrlist) = node.field(Field::Attributes) {
             for i in 0..attrlist.named_child_count() {
                 if let Some(attr) = attrlist.named_child(i) {
                     if attr.kind() == "attribute" {
-                        if let Some(name_node) = attr.child_by_field_name("name") {
+                        if let Some(name_node) = attr.field(Field::Name) {
                             if let Ok(name) = name_node.utf8_text(self.source) {
                                 attrs.push(name.to_string());
                             }
@@ -1661,11 +1661,11 @@ impl<'a> Builder<'a> {
 
     pub(super) fn visit_for(&mut self, node: Node<'a>) {
         // Check for loop variable: `for my $x (...) { ... }`
-        let loop_var = node.child_by_field_name("variable")
+        let loop_var = node.field(Field::Variable)
             .or_else(|| {
                 // Some grammars: iterator > variable_declaration
-                node.child_by_field_name("iterator")
-                    .and_then(|it| it.child_by_field_name("variable"))
+                node.field(Field::Iterator)
+                    .and_then(|it| it.field(Field::Variable))
             });
 
         if let Some(var_node) = loop_var {
@@ -1673,7 +1673,7 @@ impl<'a> Builder<'a> {
                 let var_name = var_text.to_string();
 
                 // Find the body block
-                let body_span = node.child_by_field_name("body")
+                let body_span = node.field(Field::Body)
                     .map(|b| node_to_span(b))
                     .unwrap_or(node_to_span(node));
 
@@ -1700,7 +1700,7 @@ impl<'a> Builder<'a> {
 
                 // Accumulate loop variable values for constant folding
                 // for my $x (qw(a b c)) → $x => ["a", "b", "c"]
-                if let Some(list_node) = node.child_by_field_name("list") {
+                if let Some(list_node) = node.field(Field::List) {
                     let mut values = self.extract_string_names(list_node);
                     // CG-3a: `for my $tag (_all_html_tags()) { *$tag = sub {...} }`
                     // (CGI.pm). When the loop source is a call to a same-file sub
@@ -1720,8 +1720,8 @@ impl<'a> Builder<'a> {
                     // `values` into the constant table.
                     if !values.is_empty() {
                         if let Some(body) = node
-                            .child_by_field_name("block")
-                            .or_else(|| node.child_by_field_name("body"))
+                            .field(Field::Block)
+                            .or_else(|| node.field(Field::Body))
                         {
                             if self.body_has_symbolic_export_push(body, &var_name) {
                                 for module in &values {
@@ -1784,10 +1784,10 @@ impl<'a> Builder<'a> {
     pub(super) fn is_class_accessor_loop_body(&self, node: Node<'a>) -> bool {
         let (callee, args) = match node.kind() {
             "function_call_expression" | "ambiguous_function_call_expression" => {
-                (node.child_by_field_name("function"), node.child_by_field_name("arguments"))
+                (node.field(Field::Function), node.field(Field::Arguments))
             }
             "method_call_expression" => {
-                (node.child_by_field_name("method"), node.child_by_field_name("arguments"))
+                (node.field(Field::Method), node.field(Field::Arguments))
             }
             _ => return false,
         };

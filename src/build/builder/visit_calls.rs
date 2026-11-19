@@ -12,7 +12,7 @@ impl<'a> Builder<'a> {
             // A signature parameter's own variable is its declaration; its
             // default is an ordinary read.
             if matches!(parent.kind(), "mandatory_parameter" | "optional_parameter" | "slurpy_parameter")
-                && parent.child_by_field_name("default") != Some(node)
+                && parent.field(Field::Default) != Some(node)
             {
                 return;
             }
@@ -316,14 +316,14 @@ impl<'a> Builder<'a> {
         // sub. The `code_deref_expression` arm in `visit_node` narrows the
         // operand to CodeRef; just descend so it runs.
         if node
-            .child_by_field_name("function")
+            .field(Field::Function)
             .map(|f| f.kind() == "code_deref_expression" || code_deref_in(f).is_some())
             .unwrap_or(false)
         {
             self.queue_children(node);
             return;
         }
-        if let Some(func_node) = node.child_by_field_name("function") {
+        if let Some(func_node) = node.field(Field::Function) {
             if let Ok(raw) = func_node.utf8_text(self.source) {
                 // `goto &Foo::bar` / `&Foo::bar()` — the leading `&` is the
                 // code-ref sigil; the call targets sub `Foo::bar`. Strip it so
@@ -360,7 +360,7 @@ impl<'a> Builder<'a> {
                 // mechanism as method-call args; covers
                 // `Foo::new(key => val)` and helpers like
                 // `connect(timeout => 30)`.
-                if let Some(args) = node.child_by_field_name("arguments") {
+                if let Some(args) = node.field(Field::Arguments) {
                     let owner = HashKeyOwner::Sub {
                         package: resolved_package.clone(),
                         name: name.to_string(),
@@ -468,7 +468,7 @@ impl<'a> Builder<'a> {
                 // (which the caller may have aliased) isn't load-bearing.
                 let tail = crate::model::file_analysis::split_qualified(name, &crate::model::conventions::PERL_SPELLINGS).1;
                 if tail == "setup_exporter" {
-                    if let Some(args) = node.child_by_field_name("arguments") {
+                    if let Some(args) = node.field(Field::Arguments) {
                         self.detect_exporter_setup_call(tail, args);
                     }
                 }
@@ -515,7 +515,7 @@ impl<'a> Builder<'a> {
             .active_topic_dsl()
             .map(|d| d.group_fn.clone())
             .is_some_and(|g| {
-                node.child_by_field_name("function")
+                node.field(Field::Function)
                     .and_then(|f| f.utf8_text(self.source).ok())
                     == Some(g.as_str())
             });
@@ -548,7 +548,7 @@ impl<'a> Builder<'a> {
             return false;
         }
         // The filehandle must be a plain bareword identifier (no sigil).
-        let func = match node.child_by_field_name("function") {
+        let func = match node.field(Field::Function) {
             Some(f) => f,
             None => return false,
         };
@@ -573,12 +573,12 @@ impl<'a> Builder<'a> {
         ) {
             return false;
         }
-        if parent.child_by_field_name("arguments").map(|a| a.id()) != Some(node.id()) {
+        if parent.field(Field::Arguments).map(|a| a.id()) != Some(node.id()) {
             return false;
         }
         matches!(
             parent
-                .child_by_field_name("function")
+                .field(Field::Function)
                 .and_then(|f| f.utf8_text(self.source).ok()),
             Some("print" | "printf" | "say")
         )
@@ -588,7 +588,7 @@ impl<'a> Builder<'a> {
     /// extend the package's parents; `push @EXPORT, 'foo', 'bar'` appends
     /// to the export lists.
     pub(super) fn visit_array_edit_call(&mut self, node: Node<'a>, verb: &str) {
-        let args = match node.child_by_field_name("arguments") {
+        let args = match node.field(Field::Arguments) {
             Some(a) => a,
             None => return,
         };
@@ -696,9 +696,9 @@ impl<'a> Builder<'a> {
             node.kind(),
             "function_call_expression" | "ambiguous_function_call_expression"
         ) {
-            if let Some(func) = node.child_by_field_name("function") {
+            if let Some(func) = node.field(Field::Function) {
                 if func.utf8_text(self.source) == Ok("push") {
-                    if let Some(args) = node.child_by_field_name("arguments") {
+                    if let Some(args) = node.field(Field::Arguments) {
                         if self.push_args_reexport_export(args, loop_var_bare) {
                             return true;
                         }
@@ -911,7 +911,7 @@ impl<'a> Builder<'a> {
     /// list `<%EXPORT_TAGS declaration>, <table list>`; fold every following
     /// list once we've seen the declaration.
     pub(super) fn fold_call_wrapped_export_tags(&mut self, node: Node<'a>) {
-        let Some(args) = node.child_by_field_name("arguments") else { return };
+        let Some(args) = node.field(Field::Arguments) else { return };
         let mut saw_export_tags_decl = false;
         for i in 0..args.named_child_count() {
             let Some(child) = args.named_child(i) else { continue };
@@ -1090,7 +1090,7 @@ impl<'a> Builder<'a> {
     /// all names. We treat presence of an `anonymous_subroutine_expression`
     /// (or `\&sub` reference) among the args as the pair-form signal.
     pub(super) fn is_export_pair_call(&self, node: Node<'a>) -> bool {
-        let Some(args) = node.child_by_field_name("arguments") else { return false };
+        let Some(args) = node.field(Field::Arguments) else { return false };
         for i in 0..args.named_child_count() {
             if let Some(c) = args.named_child(i) {
                 if matches!(c.kind(), "anonymous_subroutine_expression" | "refgen_expression") {
@@ -1105,7 +1105,7 @@ impl<'a> Builder<'a> {
     /// Extensible's `export(...)` and Exporter::Declare's `exports(...)`.
     /// Both take a flat name list; only the sub-name entries are kept.
     pub(super) fn detect_export_name_list_call(&mut self, node: Node<'a>) {
-        let Some(args) = node.child_by_field_name("arguments") else { return };
+        let Some(args) = node.field(Field::Arguments) else { return };
         let names = Self::keep_sub_export_names(self.extract_string_names(args));
         self.record_runtime_exports(names);
     }
@@ -1118,7 +1118,7 @@ impl<'a> Builder<'a> {
     /// if the author also defined one (common) and otherwise on the `use`
     /// line. Honest limit: anonymous-only exports aren't resolvable.
     pub(super) fn detect_export_pair_call(&mut self, node: Node<'a>) {
-        let Some(args) = node.child_by_field_name("arguments") else { return };
+        let Some(args) = node.field(Field::Arguments) else { return };
         // First named child is the export name (bareword or string).
         let Some(first) = crate::cst::nth_element(args, 0) else { return };
         let names: Vec<String> = self.extract_node_string(first).into_iter().collect();
@@ -1130,13 +1130,13 @@ impl<'a> Builder<'a> {
     /// attribute's args are tags/options, not names. Called from `visit_sub`
     /// with the sub name already known.
     pub(super) fn detect_export_attribute(&mut self, node: Node<'a>, sub_name: &str) {
-        let Some(attrs) = node.child_by_field_name("attributes") else { return };
+        let Some(attrs) = node.field(Field::Attributes) else { return };
         let mut has_export_attr = false;
         for i in 0..attrs.named_child_count() {
             let Some(attr) = attrs.named_child(i) else { continue };
             if attr.kind() != "attribute" { continue; }
             let attr_name = attr
-                .child_by_field_name("name")
+                .field(Field::Name)
                 .and_then(|n| n.utf8_text(self.source).ok());
             if attr_name == Some("Export") {
                 has_export_attr = true;
@@ -1155,7 +1155,7 @@ impl<'a> Builder<'a> {
     /// following arrayref. Best-effort static read — a menu built at
     /// runtime (loops, conditionals, computed keys) isn't covered.
     pub(super) fn detect_importer_menu(&mut self, sub_node: Node<'a>) {
-        let Some(body) = sub_node.child_by_field_name("body") else { return };
+        let Some(body) = sub_node.field(Field::Body) else { return };
         // Collect every list_expression under the body (the return list and
         // its operands). We look at the immediate children of each list for
         // `key => [...]` pairs rather than recursing into the arrayrefs.
@@ -1280,7 +1280,7 @@ impl<'a> Builder<'a> {
 
         // Fallback: extract function name from RHS \&name
         // AST: refgen_expression > function > varname
-        if let Some(right) = assign_node.child_by_field_name("right") {
+        if let Some(right) = assign_node.field(Field::Right) {
             return self.extract_names_from_refgen(right);
         }
         vec![]
@@ -1296,7 +1296,7 @@ impl<'a> Builder<'a> {
     /// rather than guessed.
     pub(super) fn synthesize_glob_assigned_sub(&mut self, glob_node: Node<'a>, assign_node: Node<'a>) {
         // Gate on RHS shape: only a sub-producing rvalue installs a callable.
-        let Some(right) = assign_node.child_by_field_name("right") else { return };
+        let Some(right) = assign_node.field(Field::Right) else { return };
         if right.kind() == "glob" {
             self.alias_glob(glob_node, right, assign_node);
             return;
@@ -1434,12 +1434,12 @@ impl<'a> Builder<'a> {
             // `*_same = IS_WIN32() ? sub{} : sub{}`). The glob holds a coderef in
             // every branch, so the name is callable iff BOTH arms are sub-producing.
             "conditional_expression" => {
-                let arm = |f| {
+                let arm = |f: Field| {
                     right
-                        .child_by_field_name(f)
+                        .field(f)
                         .is_some_and(|n| self.glob_rhs_is_sub(n))
                 };
-                arm("consequent") && arm("alternative")
+                arm(Field::Consequent) && arm(Field::Alternative)
             }
             _ => false,
         }
@@ -1451,11 +1451,11 @@ impl<'a> Builder<'a> {
     /// `$obj` instance, where `->can` is equally valid but the name list it feeds
     /// (cross-package glob targets) only makes sense for class injection.
     pub(super) fn method_call_yields_coderef(&self, node: Node<'a>) -> bool {
-        let Some(method) = node.child_by_field_name("method") else { return false };
+        let Some(method) = node.field(Field::Method) else { return false };
         if method.utf8_text(self.source).ok() != Some("can") {
             return false;
         }
-        match node.child_by_field_name("invocant").map(|n| n.kind()) {
+        match node.field(Field::Invocant).map(|n| n.kind()) {
             Some("package" | "bareword" | "func0op_call_expression") => true,
             _ => false,
         }

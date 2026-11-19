@@ -27,7 +27,7 @@ impl<'a> Builder<'a> {
             .into_iter()
             .map(|n| n.ts())
             .filter_map(|n| {
-                let left = n.child_by_field_name("left").filter(|l| l.kind() != "variable_declaration")?;
+                let left = n.field(Field::Left).filter(|l| l.kind() != "variable_declaration")?;
                 Some((n, self.get_var_text_from_lhs(left)?))
             })
             .collect();
@@ -61,7 +61,7 @@ impl<'a> Builder<'a> {
         for &(_, body) in &bodies {
             // A named sub exists before its text runs; an anonymous one
             // where its expression does.
-            let hoisted = self.syntax.parent(body).is_some_and(|d| d.child_by_field_name("name").is_some());
+            let hoisted = self.syntax.parent(body).is_some_and(|d| d.field(Field::Name).is_some());
             let made_before = self.syntax.parent(body).and_then(|made| self.syntax.parent(made)).and_then(|around| self.runs_before(around)).map(|s| s.start);
             walk.body(node_to_span(body), !body.has_error(), hoisted, made_before);
             gates.extend(walk.walk(super::control::statements_of(body), source, &gate));
@@ -259,7 +259,7 @@ impl<'a> Builder<'a> {
     fn callable_body(&self, sid: SymbolId, root: Node<'a>) -> Option<Node<'a>> {
         let scope = &self.scopes[self.owner_scope.get(&sid)?.0 as usize];
         let decl = root.descendant_for_point_range(scope.span.start, scope.span.end)?;
-        decl.child_by_field_name("body").filter(|b| b.kind() == "block")
+        decl.field(Field::Body).filter(|b| b.kind() == "block")
     }
 
     /// The joins of a variable, each landing as a write (`Reset` and its

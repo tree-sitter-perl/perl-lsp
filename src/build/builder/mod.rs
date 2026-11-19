@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use tree_sitter::{Node, Point, Tree};
 
+pub(super) use crate::cst::{Field, NodeExt};
 use crate::cst::{fq_tail_span, node_to_span};
 use crate::model::file_analysis::*;
 use crate::model::witnesses::TypeObservation;

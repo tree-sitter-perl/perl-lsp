@@ -5,6 +5,8 @@
 //! data regions, multi-angle-bracket formatting, and proper inline nesting.
 
 use crate::util::text::truncate_on_char_boundary;
+use crate::cst::pod::Field;
+use crate::cst::NodeExt;
 use tree_sitter::{Node, Parser};
 
 /// Max bytes of rendered markdown a single POD block contributes to hover.
@@ -379,7 +381,7 @@ fn render_verbatim_content(node: Node, source: &[u8], out: &mut String) {
 }
 
 fn render_begin(node: Node, source: &[u8], out: &mut String) {
-    let format_name = node.child_by_field_name("format")
+    let format_name = node.field(Field::Format)
         .and_then(|n| n.utf8_text(source).ok())
         .unwrap_or("text");
     // Render data as fenced code block with format name
@@ -398,7 +400,7 @@ fn render_begin(node: Node, source: &[u8], out: &mut String) {
 }
 
 fn render_for(node: Node, source: &[u8], out: &mut String) {
-    let format_name = node.child_by_field_name("format")
+    let format_name = node.field(Field::Format)
         .and_then(|n| n.utf8_text(source).ok())
         .unwrap_or("text");
     let content = get_content_text(&node, source);
@@ -459,7 +461,7 @@ fn render_content_node(node: Node, source: &[u8]) -> String {
 }
 
 fn render_interior_sequence(node: Node, source: &[u8]) -> String {
-    let letter = node.child_by_field_name("letter")
+    let letter = node.field(Field::Letter)
         .and_then(|n| n.utf8_text(source).ok())
         .unwrap_or("");
 
@@ -521,7 +523,7 @@ fn render_interior_sequence(node: Node, source: &[u8]) -> String {
 // ---- Helpers ----
 
 fn get_command_name(node: &Node, source: &[u8]) -> String {
-    node.child_by_field_name("command")
+    node.field(Field::Command)
         .and_then(|n| n.utf8_text(source).ok())
         .map(|s| s.to_string())
         .unwrap_or_default()

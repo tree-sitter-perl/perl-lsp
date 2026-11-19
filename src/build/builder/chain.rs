@@ -105,7 +105,7 @@ impl<'a> Builder<'a> {
                     let cb_ty = self.invocant_type_at_node(scalar)?;
                     let target = cb_ty.callable_return_edge()?.clone();
                     let invocant_ty = node
-                        .child_by_field_name("invocant")
+                        .field(Field::Invocant)
                         .and_then(|inv| self.invocant_type_at_node(inv));
                     let arity = self.extract_call_args(node).len() as u32;
                     return self.bag_query_attachment_with(
@@ -130,7 +130,7 @@ impl<'a> Builder<'a> {
                 // to the right value-side answer.
                 let arity = self.extract_call_args(node).len() as u32;
                 let invocant_ty = node
-                    .child_by_field_name("invocant")
+                    .field(Field::Invocant)
                     .and_then(|inv| self.invocant_type_at_node(inv));
                 let call_ty = self.bag_query_call(
                     span,
@@ -164,7 +164,7 @@ impl<'a> Builder<'a> {
                 if let Some(recv) = &invocant_ty {
                     if let Some(cls) = recv.class_name() {
                         if let Some(mtext) = node
-                            .child_by_field_name("method")
+                            .field(Field::Method)
                             .and_then(|m| m.utf8_text(self.source).ok())
                         {
                             let method = crate::model::conventions::MethodToken::parse(mtext)
@@ -285,14 +285,14 @@ impl<'a> Builder<'a> {
                 // Arrow deref on an expression (`$x->[0]`,
                 // `$obj->{users}->[0]`) has no `array` field — the base is
                 // the first named child; its Sequence projects the element.
-                let Some(array) = node.child_by_field_name("array") else {
+                let Some(array) = node.field(Field::Array) else {
                     let base = node.named_child(0)?;
-                    let idx_node = node.child_by_field_name("index")?;
+                    let idx_node = node.field(Field::Index)?;
                     let idx: i32 = idx_node.utf8_text(self.source).ok()?.parse().ok()?;
                     return self.invocant_type_at_node(base)?.element_at(idx).cloned();
                 };
                 let varname = array.named_child(0)?;
-                let index = node.child_by_field_name("index")?;
+                let index = node.field(Field::Index)?;
                 // General `$arr[N]` — `$_[N]` included, `@_` being the
                 // argument window: read the Sequence shape from
                 // the bag and project the index. Mirror of
@@ -311,7 +311,7 @@ impl<'a> Builder<'a> {
                 // here; the registry's `Projected` drill joins its arms.
                 let base = node.named_child(0)?;
                 let base_ty = self.invocant_type_at_node(base)?;
-                let key_node = node.child_by_field_name("key")?;
+                let key_node = node.field(Field::Key)?;
                 let (key, is_dynamic) = self.extract_key_text(key_node)?;
                 if is_dynamic {
                     return None;
@@ -340,7 +340,7 @@ impl<'a> Builder<'a> {
                 if self.indirect_method_call(node).is_some() {
                     return self.bag_query_expr_span(node_to_span(node));
                 }
-                let func = node.child_by_field_name("function")?;
+                let func = node.field(Field::Function)?;
                 let name = func.utf8_text(self.source).ok()?;
                 // The cross-file arm below pairs this tail with an EXPLICITLY
                 // resolved package, so it is entitled to the bare name; only
@@ -434,7 +434,7 @@ impl<'a> Builder<'a> {
         ) {
             return None;
         }
-        inv.child_by_field_name("function")?
+        inv.field(Field::Function)?
             .utf8_text(self.source)
             .ok()
             .map(str::to_string)

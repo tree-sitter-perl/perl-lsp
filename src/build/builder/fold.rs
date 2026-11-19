@@ -420,8 +420,8 @@ impl<'a> Builder<'a> {
         }
         for &node in &assignments {
             let (Some(left), Some(right)) = (
-                node.child_by_field_name("left"),
-                node.child_by_field_name("right"),
+                node.field(Field::Left),
+                node.field(Field::Right),
             ) else { continue };
             let span = node_to_span(node);
             // Where the write lands; the typed witness and the idempotency
@@ -459,13 +459,13 @@ impl<'a> Builder<'a> {
                         return None;
                     }
                     let m = right
-                        .child_by_field_name("method")
+                        .field(Field::Method)
                         .and_then(|m| m.utf8_text(self.source).ok())?;
                     if m != "all" && m != "populate" {
                         return None;
                     }
                     let inv_ty = right
-                        .child_by_field_name("invocant")
+                        .field(Field::Invocant)
                         .and_then(|inv| self.invocant_type_at_node(inv));
                     row_from(&inv_ty)
                 });
@@ -744,7 +744,7 @@ impl<'a> Builder<'a> {
         let mut pending: Vec<(Span, String, AccessKind, HashKeyOwner, Option<Box<Span>>)> = Vec::new();
         for &node in &chained {
             let Some(container) = node.named_child(0) else { continue };
-            let Some(key_node) = node.child_by_field_name("key") else { continue };
+            let Some(key_node) = node.field(Field::Key) else { continue };
             let Some((key_text, is_dynamic)) = self.extract_key_text(key_node) else { continue };
             if is_dynamic { continue; }
 
@@ -755,7 +755,7 @@ impl<'a> Builder<'a> {
             // identity (the value is a plain HashRef), so it must be
             // tried before the `hash_key_class()` fallback.
             let method_name = container
-                .child_by_field_name("method")
+                .field(Field::Method)
                 .and_then(|n| n.utf8_text(self.source).ok())
                 .map(|s| s.to_string());
             let sub_owner = method_name.as_ref().and_then(|name| {

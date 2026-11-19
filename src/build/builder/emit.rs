@@ -203,7 +203,7 @@ impl<'a> Builder<'a> {
             // base materializes to — including an imported literal's
             // structural type the build-time chain pass can't see.
             "hash_element_expression" => {
-                let key_node = node.child_by_field_name("key")?;
+                let key_node = node.field(Field::Key)?;
                 let (key, is_dynamic) = self.extract_key_text(key_node)?;
                 if is_dynamic {
                     return None;
@@ -212,7 +212,7 @@ impl<'a> Builder<'a> {
                 // subject is `%h`, not scalar `$h`; project off the
                 // hash variable's own attachment (the registry scope-
                 // walks Variable bases the same as Edge(Variable)).
-                if let Some(container) = node.child_by_field_name("hash") {
+                if let Some(container) = node.field(Field::Hash) {
                     let name =
                         crate::cst::canonical_container_name(self.syntax, container, self.source)?;
                     let scope = self.scope_stack.last().copied()
@@ -231,9 +231,9 @@ impl<'a> Builder<'a> {
             }
             // Arrow-deref element only (`$x->[0]`); the container form
             // `$arr[N]` keeps its variable-keyed handling.
-            "array_element_expression" if node.child_by_field_name("array").is_none() => {
+            "array_element_expression" if node.field(Field::Array).is_none() => {
                 let base = node.named_child(0)?;
-                let idx_node = node.child_by_field_name("index")?;
+                let idx_node = node.field(Field::Index)?;
                 let idx: i32 = idx_node.utf8_text(self.source).ok()?.parse().ok()?;
                 self.emit_expr_witness(base);
                 Some(WitnessPayload::Projected {
@@ -348,7 +348,7 @@ impl<'a> Builder<'a> {
                 // `$obj->$cb(…)`: call whatever `$cb` holds, on `$obj`.
                 if let Some(cb) = crate::cst::dynamic_method_scalar(node) {
                     self.emit_expr_witness(cb);
-                    let receiver = node.child_by_field_name("invocant").map(|inv| {
+                    let receiver = node.field(Field::Invocant).map(|inv| {
                         self.emit_invocant_witness(inv);
                         WitnessAttachment::Expr(node_to_span(inv))
                     });
@@ -466,9 +466,9 @@ impl<'a> Builder<'a> {
             // left it. `$_[0]`'s call-site receiver rides a second witness
             // (`emit_expr_witness_inner`).
             "array_element_expression" => {
-                let container = node.child_by_field_name("array")?;
+                let container = node.field(Field::Array)?;
                 let idx: i32 =
-                    node.child_by_field_name("index")?.utf8_text(self.source).ok()?.parse().ok()?;
+                    node.field(Field::Index)?.utf8_text(self.source).ok()?.parse().ok()?;
                 let name = crate::cst::canonical_container_name(self.syntax, container, self.source)?;
                 Some(WitnessPayload::Projected {
                     base: WitnessAttachment::Variable {
@@ -489,7 +489,7 @@ impl<'a> Builder<'a> {
             // types as the RHS until a value's false part has a type.
             "assignment_expression" => match crate::cst::assign_op(node)? {
                 crate::cst::AssignOp::Plain | crate::cst::AssignOp::AndThen => {
-                    let left = node.child_by_field_name("left")?;
+                    let left = node.field(Field::Left)?;
                     if self.lhs_list_targets(left).is_some()
                         || self
                             .get_var_text_from_lhs(left)
@@ -497,7 +497,7 @@ impl<'a> Builder<'a> {
                     {
                         return None;
                     }
-                    let rhs = node.child_by_field_name("right")?;
+                    let rhs = node.field(Field::Right)?;
                     self.emit_expr_witness(rhs);
                     Some(WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(rhs))))
                 }
@@ -520,8 +520,8 @@ impl<'a> Builder<'a> {
                         b.emit_expr_witness(n);
                         b.bag_query_expr_span(node_to_span(n)).is_some_and(|t| t.is_string())
                     };
-                    let left = node.child_by_field_name("left")?;
-                    let right = node.child_by_field_name("right")?;
+                    let left = node.field(Field::Left)?;
+                    let right = node.field(Field::Right)?;
                     if is_string(self, left) && is_string(self, right) {
                         None
                     } else {
@@ -803,8 +803,8 @@ impl<'a> Builder<'a> {
         if node.kind() == "conditional_expression" {
             let arm_att = WitnessAttachment::BranchArm(span);
             let arms = [
-                node.child_by_field_name("consequent"),
-                node.child_by_field_name("alternative"),
+                node.field(Field::Consequent),
+                node.field(Field::Alternative),
             ];
             for arm in arms.into_iter().flatten() {
                 // `undef` and the empty list `()` (a `stub_expression`,
@@ -860,12 +860,12 @@ impl<'a> Builder<'a> {
         let fallback_operands = if node.kind() == "binary_expression"
             && matches!(self.get_operator_text(node).as_deref(), Some("||") | Some("//"))
         {
-            node.child_by_field_name("left")
+            node.field(Field::Left)
                 .filter(|lhs| !self.is_param_pull(*lhs))
-                .zip(node.child_by_field_name("right"))
+                .zip(node.field(Field::Right))
         } else if crate::cst::assign_op(node) == Some(crate::cst::AssignOp::Fallback) {
             // `LHS ||= RHS` is `LHS = LHS || RHS`: the same two arms.
-            node.child_by_field_name("left").zip(node.child_by_field_name("right"))
+            node.field(Field::Left).zip(node.field(Field::Right))
         } else {
             None
         };
@@ -1034,7 +1034,7 @@ impl<'a> Builder<'a> {
     pub(super) fn forward_callee_name(&self, node: Node<'a>) -> Option<String> {
         let raw = match node.kind() {
             "function_call_expression" | "ambiguous_function_call_expression" => {
-                node.child_by_field_name("function")?.utf8_text(self.source).ok()?
+                node.field(Field::Function)?.utf8_text(self.source).ok()?
             }
             "bareword" | "scoped_identifier" => node.utf8_text(self.source).ok()?,
             _ => return None,
@@ -1161,7 +1161,7 @@ impl<'a> Builder<'a> {
         if node.kind() != "anonymous_subroutine_expression" {
             return None;
         }
-        let body = node.child_by_field_name("body")?;
+        let body = node.field(Field::Body)?;
         let last_stmt = crate::cst::last_element(body)?;
         let expr = match last_stmt.kind() {
             "expression_statement" | "return_expression" => crate::cst::nth_element(last_stmt, 0)?,

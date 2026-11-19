@@ -15,7 +15,7 @@ impl<'a> Builder<'a> {
     /// Names also land in `role_requires` — the input for the future
     /// composer-mismatch diagnostic.
     pub(super) fn visit_requires_call(&mut self, node: Node<'a>, pkg: &str) {
-        let Some(args) = node.child_by_field_name("arguments") else { return };
+        let Some(args) = node.field(Field::Arguments) else { return };
         let names = self.extract_string_list(args);
         for (name, span) in &names {
             let sid = self.add_symbol(
@@ -43,7 +43,7 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn visit_extends_call(&mut self, node: Node<'a>, pkg: &str) {
-        let args = match node.child_by_field_name("arguments") {
+        let args = match node.field(Field::Arguments) {
             Some(a) => a,
             None => return,
         };
@@ -101,7 +101,7 @@ impl<'a> Builder<'a> {
             Some(p) => p,
             None => return,
         };
-        let args = match node.child_by_field_name("arguments") {
+        let args = match node.field(Field::Arguments) {
             Some(a) => a,
             None => return,
         };
@@ -246,7 +246,7 @@ impl<'a> Builder<'a> {
         let mut mojo_default_node: Option<Node<'a>> = None;
 
         // Get the arguments node
-        let args = match node.child_by_field_name("arguments") {
+        let args = match node.field(Field::Arguments) {
             Some(a) => a,
             None => return,
         };
@@ -1183,7 +1183,7 @@ pub(super) fn walk_constraint_params<'a>(
 /// The parameter nodes of a constraint constructor, arrayref flattened.
 fn constraint_param_nodes<'a>(call_node: Node<'a>) -> Vec<Node<'a>> {
     let mut out = Vec::new();
-    let Some(args) = call_node.child_by_field_name("arguments") else { return out };
+    let Some(args) = call_node.field(Field::Arguments) else { return out };
     for child in args.elements() {
         if child.kind() == "anonymous_array_expression" {
             out.extend(child.elements());
@@ -1279,7 +1279,7 @@ impl<'a> Builder<'a> {
             return self.plugins.type_constraint_inner(&name, &[]);
         }
         let call = find_constraint_call(root)?;
-        let name = call.child_by_field_name("function")?.utf8_text(src).ok()?.to_string();
+        let name = call.field(Field::Function)?.utf8_text(src).ok()?.to_string();
         // The leaf resolver for a re-parsed tree: no symbols and no witnesses
         // exist here, so a string literal contributes its content and a
         // nested constructor recurses through the vocabulary.

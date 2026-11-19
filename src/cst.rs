@@ -27,6 +27,7 @@ use crate::model::file_analysis::{Binding, PathStep, Place, Slot, Slots, Span};
 use tree_sitter::Point;
 
 pub(crate) mod perl;
+pub(crate) mod pod;
 mod syntax;
 pub(crate) use perl::{Field, Kind};
 pub(crate) use syntax::{kind_ids, Injection, NodeFacts, NodeId, Structure, SyntaxForest, SyntaxNode};
@@ -35,13 +36,21 @@ pub(crate) use crate::model::conventions::is_conventional_invocant_name;
 
 /// Ergonomic accessors every tree consumer wants; `use crate::cst::NodeExt`
 /// instead of re-spelling `utf8_text(..).ok()` chains.
+/// A field of some grammar's vocabulary (`perl::Field`, `pod::Field`): the
+/// id the grammar's own tables give it, read off a generated enum.
+pub(crate) trait GrammarField: Copy {
+    fn id(self) -> std::num::NonZeroU16;
+}
+
 pub(crate) trait NodeExt<'a>: Sized {
     /// The node's source text. `None` only on invalid UTF-8.
     fn text(&self, src: &'a [u8]) -> Option<&'a str>;
     /// Text of a named field's child.
-    fn field_text(&self, field: &str, src: &'a [u8]) -> Option<&'a str>;
+    fn field_text(&self, field: impl GrammarField, src: &'a [u8]) -> Option<&'a str>;
     /// The child in `field`.
-    fn field(&self, field: Field) -> Option<Node<'a>>;
+    fn field(&self, field: impl GrammarField) -> Option<Node<'a>>;
+    /// Every child in `field`, for a field the grammar repeats per slot.
+    fn fields(&self, field: impl GrammarField) -> Vec<Node<'a>>;
     /// The node's kind. A node of another grammar's tree has no Perl kind:
     /// these three read Perl trees only.
     fn kind_of(&self) -> Kind;
@@ -60,11 +69,14 @@ impl<'a> NodeExt<'a> for Node<'a> {
     fn text(&self, src: &'a [u8]) -> Option<&'a str> {
         self.utf8_text(src).ok()
     }
-    fn field_text(&self, field: &str, src: &'a [u8]) -> Option<&'a str> {
-        self.child_by_field_name(field).and_then(|n| n.text(src))
+    fn field_text(&self, field: impl GrammarField, src: &'a [u8]) -> Option<&'a str> {
+        self.field(field).and_then(|n| n.text(src))
     }
-    fn field(&self, field: Field) -> Option<Node<'a>> {
-        self.child_by_field_id(field as u16)
+    fn field(&self, field: impl GrammarField) -> Option<Node<'a>> {
+        self.child_by_field_id(field.id().get())
+    }
+    fn fields(&self, field: impl GrammarField) -> Vec<Node<'a>> {
+        self.children_by_field_id(field.id(), &mut self.walk()).collect()
     }
     fn kind_of(&self) -> Kind {
         Kind::from_id(self.kind_id())
@@ -89,7 +101,7 @@ pub(crate) fn eval_replacement<'a>(node: Node<'a>, src: &[u8]) -> Option<Node<'a
     if node.kind() != "substitution_regexp" {
         return None;
     }
-    if !node.child_by_field_name("modifiers")?.text(src)?.contains('e') {
+    if !node.field(Field::Modifiers)?.text(src)?.contains('e') {
         return None;
     }
     node.elements().find(|c| c.kind() == "replacement")
@@ -106,9 +118,9 @@ pub(crate) fn node_to_span(node: Node) -> Span {
 /// the `function` field of either function-call shape.
 pub(crate) fn extract_call_name(node: Node, source: &[u8]) -> Option<String> {
     match node.kind() {
-        "method_call_expression" => node.field_text("method", source).map(str::to_string),
+        "method_call_expression" => node.field_text(Field::Method, source).map(str::to_string),
         "function_call_expression" | "ambiguous_function_call_expression" => {
-            node.field_text("function", source).map(str::to_string)
+            node.field_text(Field::Function, source).map(str::to_string)
         }
         _ => None,
     }
@@ -167,7 +179,7 @@ impl<'a> Iterator for Elements<'a> {
 /// surface: `cast(node)` (kind-checked), `node()`, and one
 /// `Option<Node>`-returning accessor per listed field.
 macro_rules! typed_node {
-    ($(#[$meta:meta])* $name:ident($kind:literal) { $($(#[$fmeta:meta])* $field:ident),* $(,)? }) => {
+    ($(#[$meta:meta])* $name:ident($kind:literal) { $($(#[$fmeta:meta])* $field:ident: $variant:ident),* $(,)? }) => {
         $(#[$meta])*
         #[derive(Clone, Copy)]
         pub(crate) struct $name<'a>(Node<'a>);
@@ -183,7 +195,7 @@ macro_rules! typed_node {
             $(
                 $(#[$fmeta])*
                 pub(crate) fn $field(&self) -> Option<Node<'a>> {
-                    self.0.child_by_field_name(stringify!($field))
+                    self.0.field(Field::$variant)
                 }
             )*
         }
@@ -193,25 +205,25 @@ macro_rules! typed_node {
 typed_node! {
     /// `$obj->method(args)` / `$obj->$dyn(...)` / `Class->Pkg::method`.
     MethodCall("method_call_expression") {
-        invocant,
-        method,
-        arguments,
+        invocant: Invocant,
+        method: Method,
+        arguments: Arguments,
     }
 }
 
 typed_node! {
     /// `name(args)` — the parenthesized call form.
     FunctionCall("function_call_expression") {
-        function,
-        arguments,
+        function: Function,
+        arguments: Arguments,
     }
 }
 
 typed_node! {
     /// `name args` — no parens; also `bless { ... }`.
     AmbiguousFunctionCall("ambiguous_function_call_expression") {
-        function,
-        arguments,
+        function: Function,
+        arguments: Arguments,
     }
 }
 
@@ -253,7 +265,7 @@ impl AssignOp {
 /// declaration must not kill (a parameter assertion) sit on its binding
 /// token, so it writes there.
 pub(crate) fn assignment_write_point(assign: Node) -> tree_sitter::Point {
-    match assign.child_by_field_name("left") {
+    match assign.field(Field::Left) {
         Some(left) if left.kind() == "variable_declaration" => left.start_position(),
         _ => assign.end_position(),
     }
@@ -265,7 +277,7 @@ pub(crate) fn assign_op(node: Node) -> Option<AssignOp> {
     if node.kind() != "assignment_expression" {
         return None;
     }
-    Some(match node.child_by_field_name("operator")?.kind() {
+    Some(match node.field(Field::Operator)?.kind() {
         "=" => AssignOp::Plain,
         "||=" | "//=" => AssignOp::Fallback,
         "&&=" => AssignOp::AndThen,
@@ -316,7 +328,7 @@ pub(crate) fn is_list_literal(node: Node) -> bool {
 /// `arguments` field may be a bare single node or a `list_expression` /
 /// `parenthesized_expression` wrapper — callers never see the difference.
 pub(crate) fn call_args<'a>(call_node: Node<'a>) -> Vec<Node<'a>> {
-    let Some(args) = call_node.child_by_field_name("arguments") else {
+    let Some(args) = call_node.field(Field::Arguments) else {
         return Vec::new();
     };
     if is_list_literal(args) {
@@ -401,7 +413,7 @@ pub(crate) enum RefgenOperand {
 pub(crate) fn refgen_operand(refgen: Node) -> Option<RefgenOperand> {
     let operand = refgen.elements().next()?;
     let operand = if operand.kind() == "variable_declaration" {
-        operand.child_by_field_name("variable")?
+        operand.field(Field::Variable)?
     } else {
         operand
     };
@@ -439,14 +451,14 @@ pub(crate) fn list_assignment_target_of<'t>(syn: &SyntaxForest<'t>, node: Node<'
         group = outer;
     }
     let assign = up.next().filter(|a| a.kind() == "assignment_expression")?;
-    (assign.child_by_field_name("left")? == group).then_some(assign)
+    (assign.field(Field::Left)? == group).then_some(assign)
 }
 
 /// `node` is stored into: an assignment's left side, a list
 /// assignment's target, or the operand of `++` / `--`.
 pub(crate) fn is_assignment_target<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> bool {
     syn.parent(node).is_some_and(|p| {
-        (p.kind() == "assignment_expression" && p.child_by_field_name("left") == Some(node))
+        (p.kind() == "assignment_expression" && p.field(Field::Left) == Some(node))
             || matches!(p.kind(), "postinc_expression" | "preinc_expression")
     }) || list_assignment_target_of(syn, node).is_some()
 }
@@ -489,12 +501,12 @@ pub(crate) fn indirect_object_call<'a>(node: Node<'a>, src: &[u8]) -> Option<Ind
     if node.kind() != "ambiguous_function_call_expression" {
         return None;
     }
-    let method = node.child_by_field_name("function")?;
-    let inner = node.child_by_field_name("arguments")?;
+    let method = node.field(Field::Function)?;
+    let inner = node.field(Field::Arguments)?;
     let (class, arguments) = match inner.kind() {
         "bareword" => (inner, None),
         "function_call_expression" | "ambiguous_function_call_expression" => {
-            (inner.child_by_field_name("function")?, inner.child_by_field_name("arguments"))
+            (inner.field(Field::Function)?, inner.field(Field::Arguments))
         }
         _ => return None,
     };
@@ -665,9 +677,9 @@ pub(crate) fn arg_slot_index<'a>(node: Node<'a>, src: &[u8]) -> Option<Node<'a>>
     if node.kind() != "array_element_expression" {
         return None;
     }
-    let array = node.child_by_field_name("array")?;
+    let array = node.field(Field::Array)?;
     (array.kind() == "container_variable" && names_arg_array(array, src))
-        .then(|| node.child_by_field_name("index"))
+        .then(|| node.field(Field::Index))
         .flatten()
 }
 
@@ -684,7 +696,7 @@ pub(crate) fn is_bare_call_of(node: Node, src: &[u8], op: &str) -> bool {
         "func1op_call_expression" => {
             nth_element(node, 0).is_none() && node.child(0).and_then(|c| c.utf8_text(src).ok()) == Some(op)
         }
-        "ambiguous_function_call_expression" | "function_call_expression" => node.field_text("function", src) == Some(op),
+        "ambiguous_function_call_expression" | "function_call_expression" => node.field_text(Field::Function, src) == Some(op),
         _ => false,
     }
 }
@@ -762,9 +774,9 @@ pub(crate) fn container_sigil<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> Opt
         "array_element_expression" => Some(Sigil::Array),
         "hash_element_expression" => Some(Sigil::Hash),
         "slice_expression" | "keyval_expression" => {
-            if parent.child_by_field_name("array").is_some_and(|c| c == node) {
+            if parent.field(Field::Array).is_some_and(|c| c == node) {
                 Some(Sigil::Array)
-            } else if parent.child_by_field_name("hash").is_some_and(|c| c == node) {
+            } else if parent.field(Field::Hash).is_some_and(|c| c == node) {
                 Some(Sigil::Hash)
             } else {
                 None
@@ -868,13 +880,13 @@ fn is_variable_kind(kind: &str) -> bool {
 /// between it and the subscript: a named container (`$h{a}`, `@h{..}`)
 /// is subscripted directly, anything else through the reference it holds.
 fn access_base(node: Node) -> Option<(Node, bool)> {
-    for field in ["hash", "array"] {
-        if let Some(c) = node.child_by_field_name(field) {
+    for field in [Field::Hash, Field::Array] {
+        if let Some(c) = node.field(field) {
             return Some((c, false));
         }
     }
-    for field in ["hashref", "arrayref"] {
-        if let Some(c) = node.child_by_field_name(field) {
+    for field in [Field::Hashref, Field::Arrayref] {
+        if let Some(c) = node.field(field) {
             return Some((c, true));
         }
     }
@@ -922,8 +934,8 @@ pub(crate) fn vivify_context<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> crat
         }
         break p;
     };
-    let is_left = parent.child_by_field_name("left") == Some(n);
-    let is_condition = parent.child_by_field_name("condition") == Some(n);
+    let is_left = parent.field(Field::Left) == Some(n);
+    let is_condition = parent.field(Field::Condition) == Some(n);
     match parent.kind() {
         "assignment_expression" if is_left => VivifyContext::Is(VivifyAccess::Store),
         "assignment_expression" => VivifyContext::Is(VivifyAccess::Fetch),
@@ -993,13 +1005,13 @@ fn collect_steps(
     let hash = match kind {
         "hash_element_expression" | "array_element_expression" => kind == "hash_element_expression",
         "slice_expression" | "keyval_expression" => {
-            node.child_by_field_name("hash").or_else(|| node.child_by_field_name("hashref")).is_some()
+            node.field(Field::Hash).or_else(|| node.field(Field::Hashref)).is_some()
         }
         _ => return None,
     };
     let slots = match kind {
-        "hash_element_expression" => RawSlots::One(read_slot(node.child_by_field_name("key")?, src, binder, read, true)),
-        "array_element_expression" => RawSlots::One(read_slot(node.child_by_field_name("index")?, src, binder, read, false)),
+        "hash_element_expression" => RawSlots::One(read_slot(node.field(Field::Key)?, src, binder, read, true)),
+        "array_element_expression" => RawSlots::One(read_slot(node.field(Field::Index)?, src, binder, read, false)),
         _ => read_slice_slots(node.elements().find(|c| *c != base), src, binder, read, hash),
     };
     steps.push(match (hash, slots) {
@@ -1224,7 +1236,7 @@ fn map_callback_template<'a>(cb: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
         if expr.kind() != "assignment_expression" {
             continue;
         }
-        let Some(left) = expr.child_by_field_name("left") else { continue };
+        let Some(left) = expr.field(Field::Left) else { continue };
         let declares = left.kind() == "variable_declaration"
             && left
                 .named()
@@ -1276,7 +1288,7 @@ fn map_built_strings<'t>(
     if kw.utf8_text(src).ok() != Some("map") {
         return vec![];
     }
-    let Some(cb) = node.child_by_field_name("callback") else { return vec![] };
+    let Some(cb) = node.field(Field::Callback) else { return vec![] };
     let Some(cb) = map_callback_template(cb, src) else { return vec![] };
     if cb.kind() != "interpolated_string_literal" {
         return vec![];
@@ -1293,7 +1305,7 @@ fn map_built_strings<'t>(
     let pre_end = topic.start_byte() - content.start_byte();
     let post_start = topic.end_byte() - content.start_byte();
     let (pre, post) = (&ctext[..pre_end], &ctext[post_start..]);
-    let Some(list) = node.child_by_field_name("list") else { return vec![] };
+    let Some(list) = node.field(Field::List) else { return vec![] };
     string_list(list, src, fold)
         .into_iter()
         .map(|(t, sp)| (format!("{pre}{t}{post}"), sp))
@@ -1399,7 +1411,7 @@ pub(crate) fn declaration_in_force_from<'t>(syn: &SyntaxForest<'t>, decl: Node<'
         if p.kind() == "expression_statement" {
             return p.end_position();
         }
-        if let Some(block) = p.child_by_field_name("block").filter(|b| b.id() != from.id()) {
+        if let Some(block) = p.field(Field::Block).filter(|b| b.id() != from.id()) {
             return block.start_position();
         }
         if matches!(p.kind(), "block" | "source_file") {
@@ -1478,7 +1490,7 @@ fn one_operand_call(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
     let (name, operand) = match node.kind() {
         "func1op_call_expression" => (node.child(0)?, node.named().find(|c| c.kind() != "comment")?),
         "function_call_expression" | "ambiguous_function_call_expression" => {
-            (node.child_by_field_name("function")?, node.child_by_field_name("arguments")?)
+            (node.field(Field::Function)?, node.field(Field::Arguments)?)
         }
         _ => return None,
     };
@@ -1508,8 +1520,8 @@ pub(crate) const MODIFIER_KINDS: &[&str] =
 /// modifier runs over. `None` for any other node.
 pub(crate) fn modifier_head<'a>(modifier: Node<'a>) -> Option<Node<'a>> {
     match modifier.kind() {
-        "postfix_conditional_expression" | "postfix_loop_expression" => modifier.child_by_field_name("condition"),
-        "postfix_for_expression" => modifier.child_by_field_name("list"),
+        "postfix_conditional_expression" | "postfix_loop_expression" => modifier.field(Field::Condition),
+        "postfix_for_expression" => modifier.field(Field::List),
         _ => None,
     }
 }
@@ -1553,8 +1565,8 @@ pub(crate) fn varname_inner_scalar_text<'a>(node: Node<'a>, src: &'a [u8]) -> Op
 pub(crate) fn element_arrow_deref(element: Node, src: &[u8]) -> bool {
     let Some(container) = element.named_child(0) else { return false };
     let Some(sub) = element
-        .child_by_field_name("key")
-        .or_else(|| element.child_by_field_name("index"))
+        .field(Field::Key)
+        .or_else(|| element.field(Field::Index))
     else {
         return false;
     };
@@ -1579,8 +1591,8 @@ pub(crate) fn is_element_access_base<'t>(syn: &SyntaxForest<'t>, node: Node<'t>)
         // the scalar fills the hashref/arrayref field. A slice READ
         // copies values out — it can't mutate the referent.
         "slice_expression" | "keyval_expression" => {
-            parent.child_by_field_name("hashref").is_some_and(|c| c == node)
-                || parent.child_by_field_name("arrayref").is_some_and(|c| c == node)
+            parent.field(Field::Hashref).is_some_and(|c| c == node)
+                || parent.field(Field::Arrayref).is_some_and(|c| c == node)
         }
         // Sigil-deref slice (`@$h{…}`): the scalar sits under the
         // container's varname. Plain sigil derefs (`%$h`, `$$h`) keep
@@ -1629,7 +1641,7 @@ pub(crate) fn constructor_invocant<'a>(node: Node<'a>, src: &'a [u8]) -> Option<
 /// `$o->${cb}`, `$o->$$cb`. The `method:` field is always a `method` node,
 /// wrapping the scalar for these spellings and a bare name otherwise.
 pub(crate) fn dynamic_method_scalar(call: Node) -> Option<Node> {
-    call.child_by_field_name("method")?.named_child(0).filter(|c| c.kind() == "scalar")
+    call.field(Field::Method)?.named_child(0).filter(|c| c.kind() == "scalar")
 }
 
 /// An argument that flattens into any number of values in list context:

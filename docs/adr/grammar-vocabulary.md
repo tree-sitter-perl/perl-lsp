@@ -33,10 +33,17 @@ discriminant the grammar's own id.
   keywords), **`Kind::Error`** a tree-sitter ERROR node. A token is still
   told apart by its text.
 
-The enums are the Perl grammar's. A node of another grammar's tree has no
-Perl kind and a Perl field id means nothing on it: the three accessors read
-Perl trees only. A pack reads its grammar through its query document
-(rule #15), which is where its node kinds already live.
+Each grammar has its own module: `cst::perl`, and `cst::pod` for the POD
+grammar, generated the same way. `NodeExt::field` takes any grammar's `Field`
+(`GrammarField`); a field id means nothing on another grammar's tree, and
+the tree does not say whose it is, so the module a site imports is the
+statement of which grammar it reads. A pack reads its grammar through its
+query document (rule #15), which is where its node kinds already live.
+
+`layering_tests::tree_fields_are_read_by_id` ratchets the by-name field
+reads, shrink-only. The C++ reparse is what is left: it compiles in builds
+that do not link the C++ grammar, so the build script has no table to
+generate its vocabulary from.
 
 `cst::syntax_tests::the_generated_vocabulary_agrees_with_the_grammar` walks a
 parse and holds every node's `Kind` to the node's own kind string, and every
@@ -44,5 +51,5 @@ field id to the child its name reads.
 
 ## Cost
 
-The build script links the grammar, so a clean build compiles the Perl
-parser once more for the host.
+The build script links the grammars, so a clean build compiles the Perl
+and POD parsers once more for the host.

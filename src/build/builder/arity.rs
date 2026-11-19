@@ -20,7 +20,7 @@ pub(super) fn classify_arity_branch<'t>(
     match parent.kind() {
         "expression_statement" => classify_bare_return_or_if_arm(syn, parent, source),
         "postfix_conditional_expression" => {
-            let cond = parent.child_by_field_name("condition")?;
+            let cond = parent.field(Field::Condition)?;
             let keyword = connector_keyword_between(return_node, cond, source)?;
             classify_arity_condition(cond, source, &keyword)
         }
@@ -83,7 +83,7 @@ pub(super) fn classify_arity_condition(
     if cond.kind() == "unary_expression" {
         let op_text = raw_leading_op(cond, source);
         if op_text == "!" {
-            if let Some(operand) = cond.child_by_field_name("operand") {
+            if let Some(operand) = cond.field(Field::Operand) {
                 if operand.kind() == "array" {
                     if crate::cst::names_arg_array(operand, source) {
                         return match keyword {
@@ -102,8 +102,8 @@ pub(super) fn classify_arity_condition(
         if op != "==" && op != "!=" {
             return None;
         }
-        let left = cond.child_by_field_name("left")?;
-        let right = cond.child_by_field_name("right")?;
+        let left = cond.field(Field::Left)?;
+        let right = cond.field(Field::Right)?;
         let n = extract_numeric(right, source)?;
         let counts_args = node_is_arity_magnitude(left, source);
         if !counts_args {
@@ -136,8 +136,8 @@ pub(super) fn classify_arity_condition(
         if !sound {
             return None;
         }
-        let left = cond.child_by_field_name("left")?;
-        let right = cond.child_by_field_name("right")?;
+        let left = cond.field(Field::Left)?;
+        let right = cond.field(Field::Right)?;
         // Either operand may carry the arity test; the other is the
         // unrelated predicate. First sound classification wins.
         return classify_arity_condition(left, source, keyword)
@@ -156,8 +156,8 @@ pub(super) fn classify_relational_arity(
     keyword: &str,
 ) -> Option<ArityBranch> {
     let op = raw_mid_op(cond, source);
-    let left = cond.child_by_field_name("left")?;
-    let right = cond.child_by_field_name("right")?;
+    let left = cond.field(Field::Left)?;
+    let right = cond.field(Field::Right)?;
     if !node_is_arity_magnitude(left, source) {
         return None;
     }
@@ -273,7 +273,7 @@ pub(super) fn connector_keyword_between(
 pub(super) fn raw_leading_op(node: tree_sitter::Node, source: &[u8]) -> String {
     // Operator is an anonymous child between start and the first named
     // child (operand). Read the bytes before the operand node.
-    let Some(operand) = node.child_by_field_name("operand") else {
+    let Some(operand) = node.field(Field::Operand) else {
         return String::new();
     };
     let start = node.start_byte();
@@ -285,10 +285,10 @@ pub(super) fn raw_leading_op(node: tree_sitter::Node, source: &[u8]) -> String {
 }
 
 pub(super) fn raw_mid_op(node: tree_sitter::Node, source: &[u8]) -> String {
-    let Some(left) = node.child_by_field_name("left") else {
+    let Some(left) = node.field(Field::Left) else {
         return String::new();
     };
-    let Some(right) = node.child_by_field_name("right") else {
+    let Some(right) = node.field(Field::Right) else {
         return String::new();
     };
     let start = left.end_byte();
@@ -319,10 +319,10 @@ pub(super) fn extract_delegated_call_name<'a>(return_node: Node<'a>, source: &'a
     let expr = crate::cst::nth_element(return_node, 0)?;
     let call_name = match expr.kind() {
         "function_call_expression" | "ambiguous_function_call_expression" => {
-            expr.child_by_field_name("function")?.utf8_text(source).ok()?
+            expr.field(Field::Function)?.utf8_text(source).ok()?
         }
         "method_call_expression" => {
-            expr.child_by_field_name("method")?.utf8_text(source).ok()?
+            expr.field(Field::Method)?.utf8_text(source).ok()?
         }
         _ => return None,
     };

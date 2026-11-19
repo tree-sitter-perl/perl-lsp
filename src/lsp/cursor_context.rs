@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use tree_sitter::{Node, Point, Tree};
 
-use crate::cst::{extract_call_name, node_to_span, NodeExt};
+use crate::cst::{extract_call_name, node_to_span, Field, NodeExt};
 use crate::model::file_analysis::{CrossFileLookup, FileAnalysis, InferredType, Span};
 
 // ---- Types ----
@@ -281,21 +281,21 @@ module_index: Option<&dyn CrossFileLookup>,
             // bag, project the index. The bag answer is whatever
             // the walker's last `push` / `my @arr = (...)`
             // contribution left on `Variable{"@arr", scope}`.
-            let arr = node.child_by_field_name("array")?;
+            let arr = node.field(Field::Array)?;
             let name = arr
                 .named_child(0)
                 .and_then(|n| n.utf8_text(source).ok())?;
-            let idx_node = node.child_by_field_name("index")?;
+            let idx_node = node.field(Field::Index)?;
             let idx: i32 = idx_node.utf8_text(source).ok()?.parse().ok()?;
             let arr_var = format!("@{}", name);
             analysis.inferred_type_via_bag(&arr_var, point)
                 .and_then(|t| t.element_at(idx).cloned())
         }
         "method_call_expression" => {
-            let invocant_node = node.child_by_field_name("invocant")?;
+            let invocant_node = node.field(Field::Invocant)?;
             let invocant_type = resolve_expression_type(analysis, invocant_node, source, module_index)?;
             let class_name = invocant_type.class_name()?;
-            let method_name = node.child_by_field_name("method")?;
+            let method_name = node.field(Field::Method)?;
             let method_text = method_name.utf8_text(source).ok()?;
             // Constructor call returns Object(ClassName)
             if crate::model::conventions::is_constructor_name(method_text) {
@@ -305,7 +305,7 @@ module_index: Option<&dyn CrossFileLookup>,
             analysis.find_method_return_type(class_name, method_text, module_index, Some(arg_count))
         }
         "function_call_expression" | "ambiguous_function_call_expression" => {
-            let func_node = node.child_by_field_name("function")?;
+            let func_node = node.field(Field::Function)?;
             let name = func_node.utf8_text(source).ok()?;
             // Route through the arity-aware helper so fluent
             // arity dispatch (`return X unless @_`) can pick the
@@ -457,14 +457,14 @@ pub fn detect_cursor_context_tree_with_index(
         match current.kind() {
             "method_call_expression" => {
                 // Check if cursor is after -> (in the method position)
-                if let Some(invocant_node) = current.child_by_field_name("invocant") {
+                if let Some(invocant_node) = current.field(Field::Invocant) {
                     if invocant_node.end_position() < point {
                         // `$obj->Foo::Bar::` / `$obj->Foo::ba` — a fully-qualified
                         // method is being typed. The qualifier names the dispatch
                         // PACKAGE, so complete its subs (same as a bare `Foo::Bar::`),
                         // not the invocant's own methods. SUPER isn't a package, so
                         // it falls through to ordinary method completion.
-                        if let Some(method) = current.child_by_field_name("method") {
+                        if let Some(method) = current.field(Field::Method) {
                             if let Ok(mtext) = method.utf8_text(source) {
                                 if let crate::model::conventions::MethodToken::Qualified {
                                     package, ..
@@ -503,7 +503,7 @@ pub fn detect_cursor_context_tree_with_index(
                         // a string interior doesn't masquerade as `$obj->`.
                         // An incomplete `$obj->|` has no method child and still
                         // wants Method.
-                        if let Some(method) = current.child_by_field_name("method") {
+                        if let Some(method) = current.field(Field::Method) {
                             if point > method.end_position() {
                                 current = current.parent()?;
                                 continue;
@@ -573,11 +573,11 @@ fn enclosing_call_for_hash_arg(hash_node: Node, source: &[u8]) -> Option<String>
         let parent = n.parent()?;
         match parent.kind() {
             "method_call_expression" => {
-                let method = parent.child_by_field_name("method")?;
+                let method = parent.field(Field::Method)?;
                 return method.utf8_text(source).ok().map(|s| s.to_string());
             }
             "function_call_expression" | "ambiguous_function_call_expression" => {
-                let func = parent.child_by_field_name("function")?;
+                let func = parent.field(Field::Function)?;
                 return func.utf8_text(source).ok().map(|s| s.to_string());
             }
             "block" | "subroutine_declaration_statement"
@@ -790,20 +790,20 @@ fn find_call_at_cursor_from<'a>(
         match node.kind() {
             "function_call_expression" | "ambiguous_function_call_expression" => {
                 let name = node
-                    .child_by_field_name("function")
+                    .field(Field::Function)
                     .and_then(|n| n.utf8_text(source).ok())?;
-                let args = node.child_by_field_name("arguments");
+                let args = node.field(Field::Arguments);
                 return Some((name.to_string(), false, None, args));
             }
             "method_call_expression" => {
                 let name = node
-                    .child_by_field_name("method")
+                    .field(Field::Method)
                     .and_then(|n| n.utf8_text(source).ok())?;
                 let invocant = node
-                    .child_by_field_name("invocant")
+                    .field(Field::Invocant)
                     .and_then(|n| n.utf8_text(source).ok())
                     .map(|s| s.to_string());
-                let args = node.child_by_field_name("arguments");
+                let args = node.field(Field::Arguments);
                 if args.is_some() {
                     return Some((name.to_string(), true, invocant, args));
                 }
@@ -865,20 +865,20 @@ fn find_call_from_error_sibling<'a>(
     match call_node.kind() {
         "method_call_expression" => {
             let name = call_node
-                .child_by_field_name("method")
+                .field(Field::Method)
                 .and_then(|n| n.utf8_text(source).ok())?;
             let invocant = call_node
-                .child_by_field_name("invocant")
+                .field(Field::Invocant)
                 .and_then(|n| n.utf8_text(source).ok())
                 .map(|s| s.to_string());
-            let args = call_node.child_by_field_name("arguments").or(args_node);
+            let args = call_node.field(Field::Arguments).or(args_node);
             Some((name.to_string(), true, invocant, args))
         }
         "function_call_expression" | "ambiguous_function_call_expression" => {
             let name = call_node
-                .child_by_field_name("function")
+                .field(Field::Function)
                 .and_then(|n| n.utf8_text(source).ok())?;
-            let args = call_node.child_by_field_name("arguments").or(args_node);
+            let args = call_node.field(Field::Arguments).or(args_node);
             Some((name.to_string(), false, None, args))
         }
         "bareword" => {
@@ -1192,7 +1192,7 @@ pub fn build_plugin_query_context(
         let use_module = found_node.and_then(|hash| {
             let parent = hash.parent()?;
             if parent.kind() != "use_statement" { return None; }
-            let module = parent.child_by_field_name("module")?;
+            let module = parent.field(Field::Module)?;
             module.utf8_text(source).ok().map(|s| s.to_string())
         });
         (found, use_module)

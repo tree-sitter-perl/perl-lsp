@@ -13,7 +13,7 @@ impl<'a> Builder<'a> {
         // so kit plugins (`use Co::Base -Class` → SyntheticUse "Moo")
         // hit the exact same code path the user's literal `use Moo`
         // would.
-        let Some(module_node) = node.child_by_field_name("module") else { return };
+        let Some(module_node) = node.field(Field::Module) else { return };
         let Ok(module_name) = module_node.utf8_text(self.source) else { return };
         let raw_args = self.extract_mojo_base_args(node);
         let (words, _qw_close) = self.extract_use_import_list(node);
@@ -608,7 +608,7 @@ impl<'a> Builder<'a> {
             if matches!(
                 parent.kind(),
                 "function_call_expression" | "ambiguous_function_call_expression"
-            ) && parent.child_by_field_name("function").map(|f| f.id()) == Some(node.id())
+            ) && parent.field(Field::Function).map(|f| f.id()) == Some(node.id())
             {
                 return;
             }
@@ -640,7 +640,7 @@ impl<'a> Builder<'a> {
         // `Foo::Bar->new` class invocant.
         if let Some(parent) = self.syntax.parent(node) {
             if parent.kind() == "method_call_expression"
-                && parent.child_by_field_name("invocant").map(|i| i.id()) == Some(node.id())
+                && parent.field(Field::Invocant).map(|i| i.id()) == Some(node.id())
             {
                 return;
             }
@@ -834,7 +834,7 @@ impl<'a> Builder<'a> {
     pub(super) fn fold_local_sub_literal_return(&self, call_node: Node<'a>) -> Vec<String> {
         let fname = match call_node.kind() {
             "function_call_expression" | "ambiguous_function_call_expression" => {
-                call_node.child_by_field_name("function")
+                call_node.field(Field::Function)
             }
             _ => return vec![],
         };
@@ -862,11 +862,11 @@ impl<'a> Builder<'a> {
         let root = self.syntax.lift(root)?;
         root.descendants_of_kind(sub_declaration_kinds())
             .filter(|n| {
-                n.ts().child_by_field_name("name").and_then(|t| t.utf8_text(self.source).ok())
+                n.ts().field(Field::Name).and_then(|t| t.utf8_text(self.source).ok())
                     == Some(name)
             })
             .max_by_key(|n| (n.subtree().end, std::cmp::Reverse(n.subtree().start)))
-            .and_then(|n| n.ts().child_by_field_name("body"))
+            .and_then(|n| n.ts().field(Field::Body))
     }
 
     /// Extract the literal name list a sub body returns, when its tail/return
@@ -1115,13 +1115,13 @@ impl<'a> Builder<'a> {
     /// unnamed token, fall back to the assignment's last named child that
     /// isn't the `left` field — the parser keeps the rvalue as a sibling.
     pub(super) fn assignment_rhs(&self, node: Node<'a>) -> Option<Node<'a>> {
-        let field = node.child_by_field_name("right");
+        let field = node.field(Field::Right);
         if let Some(f) = field {
             if f.is_named() {
                 return Some(f);
             }
         }
-        let left_id = node.child_by_field_name("left").map(|l| l.id());
+        let left_id = node.field(Field::Left).map(|l| l.id());
         let mut rhs = None;
         for i in 0..node.named_child_count() {
             if let Some(c) = node.named_child(i) {
@@ -1218,7 +1218,7 @@ impl<'a> Builder<'a> {
     pub(super) fn visit_assignment(&mut self, node: Node<'a>) {
         let mut const_writes: Vec<(String, ConstFold)> = Vec::new();
         // Check for @ISA assignment: `our @ISA = (...)`
-        if let Some(left) = node.child_by_field_name("left") {
+        if let Some(left) = node.field(Field::Left) {
             // The assigned variable, whatever declares it (`my`/`our`/
             // `state`/`local`); `None` for an element, glob or list target.
             let lhs_var = self.get_var_text_from_lhs(left).unwrap_or_default();
@@ -1322,7 +1322,7 @@ impl<'a> Builder<'a> {
         }
 
         // Check for type inference from RHS
-        if let Some(left) = node.child_by_field_name("left") {
+        if let Some(left) = node.field(Field::Left) {
             if left.kind() == "variable_declaration" {
                 // Visit the declaration
                 self.visit_variable_decl(left);
@@ -1367,7 +1367,7 @@ impl<'a> Builder<'a> {
     fn fold_compound_constant_string(&mut self, var: &str, node: Node<'a>) {
         let appended = (crate::cst::assign_op(node) == Some(crate::cst::AssignOp::Append))
             .then(|| {
-                let right = node.child_by_field_name("right")?;
+                let right = node.field(Field::Right)?;
                 let tails = match right.kind() {
                     "interpolated_string_literal" => self.try_fold_interpolated_string(right),
                     "string_literal" => crate::cst::string_content_text(right, self.source).into_iter().collect(),
@@ -1580,7 +1580,7 @@ impl<'a> Builder<'a> {
         // stores the assignment's own value instead.
         let stored = if op == Some(crate::cst::AssignOp::Plain) { right } else { node };
         if left.kind() == "hash_element_expression" {
-            if let Some(key_node) = left.child_by_field_name("key") {
+            if let Some(key_node) = left.field(Field::Key) {
                 // The object written through, as the edge a positionless
                 // read of it takes: a variable's value where its binding's
                 // scope ends (a hash written and then blessed is the object
@@ -1625,7 +1625,7 @@ impl<'a> Builder<'a> {
                 // a garbage `%$h`, so the inner scalar wins),
                 // and postfix deref (`$h->@{…}` / `$h->%{…}` —
                 // grammar field `hashref:`, a plain scalar).
-                let name = match left.child_by_field_name("hash") {
+                let name = match left.field(Field::Hash) {
                     Some(container) => {
                         crate::cst::varname_inner_scalar_text(container, self.source)
                             .or_else(|| {
@@ -1636,7 +1636,7 @@ impl<'a> Builder<'a> {
                             })
                     }
                     None => left
-                        .child_by_field_name("hashref")
+                        .field(Field::Hashref)
                         .filter(|c| c.kind() == "scalar")
                         .and_then(|c| c.utf8_text(self.source).ok())
                         .map(|s| s.to_string()),

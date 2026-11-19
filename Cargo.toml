@@ -103,6 +103,7 @@ tree-sitter-php = { version = "0.24", optional = true }
 [build-dependencies]
 tree-sitter = "0.25"
 ts-parser-perl = "2.1.0"
+ts-parser-pod = "1"
 
 [dev-dependencies]
 tree-sitter-python = "0.25"

@@ -13,7 +13,7 @@
 
 use tree_sitter::{Node, Point};
 
-use crate::cst::node_to_span;
+use crate::cst::{node_to_span, Field, NodeExt};
 use crate::model::file_analysis::{Access, Binding, InferredType, Place, PlaceDisturbanceIndex, ScopeId, Span};
 
 use super::extract::ListSlot;
@@ -300,11 +300,11 @@ enum Logical<'a> {
 fn logical_shape<'a>(cond: Node<'a>, source: &[u8]) -> Option<Logical<'a>> {
     match cond.kind() {
         "unary_expression" if raw_leading_op(cond, source) == "!" => {
-            cond.child_by_field_name("operand").map(Logical::Not)
+            cond.field(Field::Operand).map(Logical::Not)
         }
-        "logical_not_expression" => cond.child_by_field_name("operand").map(Logical::Not),
+        "logical_not_expression" => cond.field(Field::Operand).map(Logical::Not),
         "binary_expression" | "lowprec_logical_expression" => {
-            let (l, r) = (cond.child_by_field_name("left")?, cond.child_by_field_name("right")?);
+            let (l, r) = (cond.field(Field::Left)?, cond.field(Field::Right)?);
             match raw_mid_op(cond, source).as_str() {
                 "&&" | "and" => Some(Logical::And(l, r)),
                 "||" | "or" => Some(Logical::Or(l, r)),
@@ -412,7 +412,7 @@ fn recognize_atom<'a>(builder: &Builder<'a>, cond: Node<'a>) -> Option<GuardFact
 fn recognize_type_check<'a>(builder: &Builder<'a>, call: Node<'a>) -> Option<(GuardFact<'a>, bool)> {
     if let Some(mc) = crate::cst::MethodCall::cast(call) {
         let check = builder.plugins.type_check_method(mc.method()?.utf8_text(builder.source).ok()?)?;
-        let arg = crate::cst::peel_groups(call.child_by_field_name("arguments")?);
+        let arg = crate::cst::peel_groups(call.field(Field::Arguments)?);
         if !is_subject_node_kind(arg.kind()) {
             return None;
         }
@@ -487,7 +487,7 @@ fn recognize_isa_guard<'a>(builder: &Builder<'a>, call: Node<'a>, source: &[u8])
     }
     let read = mc.invocant()?;
     let subject = builder.narrow_subject_of(read)?;
-    let arg = call.child_by_field_name("arguments")?;
+    let arg = call.field(Field::Arguments)?;
     let class = crate::cst::plain_string_literal_text(arg, source)
         .or_else(|| builder.folded_class_name_arg(arg))
         .or_else(|| builder.current_package_literal(arg))?;
@@ -508,8 +508,8 @@ fn recognize_ref_eq_guard<'a>(builder: &Builder<'a>, eq: Node<'a>, source: &[u8]
     if raw_mid_op(eq, source) != "eq" {
         return None;
     }
-    let left = eq.child_by_field_name("left")?;
-    let right = eq.child_by_field_name("right")?;
+    let left = eq.field(Field::Left)?;
+    let right = eq.field(Field::Right)?;
     let call = |n: Node<'a>| builder.ref_tag_call(crate::cst::peel_groups(n));
     if let Some(((via, operand), lit)) = call(left).map(|c| (c, right)).or_else(|| call(right).map(|c| (c, left))) {
         let ty = match crate::cst::plain_string_literal_text(lit, source) {
@@ -732,7 +732,7 @@ impl<'a> Builder<'a> {
     /// before any test. A loop's fall-through is not narrowed: `last` leaves
     /// with G unchanged.
     pub(super) fn narrow_postfix(&mut self, postfix: Node<'a>) {
-        let Some(condition) = postfix.child_by_field_name("condition") else { return };
+        let Some(condition) = postfix.field(Field::Condition) else { return };
         let Some(modified) = postfix.named_child(0) else { return };
         let Some(kw) = connector_keyword_between(modified, condition, self.source) else { return };
         let (runs_when_true, is_loop) = match kw.as_str() {
@@ -766,7 +766,7 @@ impl<'a> Builder<'a> {
     /// where G failed carry its negation; a `last` leaves with G unknown, so
     /// where one can reach past the loop nothing narrows there.
     pub(super) fn narrow_loop(&mut self, stmt: Node<'a>) {
-        let (Some(condition), Some(body)) = (stmt.child_by_field_name("condition"), stmt.child_by_field_name("block"))
+        let (Some(condition), Some(body)) = (stmt.field(Field::Condition), stmt.field(Field::Block))
         else {
             return;
         };
@@ -790,11 +790,11 @@ impl<'a> Builder<'a> {
 
     /// `G ? A : B` — A runs where G holds, B where it fails.
     pub(super) fn narrow_ternary(&mut self, expr: Node<'a>) {
-        let Some(condition) = expr.child_by_field_name("condition") else { return };
-        if let Some(a) = expr.child_by_field_name("consequent") {
+        let Some(condition) = expr.field(Field::Condition) else { return };
+        if let Some(a) = expr.field(Field::Consequent) {
             self.narrow_arm(condition, a, true);
         }
-        if let Some(b) = expr.child_by_field_name("alternative") {
+        if let Some(b) = expr.field(Field::Alternative) {
             self.narrow_arm(condition, b, false);
         }
     }
