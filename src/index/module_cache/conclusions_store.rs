@@ -92,7 +92,7 @@ pub fn load_conclusions_stamped(
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })
         .ok()?;
-    let bin = zstd::decode_all(blob.as_slice()).ok()?;
+    let bin = super::unzstd(&blob)?;
     let map = bincode::deserialize(&bin).ok()?;
     Some((map, RowStamp { source_fingerprint: fp as u64, flush_generation: Generation(gen) }))
 }

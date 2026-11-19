@@ -679,8 +679,8 @@ impl<'a> Builder<'a> {
     pub(super) fn arg_info_for(&mut self, arg: Node<'a>) -> plugin::ArgInfo {
         let text = arg.utf8_text(self.source).unwrap_or("").to_string();
         let mut content_span: Option<Span> = None;
-        let string_value = match arg.kind() {
-            "string_literal" | "interpolated_string_literal" => {
+        let string_value = match arg.kind_of() {
+            Kind::StringLiteral | Kind::InterpolatedStringLiteral => {
                 // The content span lets plugins address positions inside the
                 // string without hardcoding quote-length offsets. An empty
                 // literal has no content: its value is "" and it has no span.
@@ -691,16 +691,16 @@ impl<'a> Builder<'a> {
             // `autoquoted_bareword` is a fat-comma key (`key => value`)
             // — its text IS the value, never const-folded (a key that
             // happens to match a constant name is still that key).
-            "autoquoted_bareword" => Some(text.clone()),
+            Kind::AutoquotedBareword => Some(text.clone()),
             // A positional `bareword` arg may be a constant — fold it
             // through the constant table (`$app->plugin(EXTRA)` where
             // `use constant EXTRA => 'Gizmos'`). Falls back to the raw
             // token when it names no constant.
-            "bareword" => self
+            Kind::Bareword => self
                 .resolve_constant_strings(&text, arg)
                 .and_then(|f| f.into_iter().next())
                 .or_else(|| Some(text.clone())),
-            "scalar" | "array" | "hash" => {
+            Kind::Scalar | Kind::Array | Kind::Hash => {
                 self.resolve_constant_strings(&text, arg).and_then(|f| f.into_iter().next())
             }
             _ => None,
@@ -717,7 +717,7 @@ impl<'a> Builder<'a> {
         }
         self.emit_expr_witness(arg);
         let inferred_type = self.bag_query_expr_span(node_to_span(arg));
-        let sub_params = if arg.kind() == "anonymous_subroutine_expression" {
+        let sub_params = if arg.is(Kind::AnonymousSubroutineExpression) {
             self.extract_anonymous_sub_params(arg)
         } else {
             Vec::new()
@@ -751,7 +751,7 @@ impl<'a> Builder<'a> {
         // type the first param of. Same name extraction the return-edge path
         // uses; bare names stay bare so the deferred resolver scopes them to
         // the current package.
-        let ref_sub_name = if arg.kind() == "refgen_expression" {
+        let ref_sub_name = if arg.is(Kind::RefgenExpression) {
             self.extract_names_from_refgen(arg).into_iter().next()
         } else {
             None
