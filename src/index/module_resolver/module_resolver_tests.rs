@@ -889,6 +889,13 @@ fn a_site_packages_module_lands_named_from_its_search_root() {
         stored[0].analysis.pack.file_module.as_ref().map(|f| f.segments.join("."))
     };
     assert_eq!(module_of("acme.models").as_deref(), Some("acme.models"));
+    // the module's members are its candidates too, so an identity a project
+    // names (`acme.models.Base`, a parent) is declared by something indexed
+    let models = canon(&format!("{SITE}/acme/models.py"));
+    for class in ["acme.models.Base", "acme.models.Root"] {
+        assert_eq!(idx.def_candidates(class).iter().map(|m| m.path.clone()).collect::<Vec<_>>(), [models.clone()], "{class}");
+        assert_eq!(idx.get_cached(class).map(|m| m.path.clone()), Some(models.clone()), "{class}");
+    }
     assert_eq!(module_of("six").as_deref(), Some("six"), "named from site-packages, not the workspace root");
     assert_eq!(idx.get_cached("six").map(|m| m.path.clone()), Some(canon(&format!("{SITE}/six.py"))));
     assert!(idx.land_pack_module(&map, "app.user", python).1.is_none(), "the project's own module is the walk's");

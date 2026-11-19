@@ -674,6 +674,44 @@ impl IndexCore {
         Some(held.into_iter().map(|(_, m)| m).collect())
     }
 
+    /// The members of `module_name` its files declare, placed with them: a
+    /// language whose names reach a module's members (python's
+    /// `pkg.models.Base` in `pkg/models.py`) asks for the member, and the
+    /// map places it at the module's file. Each is a placement of its own,
+    /// so a move renews or sweeps it like the module's, and a name the map
+    /// places elsewhere (another package in the same Perl file) is left to
+    /// the file that spells it.
+    pub(crate) fn place_members(
+        &self,
+        map: &crate::build::dependency_map::DependencyMap,
+        module_name: &str,
+        located: &[crate::util::canonical_path::CanonicalPath],
+        map_gen: u64,
+    ) {
+        use crate::build::dependency_map::Ask;
+        for (precedence, path) in located.iter().enumerate() {
+            let Some(names) = self.records.dependency_names(path) else { continue };
+            let Some(held) = self.all_files.get(path).map(|e| e.clone()) else { continue };
+            for (name, _) in names {
+                // A member's name extends its module's (`member_of` strips
+                // trailing segments), so no other name needs the map asked.
+                if name.len() <= module_name.len() || !name.starts_with(module_name) {
+                    continue;
+                }
+                let here = map
+                    .locate(&Ask::Name(name.clone()))
+                    .iter()
+                    .any(|l| l.path == *path && l.loads_as.as_deref() == Some(module_name));
+                if !here {
+                    continue;
+                }
+                self.records.place(path, file_records::Placement { name: name.clone(), precedence, map_gen });
+                self.all_defs.entry(name.clone()).or_default().upsert(held.clone());
+                self.derive_slot(&name);
+            }
+        }
+    }
+
     /// The idle sweep after a map move: every placement an older generation
     /// made and the current one did not renew is taken back, a file with no
     /// placement left is retired, and the memo forgets the older asks.

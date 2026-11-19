@@ -66,15 +66,17 @@ pub(crate) fn land_module(
 ) -> (Option<Providers>, Option<Providers>) {
     let located = located_as(map, module_name);
     if let Some(held) = core.restamp_placed(&located, module_name, map_gen) {
+        core.place_members(map, module_name, &located, map_gen);
         return (None, Some(held));
     }
-    let parsed = parse_providers(module_name, located, parse, rows);
+    let parsed = parse_providers(module_name, located.clone(), parse, rows);
     let whole = core.tier_providers(parsed);
     let persisted = match (rows, &whole) {
         (Some(conn), Some(providers)) => providers.iter().all(|m| persist_dependency(conn, m)),
         _ => false,
     };
     let stored = core.land_providers(module_name, whole.clone(), persisted, strip, map_gen, parse.door());
+    core.place_members(map, module_name, &located, map_gen);
     (whole, stored)
 }
 

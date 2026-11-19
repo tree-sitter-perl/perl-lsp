@@ -139,6 +139,25 @@ impl FileRecords {
     }
 
     /// Every dependency placement older than `map_gen`, as `(path, name)`.
+    /// The names a dependency at `path` declares, as its landing recorded
+    /// them; `None` for a path the tier does not hold.
+    pub(crate) fn dependency_names(&self, path: &CanonicalPath) -> Option<Vec<(String, bool)>> {
+        self.0.get(path).filter(|r| r.role == FileRole::Dependency).map(|r| r.names.clone())
+    }
+
+    /// Place a held dependency under one more name, or renew that
+    /// placement. `false` when the tier does not hold `path`.
+    pub(crate) fn place(&self, path: &CanonicalPath, placement: Placement) -> bool {
+        let Some(mut r) = self.0.get_mut(path).filter(|r| r.role == FileRole::Dependency) else {
+            return false;
+        };
+        match r.loads_as.iter_mut().find(|p| p.name == placement.name) {
+            Some(slot) => *slot = placement,
+            None => r.loads_as.push(placement),
+        }
+        true
+    }
+
     pub(crate) fn stale_placements(&self, map_gen: u64) -> Vec<(CanonicalPath, String)> {
         let mut out = Vec::new();
         for r in self.0.iter() {
