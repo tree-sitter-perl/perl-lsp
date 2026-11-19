@@ -736,9 +736,7 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn workspace_root_path(&self) -> Option<std::path::PathBuf> {
-        self.workspace_root()
-            .as_deref()
-            .and_then(crate::index::module_resolver::uri_to_path)
+        self.workspace_root().map(|r| r.dir().to_path_buf())
     }
 
     fn modules_with_symbol(&self, name: &str) -> Vec<String> {

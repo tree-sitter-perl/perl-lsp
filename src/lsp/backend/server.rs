@@ -10,14 +10,15 @@ impl LanguageServer for Backend {
         let root = params
             .root_uri
             .as_ref()
-            .map(|u| u.as_str())
+            .and_then(workspace_root_of)
             .or_else(|| {
                 params
                     .workspace_folders
                     .as_ref()
                     .and_then(|f| f.first())
-                    .map(|f| f.uri.as_str())
+                    .and_then(|f| workspace_root_of(&f.uri))
             });
+        let root = root.as_ref();
         // Long-lived process: the overlay + rehydration LRU amortize here
         // (one-shot CLI modes leave both off — bisected at 2x warm-harness
         // wall). BEFORE set_workspace_root: the resolver wakes on the root
@@ -851,11 +852,7 @@ impl LanguageServer for Backend {
             .to_file_path()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-        let root = self
-            .module_index
-            .workspace_root()
-            .and_then(|r| Url::parse(&r).ok())
-            .and_then(|u| u.to_file_path().ok());
+        let root = self.module_index.workspace_root().map(|r| r.dir().to_path_buf());
         self.run_query(move |cx| {
             let links: Vec<DocumentLink> = symbols::document_links(
                 &text,

@@ -201,7 +201,7 @@ pub(crate) struct ResolveNotify {
 
 /// Channel for workspace root from initialize() → resolver thread.
 pub(crate) struct WorkspaceRootChannel {
-    pub root: Mutex<Option<Option<String>>>,
+    pub root: Mutex<Option<Option<crate::util::canonical_path::WorkspaceRoot>>>,
     pub condvar: Condvar,
 }
 

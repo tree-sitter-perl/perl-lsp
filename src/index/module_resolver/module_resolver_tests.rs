@@ -110,15 +110,6 @@ sub new {
 }
 
 #[test]
-fn test_uri_to_path() {
-    assert_eq!(
-        uri_to_path("file:///Users/foo/project"),
-        Some(PathBuf::from("/Users/foo/project"))
-    );
-    assert_eq!(uri_to_path("http://example.com"), None);
-}
-
-#[test]
 fn entrypoint_scan_finds_shebang_scripts_in_conventional_dirs() {
     let dir = std::env::temp_dir().join(format!("qx-entry-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("bin")).unwrap();
@@ -1237,7 +1228,7 @@ fn perl_module_completion_lists_the_search_roots_unparsed() {
     }
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     idx.set_search_roots_for_test(&[ws.join("local/lib/perl5"), ws.join("lib")]);
-    idx.set_workspace_root(Some(&format!("file://{}", ws.display())));
+    idx.set_workspace_root(Some(&crate::util::canonical_path::WorkspaceRoot::resolve(&ws)));
     let mut got = idx.complete_module_names("");
     got.sort();
     assert_eq!(

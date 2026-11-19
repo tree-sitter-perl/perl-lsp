@@ -1266,7 +1266,7 @@ fn thread_path_resolution_feeds_loader_config_shapes() {
     let idx = ModuleIndex::new_for_test();
     // file:// spelling — the thread's project-lib discovery strips the
     // scheme to find `lib/`.
-    idx.set_workspace_root(Some(&format!("file://{}", dir.display())));
+    idx.set_workspace_root(Some(&crate::util::canonical_path::WorkspaceRoot::resolve(&dir)));
     idx.request(crate::build::dependency_map::Ask::Name("My::App".to_string()));
     assert!(
         idx.wait_resolved("My::App", std::time::Duration::from_secs(30)),
@@ -1418,7 +1418,7 @@ async fn resolver_fires_refresh_after_every_drained_batch() {
         )
         .unwrap();
     }
-    idx.set_workspace_root(Some(&format!("file://{}", dir.display())));
+    idx.set_workspace_root(Some(&crate::util::canonical_path::WorkspaceRoot::resolve(&dir)));
 
     for name in ["Batch::A", "Batch::B", "Batch::C"] {
         let before = fires.load(std::sync::atomic::Ordering::SeqCst);
@@ -2981,7 +2981,7 @@ fn a_map_move_restamps_what_it_still_places_and_sweeps_the_rest() {
 
     let idx = ModuleIndex::new_for_test();
     idx.set_search_roots_for_test(&[r1.clone(), r2.clone()]);
-    idx.set_workspace_root(Some(&format!("file://{}", base.join("proj").display())));
+    idx.set_workspace_root(Some(&crate::util::canonical_path::WorkspaceRoot::resolve(base.join("proj"))));
     for n in ["Kept", "Shadowed", "Gone", "Late"] {
         idx.request(Ask::Name(n.to_string()));
     }
@@ -3070,7 +3070,7 @@ fn a_map_move_keeps_the_rows_and_answers_from_the_new_map() {
     // thread, which would otherwise read the real `@INC` over it.
     let idx = ModuleIndex::new_for_test();
     idx.set_search_roots_for_test(&[ra.clone(), r1.clone()]);
-    idx.set_workspace_root(Some(&format!("file://{}", base.join("proj").display())));
+    idx.set_workspace_root(Some(&crate::util::canonical_path::WorkspaceRoot::resolve(base.join("proj"))));
     land(&idx, &[ra.clone(), r1.clone()]);
     assert_eq!(lent(&idx), ["one"]);
     let stored = module_cache::load_dependency_row(&conn, &child).expect("Child's row");
@@ -3087,7 +3087,7 @@ fn a_map_move_keeps_the_rows_and_answers_from_the_new_map() {
     // back from its row, and still lends what the new map places.
     let next = ModuleIndex::new_for_test();
     next.set_search_roots_for_test(&[ra.clone(), r2.clone()]);
-    next.set_workspace_root(Some(&format!("file://{}", base.join("proj").display())));
+    next.set_workspace_root(Some(&crate::util::canonical_path::WorkspaceRoot::resolve(base.join("proj"))));
     land(&next, &[ra.clone(), r2.clone()]);
     assert_eq!(lent(&next), ["two"]);
     assert_eq!(rows(&conn), 3, "one row per file, whichever map wrote it");
@@ -3123,7 +3123,7 @@ fn a_landed_dependency_records_the_surface_its_row_describes() {
     let land = |rows: Option<&rusqlite::Connection>| -> ModuleIndex {
         let idx = ModuleIndex::new_for_test();
         idx.set_search_roots_for_test(&[inc.clone()]);
-        idx.set_workspace_root(Some(&format!("file://{}", base.join("proj").display())));
+        idx.set_workspace_root(Some(&crate::util::canonical_path::WorkspaceRoot::resolve(base.join("proj"))));
         idx.wait_idle();
         let map = idx.dependency_map().expect("a published map");
         let mut parser = crate::index::module_resolver::create_parser();
@@ -3182,7 +3182,7 @@ fn a_name_the_project_holds_is_answered_without_the_tier() {
 
     let idx = ModuleIndex::new_for_test();
     idx.set_search_roots_for_test(&[base.join("inc")]);
-    idx.set_workspace_root(Some(&format!("file://{}", base.join("proj").display())));
+    idx.set_workspace_root(Some(&crate::util::canonical_path::WorkspaceRoot::resolve(base.join("proj"))));
     let mut parser = crate::index::module_resolver::create_parser();
     let tree = parser.parse(src, None).unwrap();
     idx.register_workspace_module(mine.clone(), Arc::new(crate::build::builder::build(&tree, src.as_bytes())));

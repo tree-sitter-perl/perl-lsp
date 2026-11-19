@@ -79,8 +79,8 @@ impl Backend {
             // in-RAM copy registered below is FULL (never stripped), so the
             // resident sweep covers it until the next bulk index persists a
             // new generation.
-            let ws_key = module_index.workspace_root();
-            let conn = crate::index::module_cache::open_cache_db(ws_key.as_deref(), "perl");
+            let ws_root = module_index.workspace_root();
+            let conn = crate::index::module_cache::open_cache_db(ws_root.as_ref().map(|r| r.cache_key()), "perl");
             for (path, typ) in perl_changes {
                 let canon = crate::util::canonical_path::CanonicalPath::resolve(path.as_path()).into_path_buf();
                 // A file under the dependency map's tier root is the tier's,
@@ -265,7 +265,7 @@ impl Backend {
             // precedes open(). Without that order a doc opened between the
             // sweep's collection and the guard's open() would defer into a
             // window nobody republishes.
-            let Some(root_uri) = root else {
+            let Some(root) = root else {
                 // Pack keeps its early-out shape (no heal without a root);
                 // perl must still sweep so a publish deferred against the
                 // kickoff-to-early-out window converges.
@@ -274,13 +274,7 @@ impl Backend {
                 }
                 return;
             };
-            let Some(root_path) = root_uri.strip_prefix("file://") else {
-                if want_enrichment {
-                    Self::open_perl_gate_then_heal(&_done, &heal_ctx, true);
-                }
-                return;
-            };
-            let root_path = PathBuf::from(root_path);
+            let root_path = root.dir().to_path_buf();
             let rt = tokio::runtime::Handle::current();
             let token = NumberOrString::String("perl-lsp/workspace-index".into());
             if progress {
@@ -405,7 +399,7 @@ impl Backend {
                 crate::index::module_resolver::index_pack_language(
                     crate::build::language_driver::LanguageRegistry::served(),
                     &root_path,
-                    Some(root_uri.as_str()),
+                    Some(root.cache_key()),
                     &module_index,
                     cb_ref,
                     bag_cache_bytes,
@@ -451,7 +445,7 @@ impl Backend {
             // (its own lock + H9-1 generation guard; open docs are covered by
             // `heal_open_docs` below, so no per-path refresh set is needed).
             if let Some(inv) = pack_invalidator {
-                inv.finish_bulk_index(Some(root_uri.as_str()), &module_index);
+                inv.finish_bulk_index(Some(root.cache_key()), &module_index);
             }
             // Heal the cold-open degraded window: the index has now LANDED
             // (the latch marked KICKOFF; this is the completion signal).

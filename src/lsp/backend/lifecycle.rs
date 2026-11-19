@@ -296,7 +296,7 @@ impl Backend {
         let heal_ctx = self.pack_heal_ctx();
         tokio::spawn(async move {
             let outcome = tokio::task::spawn_blocking(move || {
-                invalidator.file_changed(root.as_deref(), &module_index, &open_docs, &path, deleted)
+                invalidator.file_changed(root.as_ref().map(|r| r.cache_key()), &module_index, &open_docs, &path, deleted)
             })
             .await;
             let Ok(outcome) = outcome else { return };

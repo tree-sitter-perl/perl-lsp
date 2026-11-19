@@ -76,6 +76,37 @@ impl From<CanonicalPath> for PathBuf {
     }
 }
 
+/// The workspace a process serves: its directory, resolved once where the
+/// root enters (LSP `initialize`, a CLI argument), and the key its
+/// per-project cache is filed under, derived from that one spelling. The
+/// server and the CLI mint it the same way, so a symlinked, trailing-slash
+/// or percent-encoded root still addresses the store `--check` warmed and
+/// `--clear-cache` clears.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WorkspaceRoot {
+    dir: CanonicalPath,
+    cache_key: String,
+}
+
+impl WorkspaceRoot {
+    pub fn resolve(dir: impl Into<PathBuf>) -> Self {
+        let dir = CanonicalPath::resolve(dir);
+        // `file://` + the unencoded path is the spelling every existing
+        // cache dir was hashed from; changing it re-colds every project.
+        let cache_key = format!("file://{}", dir.display());
+        WorkspaceRoot { dir, cache_key }
+    }
+
+    pub fn dir(&self) -> &CanonicalPath {
+        &self.dir
+    }
+
+    /// What `cache_dir_for_workspace` hashes. A key, never a path to parse.
+    pub fn cache_key(&self) -> &str {
+        &self.cache_key
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

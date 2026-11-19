@@ -730,14 +730,12 @@ pub fn load_bundled(engine: Arc<Engine>) -> Vec<Box<dyn FrameworkPlugin>> {
 static WORKSPACE_ROOT: std::sync::RwLock<Option<std::path::PathBuf>> =
     std::sync::RwLock::new(None);
 
-/// Record the workspace root for repo-local plugin discovery. Accepts the
-/// same `file://…` URI (or bare path) passed to the module index; `None`
-/// clears it (no project root → no repo-local plugins). Call this before
-/// the first `build()` so the process-wide registry sees it.
-pub fn set_workspace_root(root: Option<&str>) {
-    let path = root.map(|r| {
-        std::path::PathBuf::from(r.strip_prefix("file://").unwrap_or(r))
-    });
+/// Record the workspace root for repo-local plugin discovery — the same
+/// value handed to the module index; `None` clears it (no project root →
+/// no repo-local plugins). Call this before the first `build()` so the
+/// process-wide registry sees it.
+pub fn set_workspace_root(root: Option<&crate::util::canonical_path::WorkspaceRoot>) {
+    let path = root.map(|r| r.dir().to_path_buf());
     if let Ok(mut guard) = WORKSPACE_ROOT.write() {
         *guard = path;
     }
@@ -755,8 +753,8 @@ pub fn workspace_root() -> Option<std::path::PathBuf> {
 /// 1. `$PERL_LSP_PLUGIN_DIR` — explicit global opt-in (a power user's
 ///    personal plugin collection), honored whenever it points at a dir.
 /// 2. `<workspace-root>/.perl-lsp/` — a project shipping plugins for its
-///    own kits, with zero global config. The root is whatever the client
-///    sent at `initialize` (or the CLI's root arg), the exact value the
+///    own kits, with zero global config. The root is the `WorkspaceRoot`
+///    minted from `initialize` (or the CLI's root arg), the value the
 ///    SQLite cache is keyed on — pinned here, never re-derived, so the
 ///    fingerprint that invalidates the cache and the plugins actually
 ///    loaded stay in lockstep. With no root set (single-file CLI modes),

@@ -15,7 +15,7 @@ use crate::index::module_index::{FrontDoor, Outcome};
 pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>) {
     // Wait for workspace root from initialize() for per-project cache path.
     let ws_root = wait_for_workspace_root(&core.workspace_root);
-    let root_path = ws_root.as_ref().and_then(|u| uri_to_path(u));
+    let root_path = ws_root.as_ref().map(|r| r.dir().to_path_buf());
 
     // The map, read before anything can query: an origin's visibility rank
     // prefix-matches candidates against its search roots, and a reader may
@@ -35,7 +35,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     // parsing it, so a warm start lands what a cold one would. No gate reads
     // the map: a dependency row describes its file alone, valid by its own
     // stamp, whichever map located it.
-    let db = module_cache::open_cache_db(ws_root.as_deref(), served.id());
+    let db = module_cache::open_cache_db(ws_root.as_ref().map(|r| r.cache_key()), served.id());
     // The batch's parses read rows through their own connections, checked
     // out of one pool for the thread's life (`prepare_batch`).
     let db_path: Option<std::path::PathBuf> = db.as_ref().and_then(|c| c.path()).filter(|p| !p.is_empty()).map(std::path::PathBuf::from);
@@ -78,7 +78,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     let mut cpanfile_total = 0usize;
     let mut cpanfile_done = 0usize;
     if let (Some(srv), true) = (&server, hub) {
-        if let Some(root_path) = ws_root.as_ref().and_then(|u| uri_to_path(u)) {
+        if let Some(root_path) = ws_root.as_ref().map(|r| r.dir().to_path_buf()) {
             let cpanfile_modules = cpanfile::parse_cpanfile(&root_path);
             let to_resolve: Vec<Ask> = cpanfile_modules
                 .into_iter()
@@ -501,7 +501,7 @@ fn take_batch(queue: &ResolveQueue, pending: &mut Vec<Ask>) -> Option<Vec<Ask>> 
 
 // ---- Internal helpers ----
 
-fn wait_for_workspace_root(ws_root_channel: &WorkspaceRootChannel) -> Option<String> {
+fn wait_for_workspace_root(ws_root_channel: &WorkspaceRootChannel) -> Option<crate::util::canonical_path::WorkspaceRoot> {
     let mut guard = ws_root_channel.root.lock().unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while guard.is_none() {
@@ -526,10 +526,6 @@ fn warm_available(core: &Arc<IndexCore>) {
     rayon::spawn(move || {
         core.available_names();
     });
-}
-
-pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
-    uri.strip_prefix("file://").map(PathBuf::from)
 }
 
 #[cfg(test)]

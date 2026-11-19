@@ -228,7 +228,7 @@ impl PackInvalidator {
     /// consumer rule maps it to the URIs whose gather must re-run.
     pub fn file_changed(
         &self,
-        root_uri: Option<&str>,
+        cache_key: Option<&str>,
         index: &ModuleIndex,
         open_docs: &OpenDocs,
         path: &Path,
@@ -240,7 +240,7 @@ impl PackInvalidator {
         }
         let swept = {
             let _g = self.change_lock.lock().unwrap_or_else(|e| e.into_inner());
-            self.pack_file_changed(root_uri, index, &canon, deleted)
+            self.pack_file_changed(cache_key, index, &canon, deleted)
         };
         // Open consumers re-analyze AFTER the eviction so their gather runs
         // cold against the new bytes. Off the serialization lock — the sweep
@@ -257,7 +257,7 @@ impl PackInvalidator {
     /// generation) and outranks whatever the bulk pass registered from
     /// earlier bytes. Open-doc refresh is NOT computed here — the
     /// end-of-index heal re-publishes every open pack doc anyway.
-    pub fn finish_bulk_index(&self, root_uri: Option<&str>, index: &ModuleIndex) {
+    pub fn finish_bulk_index(&self, cache_key: Option<&str>, index: &ModuleIndex) {
         let deferred = self.coord.finish_index();
         if deferred.is_empty() {
             return;
@@ -268,7 +268,7 @@ impl PackInvalidator {
         );
         let _g = self.change_lock.lock().unwrap_or_else(|e| e.into_inner());
         for (path, deleted) in deferred {
-            self.pack_file_changed(root_uri, index, &path, deleted);
+            self.pack_file_changed(cache_key, index, &path, deleted);
         }
     }
 
@@ -350,7 +350,7 @@ impl PackInvalidator {
     /// which hold `change_lock` and consult the coordinator.
     fn pack_file_changed(
         &self,
-        root_uri: Option<&str>,
+        cache_key: Option<&str>,
         index: &ModuleIndex,
         path: &Path,
         deleted: bool,
@@ -485,7 +485,7 @@ impl PackInvalidator {
         // COMMIT / ROLLBACK; the strip licence is a LANDED blob for that
         // path — `save_to_db`'s verdict, under a transaction that committed
         // — and exactly one thing gets to decide it.
-        let conn = module_cache::open_cache_db(root_uri, lang);
+        let conn = module_cache::open_cache_db(cache_key, lang);
         if let Some(ref conn) = conn {
             if deleted {
                 module_cache::delete_ref_rows(conn, &canon_str);
