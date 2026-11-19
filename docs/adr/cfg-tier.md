@@ -291,7 +291,9 @@ bitflags! { pub struct Ends: u8 { const COMPLETES = 1; const UNWINDS = 2; const 
   it, gated by the calls it makes there. What sits in a body nested inside
   it is the nested callable's. A body the parser could not read states
   nothing. A pack document names the bodies (`@ctl.body`) and the calls
-  its statements run (`@ctl.gate`), and every body it names mints;
+  its statements run (`@ctl.gate`, each led out to its statement by the
+  `gate` link walk, one level of store or parens per link), and every
+  body it names mints;
   Perl mints the bodies its gates reach. An arm whose path runs into a call
   that does not come back ends the way that call does, so a wrapper round
   `die` unwinds. A throw or a call inside the body of a `try` that catches

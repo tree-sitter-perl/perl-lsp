@@ -576,11 +576,16 @@
 (function_definition body: (compound_statement) @ctl.body)
 (method_declaration body: (compound_statement) @ctl.body)
 (anonymous_function body: (compound_statement) @ctl.body)
-(expression_statement
-  [(function_call_expression) (member_call_expression) (nullsafe_member_call_expression) (scoped_call_expression)] @ctl.gate)
-(expression_statement
-  (assignment_expression
-    right: [(function_call_expression) (member_call_expression) (nullsafe_member_call_expression) (scoped_call_expression)] @ctl.gate))
+(expression_statement [(function_call_expression) (member_call_expression) (nullsafe_member_call_expression) (scoped_call_expression)] @ctl.gate)
+(assignment_expression right: [(function_call_expression) (member_call_expression) (nullsafe_member_call_expression) (scoped_call_expression)] @ctl.gate)
+(parenthesized_expression [(function_call_expression) (member_call_expression) (nullsafe_member_call_expression) (scoped_call_expression)] @ctl.gate)
+; The `gate` walk, rooted at `@ctl.gate`: each node links to the one a
+; level out that runs it whenever it runs, so `a = (b = f())` gates at any
+; depth. The walk's end is the statement.
+(expression_statement (_) @link.from.gate) @link.outer
+(assignment_expression right: (_) @link.from.gate) @link.outer
+((parenthesized_expression (_) @link.from.gate) @link.outer
+ (#not-is-kind? @link.from.gate comment))
 
 ; ---- how a call ends ----
 ; A `never` return says a call never comes back; how it leaves is the

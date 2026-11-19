@@ -254,19 +254,6 @@ fn control_view(ad: &Adorned<'_, '_>) -> crate::model::file_analysis::ControlVie
             site = up.id();
         }
     };
-    // The statement a gate sits in, climbing no further than the block or
-    // arm around it (in Python a one-statement body is the same site as its
-    // statement): what runs in sequence there is the statement.
-    let statement_in_sequence = |site: crate::cst::NodeId| {
-        let node = ad.tree.node(site);
-        std::iter::once(node).chain(node.enclosing_sites()).find_map(|n| {
-            let id = n.id();
-            match in_sequence(id) {
-                true => Some(true),
-                false => (arm_sites.contains(&id) || blocks.contains(&id)).then_some(false),
-            }
-        }) == Some(true)
-    };
     let mut returns = Vec::new();
     let mut unread = Vec::new();
     let mut by_match: std::collections::BTreeMap<usize, Vec<(CtlCap, usize, Span, &str, tree_sitter::Point)>> = Default::default();
@@ -278,11 +265,13 @@ fn control_view(ad: &Adorned<'_, '_>) -> crate::model::file_analysis::ControlVie
             if c == CtlCap::Body && ad.tree.node(e.site).ts().has_error() {
                 unread.push(e.span());
             }
-            // A gate is a call its statement runs: the statement holding it
-            // (the call itself, or the assignment or declaration storing its
-            // value) is what runs in sequence.
+            // A gate is a call its statement runs: the statement the `gate`
+            // walk reached is what runs in sequence.
             let placed = match c {
-                CtlCap::Gate => statement_in_sequence(e.site),
+                CtlCap::Gate => match e.payload.as_deref() {
+                    Some(Payload::Runs(statement)) => in_sequence(*statement),
+                    _ => in_sequence(e.site),
+                },
                 c if c.is_leave() => in_sequence(e.site),
                 _ => true,
             };
