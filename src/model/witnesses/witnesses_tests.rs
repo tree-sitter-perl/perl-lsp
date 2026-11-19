@@ -1491,3 +1491,71 @@ fn an_element_of_a_mixed_sequence_is_any_of_its_values() {
     assert!(matches!(want, InferredType::Union(_)));
     assert_eq!(ReducerRegistry::with_defaults().query(&bag, &q), ReducedValue::Type(want));
 }
+
+// ---- How an expression ends: the walk's own cycle guard ----
+
+fn wends(att: WitnessAttachment, payload: WitnessPayload) -> Witness {
+    Witness { attachment: att, source: WitnessSource::Builder("test".into()), payload, span: span(0, 0, 0, 1) }
+}
+
+fn call_ref(i: usize) -> WitnessAttachment {
+    WitnessAttachment::Expression(RefIdx(i as u32))
+}
+
+/// A call reached through its ref edges onto itself where several nodes
+/// collapse onto one key (a C macro expansion remapped onto its call site).
+/// The edge adds nothing: what the call states answers, and one whose only
+/// witness is the edge is the top, never "does not complete".
+#[test]
+fn a_call_edging_to_itself_ends_as_it_states() {
+    let mut bag = WitnessBag::new();
+    bag.push(wends(call_ref(0), WitnessPayload::Edge(call_ref(0))));
+    assert_eq!(query_expr_ends(&bag, &call_ref(0), None), Ends::all(), "the edge alone is no evidence");
+    bag.push(wends(call_ref(0), WitnessPayload::Effect(Effect::Ends(Ends::EXITS))));
+    assert_eq!(query_expr_ends(&bag, &call_ref(0), None), Ends::EXITS);
+}
+
+/// A longer cycle joins what every call on it states.
+#[test]
+fn a_cycle_of_calls_joins_what_each_states() {
+    let mut bag = WitnessBag::new();
+    bag.push(wends(call_ref(0), WitnessPayload::Edge(call_ref(1))));
+    bag.push(wends(call_ref(1), WitnessPayload::Edge(call_ref(0))));
+    bag.push(wends(call_ref(1), WitnessPayload::Effect(Effect::Ends(Ends::UNWINDS))));
+    assert_eq!(query_expr_ends(&bag, &call_ref(0), None), Ends::UNWINDS);
+    assert_eq!(query_expr_ends(&bag, &call_ref(1), None), Ends::UNWINDS);
+}
+
+/// Value flow is not how an expression ends: an assignment's edge to its
+/// right side is not followed. The calls a statement runs are named where
+/// the statement is minted (gates, guard exits).
+#[test]
+fn value_flow_is_not_how_an_expression_ends() {
+    let (assign, rhs) = (span(0, 0, 0, 9), span(0, 5, 0, 9));
+    let mut bag = WitnessBag::new();
+    bag.push(wends(WitnessAttachment::Expr(assign), WitnessPayload::Edge(WitnessAttachment::Expr(rhs))));
+    bag.push(wends(WitnessAttachment::Expr(rhs), WitnessPayload::Effect(Effect::Ends(Ends::UNWINDS))));
+    assert_eq!(query_expr_ends(&bag, &WitnessAttachment::Expr(assign), None), Ends::all());
+    assert_eq!(query_expr_ends(&bag, &WitnessAttachment::Expr(rhs), None), Ends::UNWINDS);
+}
+
+/// A chain of edges far longer than a small thread's stack holds degrades to
+/// the top past the depth budget instead of aborting the process.
+#[test]
+fn a_long_chain_of_calls_does_not_overflow_the_stack() {
+    let answer = std::thread::Builder::new()
+        .stack_size(SMALL_STACK)
+        .spawn(|| {
+            const HOPS: usize = 5_000;
+            let mut bag = WitnessBag::new();
+            for i in 0..HOPS {
+                bag.push(wends(call_ref(i), WitnessPayload::Edge(call_ref(i + 1))));
+            }
+            bag.push(wends(call_ref(HOPS), WitnessPayload::Effect(Effect::Ends(Ends::EXITS))));
+            query_expr_ends(&bag, &call_ref(0), None)
+        })
+        .expect("spawn")
+        .join()
+        .expect("the walk must not overflow the stack");
+    assert_eq!(answer, Ends::all(), "past the depth budget the answer is the top");
+}
