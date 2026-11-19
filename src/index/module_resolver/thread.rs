@@ -40,6 +40,10 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     // the map: a dependency row describes its file alone, valid by its own
     // stamp, whichever map located it.
     let db = module_cache::open_cache_db(ws_root.as_deref(), served.id());
+    // The batch's parses read rows through their own connections, checked
+    // out of one pool for the thread's life (`prepare_batch`).
+    let db_path: Option<std::path::PathBuf> = db.as_ref().and_then(|c| c.path()).filter(|p| !p.is_empty()).map(std::path::PathBuf::from);
+    let readers = module_cache::RetainedReader::new();
     if let (Some(conn), false) = (&db, hub) {
         let _ = module_cache::validate_input_fingerprint(conn, served.analysis_input_fingerprint());
     }
@@ -199,6 +203,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         // always ends with a fire — diagnostics converge once the queue
         // drains.
         let mut resolved_any = false;
+        let mut prepared = prepare_batch(&core, &map, map_gen, &batch, served, db_path.as_deref(), &readers);
         for ask in batch {
             if core.asked.get(&ask).is_some_and(|e| e.0 == map_gen) {
                 continue;
@@ -206,7 +211,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
             if let Ask::File(path) = &ask {
                 crate::util::ghost_stats::count("resolver.file_landed");
                 let (whole, stored) = crate::util::ghost_stats::timed("resolver.land", || {
-                    land_file(&core, db.as_ref(), &map, map_gen, path, &mut parse, strip)
+                    land_file(&core, db.as_ref(), &map, map_gen, path, &mut parse, &mut prepared, strip)
                 });
                 if let Some(providers) = &whole {
                     core.ask(descent(providers, prefetch));
@@ -218,23 +223,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                 continue;
             }
             let names: Vec<String> = match &ask {
-                // A project file answers the name as written. Otherwise the
-                // name lands as the modules the map places it under: itself,
-                // or the module it is a member of (`pkg.models.Base` loads
-                // `pkg.models`).
-                Ask::Name(n) if core.project_answers(n) => vec![n.clone()],
-                Ask::Name(n) => {
-                    let mut names: Vec<String> = Vec::new();
-                    for l in map.locate(&ask) {
-                        if let Some(m) = l.loads_as.filter(|m| !names.contains(m)) {
-                            names.push(m);
-                        }
-                    }
-                    if names.is_empty() {
-                        names.push(n.clone());
-                    }
-                    names
-                }
+                Ask::Name(n) => landing_names(&core, &map, n),
                 Ask::File(_) => unreachable!("a file lands by path, above"),
             };
             let mut landed = false;
@@ -247,7 +236,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                 log::info!("Resolving module '{}'", module_name);
                 crate::util::ghost_stats::count("resolver.module_resolved");
                 let (whole, stored) = crate::util::ghost_stats::timed("resolver.land", || {
-                    land_module(&core, db.as_ref(), &map, map_gen, &module_name, &mut parse, strip)
+                    land_module(&core, db.as_ref(), &map, map_gen, &module_name, &mut parse, &mut prepared, strip)
                 });
                 match &stored {
                     Some(providers) => log::info!(

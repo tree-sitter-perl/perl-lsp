@@ -407,7 +407,7 @@ impl ModuleIndex {
         parser: &mut tree_sitter::Parser,
     ) -> (Option<Providers>, Option<Providers>) {
         let mut parse = module_resolver::Parse::Hub(std::mem::replace(parser, tree_sitter::Parser::new()));
-        let out = module_resolver::land_module(&self.core, rows, map, self.core.map_generation(), module_name, &mut parse, false);
+        let out = module_resolver::land_module(&self.core, rows, map, self.core.map_generation(), module_name, &mut parse, &mut Default::default(), false);
         if let module_resolver::Parse::Hub(p) = parse {
             *parser = p;
         }
@@ -423,7 +423,7 @@ impl ModuleIndex {
         driver: &'static dyn crate::build::language_driver::LanguageDriver,
     ) -> (Option<Providers>, Option<Providers>) {
         let mut parse = module_resolver::Parse::Pack(driver);
-        module_resolver::land_module(&self.core, None, map, self.core.map_generation(), module_name, &mut parse, false)
+        module_resolver::land_module(&self.core, None, map, self.core.map_generation(), module_name, &mut parse, &mut Default::default(), false)
     }
 
     /// `land_file` through a pack language's door.
@@ -435,7 +435,7 @@ impl ModuleIndex {
         driver: &'static dyn crate::build::language_driver::LanguageDriver,
     ) -> (Option<Providers>, Option<Providers>) {
         let mut parse = module_resolver::Parse::Pack(driver);
-        module_resolver::land_file(&self.core, None, map, self.core.map_generation(), path, &mut parse, false)
+        module_resolver::land_file(&self.core, None, map, self.core.map_generation(), path, &mut parse, &mut Default::default(), false)
     }
 
     /// The dependency map read so far, if any.

@@ -725,7 +725,7 @@ fn a_landing_reads_the_files_row_in_place_of_parsing_it() {
     let mut parser = Parse::Hub(create_parser());
 
     let core = IndexCore::new();
-    let (_, stored) = land_module(&core, Some(&conn), &inc, 1, "Row::Cached", &mut parser, false);
+    let (_, stored) = land_module(&core, Some(&conn), &inc, 1, "Row::Cached", &mut parser, &mut Prepared::new(), false);
     assert!(stored.is_some());
     let canon = crate::util::canonical_path::CanonicalPath::resolve(pm.clone());
     let (key, source): (String, String) = conn
@@ -739,14 +739,79 @@ fn a_landing_reads_the_files_row_in_place_of_parsing_it() {
     std::fs::write(&pm, "package Row::Cached;\nsub bb { 1 }\n1;\n").unwrap();
     std::fs::File::options().write(true).open(&pm).unwrap().set_modified(mtime).unwrap();
     let core = IndexCore::new();
-    let (whole, _) = land_module(&core, Some(&conn), &inc, 1, "Row::Cached", &mut parser, false);
+    let (whole, _) = land_module(&core, Some(&conn), &inc, 1, "Row::Cached", &mut parser, &mut Prepared::new(), false);
     let names: Vec<String> = whole.unwrap()[0].analysis.symbols().iter().map(|s| s.name.clone()).collect();
     assert!(names.iter().any(|n| n == "aa") && !names.iter().any(|n| n == "bb"), "{names:?}");
 
-    let (_, missed) = land_module(&core, Some(&conn), &inc, 1, "Row::Absent", &mut parser, false);
+    let (_, missed) = land_module(&core, Some(&conn), &inc, 1, "Row::Absent", &mut parser, &mut Prepared::new(), false);
     assert!(missed.is_none());
     let rows: i64 = conn.query_row("SELECT COUNT(*) FROM modules", [], |r| r.get(0)).unwrap();
     assert_eq!(rows, 1, "a miss is never remembered");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A batch prepared in the pool lands what the serial landing lands: the
+/// same providers, in the same order, from the same rows. The rows are read
+/// through the reader pool, not the resolver's connection: a body changed
+/// under an unchanged stamp still answers from its row.
+#[test]
+fn a_prepared_batch_lands_what_a_serial_one_does() {
+    let root = std::env::temp_dir().join(format!("d9b_prepared_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let (a, b) = (root.join("a"), root.join("b"));
+    for (dir, body) in [(&a, "sub in_a { 1 }"), (&b, "sub in_b { 1 }")] {
+        std::fs::create_dir_all(dir.join("Prep")).unwrap();
+        std::fs::write(dir.join("Twin.pm"), format!("package Twin;\n{body}\n1;\n")).unwrap();
+    }
+    std::fs::write(a.join("Prep/One.pm"), "package Prep::One;\nsub aa { 1 }\n1;\n").unwrap();
+    std::fs::write(a.join("Prep/Two.pm"), "package Prep::Two;\nuse parent 'Twin';\nsub two { 1 }\n1;\n").unwrap();
+    let db_path = root.join("modules.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    module_cache::init_schema(&conn).unwrap();
+    let map = map_over(vec![a.clone(), b.clone()]);
+    let batch: Vec<Ask> = ["Prep::One", "Twin", "Prep::Two", "Prep::Absent"].map(|n| Ask::Name(n.to_string())).to_vec();
+    let driver = crate::build::language_driver::LanguageRegistry::served();
+    let reader = module_cache::RetainedReader::new();
+
+    let land_all = |core: &IndexCore, prepared: &mut Prepared| -> Vec<(String, Vec<String>)> {
+        let mut parse = Parse::of(driver);
+        let mut out = Vec::new();
+        for ask in &batch {
+            let Ask::Name(n) = ask else { unreachable!() };
+            for m in landing_names(core, &map, n) {
+                let (whole, _) = land_module(core, Some(&conn), &map, 1, &m, &mut parse, prepared, false);
+                for cm in whole.into_iter().flatten() {
+                    let mut syms: Vec<String> = cm.analysis.symbols().iter().map(|s| s.name.clone()).collect();
+                    syms.sort();
+                    out.push((cm.path.to_string_lossy().into_owned(), syms));
+                }
+            }
+        }
+        out
+    };
+
+    let serial = land_all(&IndexCore::new(), &mut Prepared::new());
+    assert_eq!(serial.len(), 4, "One, both Twins, Two: {serial:?}");
+
+    let core = IndexCore::new();
+    let mut prepared = prepare_batch(&core, &map, 1, &batch, driver, None, &reader);
+    assert_eq!(prepared.len(), 4, "every located file is prepared once");
+    assert_eq!(land_all(&core, &mut prepared), serial, "parsed in the pool");
+    assert!(prepared.is_empty(), "every prepared file was landed");
+
+    // Same size, same stamp, new body: only a row read answers `aa`.
+    let one = a.join("Prep/One.pm");
+    let mtime = std::fs::metadata(&one).unwrap().modified().unwrap();
+    std::fs::write(&one, "package Prep::One;\nsub bb { 1 }\n1;\n").unwrap();
+    std::fs::File::options().write(true).open(&one).unwrap().set_modified(mtime).unwrap();
+    let core = IndexCore::new();
+    let mut prepared = prepare_batch(&core, &map, 1, &batch, driver, Some(&db_path), &reader);
+    assert_eq!(land_all(&core, &mut prepared), serial, "read from the rows");
+
+    // A held file is left to its landing.
+    let core = IndexCore::new();
+    land_all(&core, &mut Prepared::new());
+    assert!(prepare_batch(&core, &map, 1, &batch, driver, None, &reader).is_empty());
     let _ = std::fs::remove_dir_all(&root);
 }
 

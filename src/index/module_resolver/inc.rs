@@ -62,6 +62,7 @@ pub(crate) fn land_module(
     map_gen: u64,
     module_name: &str,
     parse: &mut Parse,
+    prepared: &mut Prepared,
     strip: bool,
 ) -> (Option<Providers>, Option<Providers>) {
     let located = located_as(map, module_name);
@@ -69,7 +70,7 @@ pub(crate) fn land_module(
         core.place_members(map, module_name, &located, map_gen);
         return (None, Some(held));
     }
-    let parsed = parse_providers(module_name, located.clone(), parse, rows);
+    let parsed = parse_providers(module_name, located.clone(), parse, prepared, rows);
     let whole = core.tier_providers(parsed);
     let persisted = match (rows, &whole) {
         (Some(conn), Some(providers)) => providers.iter().all(|m| persist_dependency(conn, m)),
@@ -93,10 +94,11 @@ pub(crate) fn land_file(
     map_gen: u64,
     path: &CanonicalPath,
     parse: &mut Parse,
+    prepared: &mut Prepared,
     strip: bool,
 ) -> (Option<Providers>, Option<Providers>) {
     let label = path.to_string_lossy().into_owned();
-    let Some(whole) = core.tier_providers(parse_providers(&label, vec![path.clone()], parse, rows)) else {
+    let Some(whole) = core.tier_providers(parse_providers(&label, vec![path.clone()], parse, prepared, rows)) else {
         return (None, None);
     };
     let mut names: Vec<String> = map.locate(&Ask::File(path.clone())).into_iter().filter_map(|l| l.loads_as).collect();
@@ -142,7 +144,7 @@ pub fn resolve_and_parse_all(
 ) -> Option<Providers> {
     // The caller's parser, lent to the hub's parse and handed back.
     let mut parse = Parse::Hub(std::mem::replace(parser, Parser::new()));
-    let out = parse_providers(module_name, located_as(map, module_name), &mut parse, None);
+    let out = parse_providers(module_name, located_as(map, module_name), &mut parse, &mut Prepared::new(), None);
     if let Parse::Hub(p) = parse {
         *parser = p;
     }
@@ -166,14 +168,115 @@ fn parse_providers(
     module_name: &str,
     located: Vec<CanonicalPath>,
     parse: &mut Parse,
+    prepared: &mut Prepared,
     rows: Option<&rusqlite::Connection>,
 ) -> Option<Providers> {
-    // Accumulated apart from `resolver.land`: the read and parse are the
-    // share a parallel landing could take off the one thread.
+    // Accumulated apart from `resolver.land`: what is left on the one
+    // thread once the batch's parses ran in the pool.
     let providers: Providers = crate::util::ghost_stats::timed("resolver.parse", || {
-        located.into_iter().filter_map(|path| parse_one_provider(module_name, path, parse, rows)).collect()
+        located
+            .into_iter()
+            .filter_map(|path| match prepared.remove(&path) {
+                Some(done) => done,
+                None => parse_one_provider(module_name, path, parse, rows),
+            })
+            .collect()
     });
     (!providers.is_empty()).then_some(providers)
+}
+
+/// A batch's reads and parses, run ahead of its landings: each located
+/// file's analysis (or `None` when it reads as nothing), by path. A landing
+/// takes its file from here and parses only what is missing, so what lands,
+/// in what order, and what the memo records are the serial landing's.
+pub(crate) type Prepared = std::collections::HashMap<CanonicalPath, Option<Arc<CachedModule>>>;
+
+/// The module names an ask for `name` lands, as the map places it: itself,
+/// or the modules it is a member of (`pkg.models.Base` loads `pkg.models`).
+/// A name a project file answers is answered as written.
+pub(crate) fn landing_names(core: &IndexCore, map: &DependencyMap, name: &str) -> Vec<String> {
+    if core.project_answers(name) {
+        return vec![name.to_string()];
+    }
+    let mut names: Vec<String> = Vec::new();
+    for l in map.locate(&Ask::Name(name.to_string())) {
+        if let Some(m) = l.loads_as.filter(|m| !names.contains(m)) {
+            names.push(m);
+        }
+    }
+    if names.is_empty() {
+        names.push(name.to_string());
+    }
+    names
+}
+
+/// Read and parse, in the global Rayon pool the workspace indexer also runs
+/// in, every file the batch's unsettled asks would land that the tier does
+/// not hold yet. Each worker parses with its own parser and reads rows
+/// through `reader`'s checkout pool, so no worker waits on the resolver's
+/// own connection. Only the parse moves: the landings stay on the resolver
+/// thread, in ask order. A held file is left to its landing (a restamp, or
+/// a re-parse if it changed), and one file is parsed where it lands.
+///
+/// The shared pool, not one of its own: declared asks arrive while the
+/// walk holds every worker, and a second pool of that size oversubscribed
+/// the cores (laravel-app cold: 1.9 s shared, 2.5 s apart).
+pub(crate) fn prepare_batch(
+    core: &IndexCore,
+    map: &DependencyMap,
+    map_gen: u64,
+    batch: &[Ask],
+    driver: &'static dyn crate::build::language_driver::LanguageDriver,
+    db_path: Option<&std::path::Path>,
+    reader: &module_cache::RetainedReader,
+) -> Prepared {
+    use rayon::prelude::*;
+    let mut jobs: Vec<(String, CanonicalPath)> = Vec::new();
+    let mut seen: std::collections::HashSet<CanonicalPath> = std::collections::HashSet::new();
+    let mut job = |label: &str, path: CanonicalPath| {
+        if core.records.role_of(&path).is_none() && seen.insert(path.clone()) {
+            jobs.push((label.to_string(), path));
+        }
+    };
+    for ask in batch {
+        if core.asked.get(ask).is_some_and(|e| e.0 == map_gen) {
+            continue;
+        }
+        match ask {
+            Ask::File(path) => job(&path.to_string_lossy(), path.clone()),
+            Ask::Name(name) => {
+                for module_name in landing_names(core, map, name) {
+                    if core.project_answers(&module_name) {
+                        continue;
+                    }
+                    for path in located_as(map, &module_name) {
+                        job(&module_name, path);
+                    }
+                }
+            }
+        }
+    }
+    if jobs.len() < 2 {
+        return Prepared::new();
+    }
+    crate::util::ghost_stats::count_by("resolver.prepared", jobs.len() as u64);
+    let open = || db_path.and_then(|p| module_cache::open_reader_retrying(p).ok());
+    crate::util::ghost_stats::timed("resolver.prepare", || {
+        jobs.into_par_iter()
+            .map_init(
+                || Parse::of(driver),
+                |parse, (label, path)| {
+                    let done = match db_path {
+                        Some(_) => reader
+                            .with(open, |conn| parse_one_provider(&label, path.clone(), parse, Some(conn)))
+                            .unwrap_or_else(|| parse_one_provider(&label, path.clone(), parse, None)),
+                        None => parse_one_provider(&label, path.clone(), parse, None),
+                    };
+                    (path, done)
+                },
+            )
+            .collect()
+    })
 }
 
 /// Read + parse ONE provider file into a `CachedModule`, or take it from its
