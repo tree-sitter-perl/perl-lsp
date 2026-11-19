@@ -68,11 +68,13 @@ pub(crate) struct IndexCore {
     /// `perlfunc.pod` on first cold-cache miss). Empty until the
     /// resolver has run its warmup path.
     pub(crate) builtins: DashMap<String, String>,
-    /// Every name the current dependency map places, listed without
+    /// Every name the map of the stamped generation places, listed without
     /// parsing (`DependencyMap::for_each_name`): what completion offers as
-    /// "available" before anything lands it. Swapped whole per map
-    /// generation, so a reader never sees a half-built listing.
-    pub(crate) available: std::sync::RwLock<Arc<std::collections::HashSet<String>>>,
+    /// "available" before anything lands it. Listed on first ask, not at
+    /// start, because only module-name completion reads it and a one-shot
+    /// run never does; the lock is held across the walk so concurrent
+    /// askers share one listing.
+    pub(crate) available: std::sync::Mutex<Option<(u64, Arc<std::collections::HashSet<String>>)>>,
     /// ALL cross-file candidates per name, not just the winner in `cache` —
     /// the honest relation for every tier, because a name maps to a SET of
     /// files. Pack: C's flat linkage lets unrelated files each define
@@ -203,21 +205,35 @@ pub(crate) struct IndexCore {
 }
 
 impl IndexCore {
-    /// List `map`'s names and publish them as the available set.
-    pub(crate) fn list_available(&self, map: &crate::build::dependency_map::DependencyMap, workspace: Option<&std::path::Path>, extensions: &[&str]) {
+    /// Every name the current map places, listed on the first ask of each
+    /// map generation and kept until the map moves.
+    pub(crate) fn available_names(&self) -> Arc<std::collections::HashSet<String>> {
+        let mut memo = self.available.lock().unwrap_or_else(|e| e.into_inner());
+        let (map, gen) = self.current_map();
+        if let Some((at, names)) = memo.as_ref() {
+            if *at == gen {
+                return Arc::clone(names);
+            }
+        }
+        let workspace = self
+            .workspace_root
+            .root
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .flatten()
+            .and_then(|u| crate::index::module_resolver::uri_to_path(&u));
+        let extensions = crate::build::language_driver::LanguageRegistry::served().extensions();
         let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
         crate::util::ghost_stats::timed("resolver.list_names", || {
-            map.for_each_name(workspace, extensions, &mut |n| {
+            map.for_each_name(workspace.as_deref(), extensions, &mut |n| {
                 names.insert(n);
             })
         });
         log::info!("Dependency map lists {} names", names.len());
-        *self.available.write().unwrap() = Arc::new(names);
-    }
-
-    /// The available set as last listed.
-    pub(crate) fn available_names(&self) -> Arc<std::collections::HashSet<String>> {
-        Arc::clone(&self.available.read().unwrap())
+        let names = Arc::new(names);
+        *memo = Some((gen, Arc::clone(&names)));
+        names
     }
 
     pub(crate) fn new() -> Self {

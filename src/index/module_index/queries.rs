@@ -637,14 +637,6 @@ impl ModuleIndex {
         self.core.publish_dependency_map(Arc::new(crate::build::inc::map_over(roots.to_vec())));
     }
 
-    /// Test-only: list the current map's names as the resolver does at
-    /// start.
-    #[cfg(test)]
-    pub fn list_available_for_test(&self, workspace: Option<&std::path::Path>, extensions: &[&str]) {
-        let (map, _) = self.core.current_map();
-        self.core.list_available(&map, workspace, extensions);
-    }
-
     #[cfg(test)]
     pub fn new_for_test() -> Self {
         let idx = Self::new_for_cli();
