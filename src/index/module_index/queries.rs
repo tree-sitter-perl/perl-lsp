@@ -448,21 +448,42 @@ impl ModuleIndex {
         None
     }
 
-    /// Find all cached modules that *export* the given function name.
-    /// Starts from the generic symbol index, then filters to modules
-    /// whose `export` / `export_ok` list actually contains the name —
-    /// the reverse_index covers every named symbol, not just exports.
+    /// Find all cached modules that *export* the given function name: the
+    /// modules the symbol index names (it covers every named symbol, not
+    /// just exports) whose surface carries the name, plus every descendant
+    /// of one whose own surface carries it — a class exporting nothing of
+    /// its own exports what its inherited `import` does
+    /// (`export_surface_with_index`).
     pub fn find_exporters(&self, func_name: &str) -> Vec<String> {
-        let mut result: Vec<String> = self.modules_with_symbol(func_name)
-            .into_iter()
-            .filter(|m| {
-                // ANY candidate file of the module may carry the export list.
-                crate::model::file_analysis::CrossFileLookup::def_candidates(self, m)
-                    .iter()
-                    .any(|c| c.analysis.export.iter().any(|e| e == func_name)
-                        || c.analysis.export_ok.iter().any(|e| e == func_name))
-            })
-            .collect();
+        use crate::model::file_analysis::CrossFileLookup;
+        use crate::model::graph::{EdgeKindMask, GraphView, Node, WalkControl};
+        // ANY candidate file of the module may carry the export list.
+        let exports = |m: &str| {
+            self.def_candidates(m)
+                .iter()
+                .any(|c| c.analysis.export_surface_with_index(m, self).exports(func_name))
+        };
+        let mut result: Vec<String> = Vec::new();
+        for m in self.modules_with_symbol(func_name) {
+            if !exports(&m) {
+                continue;
+            }
+            if let Some(seed) = self.def_candidates(&m).first().cloned() {
+                GraphView::new(&seed.analysis, Some(self)).walk(
+                    Node::Class(m.clone()),
+                    EdgeKindMask::INHERITS_INV,
+                    &mut |node| {
+                        if let Node::Class(d) = node {
+                            if exports(d) {
+                                result.push(d.clone());
+                            }
+                        }
+                        WalkControl::Continue
+                    },
+                );
+            }
+            result.push(m);
+        }
         result.sort();
         result.dedup();
         result

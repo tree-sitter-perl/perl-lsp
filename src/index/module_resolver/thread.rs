@@ -62,11 +62,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         }
     }
 
-    // One parser + one parent-fallback memo for the whole sweep.
-    // Without the memo, every child whose own exports are empty re-parses
-    // its parent (e.g. ~50× Exporter, ~30× URI on a cold cpanfile run).
     let mut parser = create_parser();
-    let mut parse_memo: ParseMemo = HashMap::new();
 
     // Queue cpanfile dependencies (non-blocking).
     // Track total for progress reporting in the main loop. Server-only: a
@@ -177,7 +173,6 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
             log::info!("Dependency map moved (generation {}); asking {} names again", map_gen, core.asked.len());
             core.available_modules.clear();
             scan_inc_module_names(&map, &core.available_modules);
-            parse_memo.clear();
             let again: Vec<Ask> = core.asked.iter().map(|e| e.key().clone()).collect();
             core.queue.ask(again);
             sweep_owed = true;
@@ -217,7 +212,6 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                     map_gen,
                     &module_name,
                     &mut parser,
-                    &mut parse_memo,
                     strip,
                 );
                 match &stored {
@@ -234,17 +228,6 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                     (Ask::File(p), Some(providers)) => providers.iter().any(|m| m.path == *p),
                     (_, stored) => stored.is_some(),
                 };
-                // The memo would otherwise pin the WHOLE closure for the
-                // thread's lifetime — a second copy of the tier. A miss is
-                // not memoized here: the parent fallback re-probes it.
-                match &stored {
-                    Some(_) => {
-                        parse_memo.insert(module_name.clone(), stored.clone());
-                    }
-                    None => {
-                        parse_memo.remove(&module_name);
-                    }
-                }
                 if let Some(providers) = &whole {
                     core.ask(descent(providers, prefetch));
                 }

@@ -334,10 +334,8 @@ fn a_name_keeps_every_provider_not_just_the_last_inserted() {
     use crate::model::file_analysis::CrossFileLookup;
     let (a, b) = twin_roots("relation");
     let mut parser = create_parser();
-    let mut memo: ParseMemo = HashMap::new();
     let providers =
-        resolve_and_parse_with_memo(&map_over(vec![a.clone(), b.clone()]), "Twin", &mut parser, &mut memo)
-            .expect("Twin resolves");
+        resolve_and_parse_all(&map_over(vec![a.clone(), b.clone()]), "Twin", &mut parser).expect("Twin resolves");
     assert_eq!(providers.len(), 2, "both providers parse");
 
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
@@ -454,17 +452,11 @@ fn two_askers_with_different_use_lib_see_different_providers() {
 
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let mut parser = create_parser();
-    let mut memo: ParseMemo = HashMap::new();
     // The process @INC has only the app lib: `t/lib` is a root ONLY the
     // test file declares, which is exactly the discriminator.
     idx.set_search_roots_for_test(&[applib.clone()]);
-    let providers = resolve_and_parse_with_memo(
-        &map_over(vec![applib.clone(), testlib.clone()]),
-        "Twin",
-        &mut parser,
-        &mut memo,
-    )
-    .expect("Twin resolves");
+    let providers = resolve_and_parse_all(&map_over(vec![applib.clone(), testlib.clone()]), "Twin", &mut parser)
+        .expect("Twin resolves");
     assert_eq!(providers.len(), 2);
     idx.insert_cache_providers("Twin", Some(providers));
 
@@ -733,7 +725,7 @@ fn a_landing_reads_the_files_row_in_place_of_parsing_it() {
     let mut parser = create_parser();
 
     let core = IndexCore::new();
-    let (_, stored) = land_module(&core, Some(&conn), &inc, 1, "Row::Cached", &mut parser, &mut HashMap::new(), false);
+    let (_, stored) = land_module(&core, Some(&conn), &inc, 1, "Row::Cached", &mut parser, false);
     assert!(stored.is_some());
     let canon = crate::util::canonical_path::CanonicalPath::resolve(pm.clone());
     let (key, source): (String, String) = conn
@@ -747,11 +739,11 @@ fn a_landing_reads_the_files_row_in_place_of_parsing_it() {
     std::fs::write(&pm, "package Row::Cached;\nsub bb { 1 }\n1;\n").unwrap();
     std::fs::File::options().write(true).open(&pm).unwrap().set_modified(mtime).unwrap();
     let core = IndexCore::new();
-    let (whole, _) = land_module(&core, Some(&conn), &inc, 1, "Row::Cached", &mut parser, &mut HashMap::new(), false);
+    let (whole, _) = land_module(&core, Some(&conn), &inc, 1, "Row::Cached", &mut parser, false);
     let names: Vec<String> = whole.unwrap()[0].analysis.symbols().iter().map(|s| s.name.clone()).collect();
     assert!(names.iter().any(|n| n == "aa") && !names.iter().any(|n| n == "bb"), "{names:?}");
 
-    let (_, missed) = land_module(&core, Some(&conn), &inc, 1, "Row::Absent", &mut parser, &mut HashMap::new(), false);
+    let (_, missed) = land_module(&core, Some(&conn), &inc, 1, "Row::Absent", &mut parser, false);
     assert!(missed.is_none());
     let rows: i64 = conn.query_row("SELECT COUNT(*) FROM modules", [], |r| r.get(0)).unwrap();
     assert_eq!(rows, 1, "a miss is never remembered");
@@ -801,7 +793,7 @@ fn the_walk_leaves_the_map_s_tier_root_to_the_tier() {
     let map = idx.dependency_map_for(&crate::build::language_driver::PerlDriver, Some(&dir)).expect("perl reads a map");
     assert_eq!(map.search_roots()[0], dir.join("local/lib/perl5"));
     let mut parser = create_parser();
-    let (_, stored) = idx.land_module(None, &map, "Dep", &mut parser, &mut HashMap::new());
+    let (_, stored) = idx.land_module(None, &map, "Dep", &mut parser);
     assert!(stored.is_some());
     assert_eq!(idx.file_role(&dep), Some(FileRole::Dependency), "the map lands it as a dependency");
     let _ = std::fs::remove_dir_all(&dir);

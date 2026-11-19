@@ -404,9 +404,8 @@ impl ModuleIndex {
         map: &crate::build::dependency_map::DependencyMap,
         module_name: &str,
         parser: &mut tree_sitter::Parser,
-        memo: &mut module_resolver::ParseMemo,
     ) -> (Option<Providers>, Option<Providers>) {
-        module_resolver::land_module(&self.core, rows, map, self.core.map_generation(), module_name, parser, memo, false)
+        module_resolver::land_module(&self.core, rows, map, self.core.map_generation(), module_name, parser, false)
     }
 
     /// The dependency map read so far, if any.

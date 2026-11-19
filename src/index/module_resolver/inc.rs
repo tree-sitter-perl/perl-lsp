@@ -1,18 +1,11 @@
 //! The @INC tier's landing: the files the dependency map locates for a
-//! name, parsed in process (or read from their rows) with a
-//! parent-fallback memo.
+//! name, parsed in process or read from their rows.
 
 use super::*;
 use crate::build::dependency_map::{Ask, DependencyMap};
 use crate::util::canonical_path::CanonicalPath;
 
 // ---- Module parsing ----
-
-/// Run-local memo for `resolve_and_parse_with_memo`. Persists across many
-/// top-level calls within a single resolver sweep so that parent-fallback
-/// recursion (e.g. 50 children all inheriting from `Exporter`) parses each
-/// parent exactly once.
-pub type ParseMemo = HashMap<String, Option<Providers>>;
 
 /// THE landing of one module name, run only by the resolver thread: locate
 /// every file the map places under the name; when each is already held
@@ -32,15 +25,13 @@ pub(crate) fn land_module(
     map_gen: u64,
     module_name: &str,
     parser: &mut Parser,
-    memo: &mut ParseMemo,
     strip: bool,
 ) -> (Option<Providers>, Option<Providers>) {
     let located = located_as(map, module_name);
     if let Some(held) = core.restamp_placed(&located, module_name, map_gen) {
         return (None, Some(held));
     }
-    let mut visiting: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let parsed = resolve_and_parse_inner(map, module_name, Some(located), parser, &mut visiting, memo, rows);
+    let parsed = parse_providers(module_name, located, parser, rows);
     let whole = core.tier_providers(parsed);
     let persisted = match (rows, &whole) {
         (Some(conn), Some(providers)) => providers.iter().all(|m| persist_dependency(conn, m)),
@@ -61,86 +52,48 @@ fn located_as(map: &DependencyMap, module_name: &str) -> Vec<CanonicalPath> {
         .collect()
 }
 
-#[allow(dead_code)]
-pub fn resolve_and_parse(
-    map: &DependencyMap,
-    module_name: &str,
-    parser: &mut Parser,
-) -> Option<Arc<CachedModule>> {
-    resolve_and_parse_all(map, module_name, parser)
-        .and_then(|p| p.into_iter().next())
-}
-
-/// `resolve_and_parse` keeping the whole provider set.
-#[allow(dead_code)]
+/// Every file the map places under `module_name`, parsed (tests and the
+/// blocking test lookup; the resolver thread lands through `land_module`).
+#[cfg(test)]
 pub fn resolve_and_parse_all(
     map: &DependencyMap,
     module_name: &str,
     parser: &mut Parser,
 ) -> Option<Providers> {
-    let mut memo: ParseMemo = HashMap::new();
-    resolve_and_parse_with_memo(map, module_name, parser, &mut memo)
+    parse_providers(module_name, located_as(map, module_name), parser, None)
 }
 
-/// Parse a module while sharing a memo across calls. Callers that resolve
-/// many modules in a loop (the resolver thread, CLI startup) should hoist
-/// one `ParseMemo` and reuse it so parent-fallback recursion doesn't
-/// re-parse the same ancestor for each child.
-pub fn resolve_and_parse_with_memo(
+/// `resolve_and_parse_all`'s first provider.
+#[cfg(test)]
+pub fn resolve_and_parse(
     map: &DependencyMap,
     module_name: &str,
     parser: &mut Parser,
-    memo: &mut ParseMemo,
-) -> Option<Providers> {
-    let mut visiting: std::collections::HashSet<String> = std::collections::HashSet::new();
-    resolve_and_parse_inner(map, module_name, None, parser, &mut visiting, memo, None)
+) -> Option<Arc<CachedModule>> {
+    resolve_and_parse_all(map, module_name, parser).and_then(|p| p.into_iter().next())
 }
 
-fn resolve_and_parse_inner(
-    map: &DependencyMap,
+/// Every provider is parsed, not just the @INC winner: a shadowed twin
+/// carries its own subs and `@ISA`, and the candidate relation is only as
+/// honest as its acquisition.
+fn parse_providers(
     module_name: &str,
-    located: Option<Vec<CanonicalPath>>,
+    located: Vec<CanonicalPath>,
     parser: &mut Parser,
-    visiting: &mut std::collections::HashSet<String>,
-    memo: &mut ParseMemo,
     rows: Option<&rusqlite::Connection>,
 ) -> Option<Providers> {
-    if let Some(cached) = memo.get(module_name) {
-        return cached.clone();
-    }
-    if !visiting.insert(module_name.to_string()) {
-        // Cycle in `@ISA` parent fallback — bail rather than blow the stack.
-        return None;
-    }
-
-    // Every provider is parsed, not just the @INC winner: a shadowed twin
-    // carries its own subs and `@ISA`, and the candidate relation is only
-    // as honest as its acquisition.
-    let mut providers: Providers = Vec::new();
-    for path in located.unwrap_or_else(|| located_as(map, module_name)) {
-        if let Some(cached) =
-            parse_one_provider(map, module_name, path, parser, visiting, memo, rows)
-        {
-            providers.push(cached);
-        }
-    }
-    if providers.is_empty() {
-        return None;
-    }
-    memo.insert(module_name.to_string(), Some(providers.clone()));
-    Some(providers)
+    let providers: Providers =
+        located.into_iter().filter_map(|path| parse_one_provider(module_name, path, parser, rows)).collect();
+    (!providers.is_empty()).then_some(providers)
 }
 
 /// Read + parse ONE provider file into a `CachedModule`, or take it from its
 /// current row. Every provider runs this same body — the @INC winner has no
 /// privileged path (rule #10).
 fn parse_one_provider(
-    map: &DependencyMap,
     module_name: &str,
     path: CanonicalPath,
     parser: &mut Parser,
-    visiting: &mut std::collections::HashSet<String>,
-    memo: &mut ParseMemo,
     rows: Option<&rusqlite::Connection>,
 ) -> Option<Arc<CachedModule>> {
     if let Some(fa) = rows.and_then(|conn| module_cache::load_dependency_row(conn, &path)) {
@@ -165,30 +118,9 @@ fn parse_one_provider(
     let parse_dur = t_parse.map(|s| s.elapsed()).unwrap_or_default();
 
     let t_build = if timing { Some(std::time::Instant::now()) } else { None };
-    let mut analysis = crate::build::builder::build(&tree, source.as_bytes());
+    let analysis = crate::build::builder::build(&tree, source.as_bytes());
     let build_dur = t_build.map(|s| s.elapsed()).unwrap_or_default();
     crate::util::timings::record_built(module_name, parse_dur, build_dur);
-
-    // If this module has no exports but inherits via @ISA (e.g. DDP → Data::Printer),
-    // fall back to the first parent's exports. This only patches `export`/`export_ok`;
-    // the parent's own cached analysis is still the source of truth for its symbols.
-    if analysis.export.is_empty() && analysis.export_ok.is_empty() {
-        let parents = crate::index::module_index::primary_package_parents(&analysis, module_name);
-        for parent in &parents {
-            let parent_primary =
-                resolve_and_parse_inner(map, parent, None, parser, visiting, memo, rows)
-                    .and_then(|p| p.into_iter().next());
-            if let Some(parent_cached) = parent_primary {
-                if !parent_cached.analysis.export.is_empty()
-                    || !parent_cached.analysis.export_ok.is_empty()
-                {
-                    analysis.export = parent_cached.analysis.export.clone();
-                    analysis.export_ok = parent_cached.analysis.export_ok.clone();
-                    break;
-                }
-            }
-        }
-    }
 
     let symbols = analysis.symbols().len();
     let result = Arc::new(CachedModule::new(path, Arc::new(analysis)));

@@ -337,10 +337,6 @@ pub fn package_names(analysis: &FileAnalysis) -> Vec<(String, bool)> {
     out
 }
 
-pub fn primary_package_parents(analysis: &FileAnalysis, module_name: &str) -> Vec<String> {
-    analysis.declared_parents(module_name).to_vec()
-}
-
 
 #[cfg(test)]
 #[path = "module_index_tests.rs"]

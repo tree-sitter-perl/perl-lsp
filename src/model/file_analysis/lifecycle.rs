@@ -961,24 +961,130 @@ impl FileAnalysis {
         }
     }
 
-    /// Like `export_surface`, but resolves `reexport_modules` transitively
-    /// through `module_index`: the materialized surface includes every
-    /// re-exported module's surface (default ∪ optional ∪ tags), walked
-    /// cross-file via `ModuleIndex::for_each_reexport_module` (seen-set for
-    /// cycles, fan-out cap). When this module has no re-export edges the
-    /// result is identical to `export_surface` (own-only, zero extra storage).
-    /// This is the one transitive-closure site — the consumer evaluator
-    /// (`imported_names`) is untouched; it binds whatever the surface reports.
+    /// What `use module` binds through an `import` it does not declare:
+    /// `use` calls the first `import` up `module`'s MRO, and an `import`
+    /// declared by another class exports what that class lists — Data::
+    /// Printer's for `use DDP`. Exporter's own `import` reads the lists of
+    /// the class it was called on, so a class inheriting it exports only
+    /// what it lists itself: Exporter lists nothing, and nothing is lent.
+    fn inherited_import_lists(
+        &self,
+        module: &str,
+        module_index: &dyn CrossFileLookup,
+    ) -> Option<(Vec<String>, Vec<String>)> {
+        use crate::model::conventions::IMPORT_SUB;
+        // Only a parent edge lends an `import`; most packages (`main`
+        // above all) declare none.
+        if self.declared_parents(module).is_empty() {
+            return None;
+        }
+        // Asked once per export query, so every step is a lookup until one
+        // could matter: the symbol index says which classes may declare an
+        // `import` (it files a file's names under each package the file
+        // registers, so it over-approximates), a class's lists are its
+        // file's, and only lists worth lending pay for reading the class's
+        // symbols to confirm the `import` is its own. The MRO past `module`
+        // starts at the parents this file gives it: each candidate file
+        // answers for its own `@ISA` and its own `import`, and FHEM's
+        // `main` has hundreds of them.
+        let declares_here = |cls: &str| {
+            self.symbols_named(IMPORT_SUB).iter().any(|&sid| {
+                matches!(self.symbol(sid).kind, SymKind::Sub | SymKind::Method) && self.symbol_in_class(sid, cls)
+            })
+        };
+        let mut indexed: Option<HashSet<String>> = None;
+        let mut may_declare = |cls: &str| {
+            declares_here(cls)
+                || indexed
+                    .get_or_insert_with(|| module_index.modules_with_symbol(IMPORT_SUB).into_iter().collect())
+                    .contains(cls)
+        };
+        let declares = |cls: &str| {
+            declares_here(cls)
+                || module_index
+                    .visible_def_candidates(cls)
+                    .iter()
+                    .any(|c| module_index.symbols_present(c).has_sub_in_package(IMPORT_SUB, cls))
+        };
+        let lists_of = |cls: &str| -> Option<(Vec<String>, Vec<String>)> {
+            let listing = |fa: &FileAnalysis| {
+                (!fa.export.is_empty() || !fa.export_ok.is_empty()).then(|| (fa.export.clone(), fa.export_ok.clone()))
+            };
+            if declares_here(cls) || self.find_type_decl(cls).is_some() {
+                return listing(self);
+            }
+            module_index.visible_def_candidates(cls).iter().find_map(|c| listing(&c.analysis))
+        };
+        use crate::model::graph::{EdgeKindMask, GraphView, Node, WalkControl};
+        let graph = GraphView::new(self, Some(module_index));
+        // `Some(answer)` once a class whose `import` runs is reached.
+        let mut answer: Option<Option<(Vec<String>, Vec<String>)>> = None;
+        {
+            let mut visit = |cls: &str| {
+                if cls == module || !may_declare(cls) {
+                    return false;
+                }
+                match lists_of(cls) {
+                    // Lending nothing whether or not the `import` is its own.
+                    None => answer = Some(None),
+                    Some(lists) if declares(cls) => answer = Some(Some(lists)),
+                    Some(_) => return false,
+                }
+                true
+            };
+            for parent in self.declared_parents(module) {
+                let mut found = visit(parent);
+                if !found {
+                    graph.walk(Node::Class(parent.clone()), EdgeKindMask::INHERITS, &mut |n| match n {
+                        Node::Class(c) if visit(c) => {
+                            found = true;
+                            WalkControl::Stop
+                        }
+                        _ => WalkControl::Continue,
+                    });
+                }
+                if found {
+                    break;
+                }
+            }
+        }
+        let lists = answer??;
+        // An `import` this file gives the module shadows the inherited one
+        // (in this file's view, as its `@ISA` is).
+        if declares_here(module) {
+            return None;
+        }
+        Some(lists)
+    }
+
+    /// Like `export_surface`, but resolved through `module_index`: a module
+    /// exporting nothing answers with what the `import` it inherits exports
+    /// (`inherited_import_lists`), and every re-exported module's surface
+    /// (default ∪ optional ∪ tags) is merged in, walked cross-file via
+    /// `ModuleIndex::for_each_reexport_module` (seen-set for cycles, fan-out
+    /// cap). With neither, the result is `export_surface` (own-only, zero
+    /// extra storage). `module` is the name the consumer `use`d — the
+    /// package whose MRO `use` finds `import` on. The stored analysis is
+    /// never patched: what an inherited `import` lends depends on which
+    /// files the map places, so it is a query. This is the one closure
+    /// site — the consumer evaluator (`imported_names`) is untouched; it
+    /// binds whatever the surface reports.
     pub fn export_surface_with_index(
         &self,
+        module: &str,
         module_index: &dyn CrossFileLookup,
     ) -> ExportSurface<'_> {
-        if self.reexport_modules.is_empty() {
+        let inherited = if self.export.is_empty() && self.export_ok.is_empty() {
+            self.inherited_import_lists(module, module_index)
+        } else {
+            None
+        };
+        if self.reexport_modules.is_empty() && inherited.is_none() {
             return self.export_surface();
         }
 
-        let mut default_set: Vec<String> = self.export.clone();
-        let mut optional_set: Vec<String> = self.export_ok.clone();
+        let (mut default_set, mut optional_set) =
+            inherited.unwrap_or_else(|| (self.export.clone(), self.export_ok.clone()));
         let mut tags: HashMap<String, Vec<String>> = self.export_tags.clone();
 
         // Merge every re-exported module's surface, walking the edges through the

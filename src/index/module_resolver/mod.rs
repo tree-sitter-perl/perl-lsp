@@ -3,7 +3,6 @@
 //! Discovers `@INC` paths, locates `.pm` files, parses them in-process with
 //! tree-sitter-perl, and extracts export metadata for the module index.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,7 +65,7 @@ fn spawn_loop(name: &str, core: Arc<IndexCore>, server: Option<ServerSession>) {
 pub use crate::build::builder::create_parser;
 
 mod inc;
-pub use inc::*;
+pub(crate) use inc::*;
 mod index_pack;
 pub use index_pack::*;
 mod index_perl;

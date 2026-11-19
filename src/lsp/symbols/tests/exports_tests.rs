@@ -988,6 +988,47 @@ fn reexport_cycle_resolves_finitely() {
 }
 
 #[test]
+fn a_module_exporting_nothing_answers_with_its_parents_surface_at_query_time() {
+    // DDP → Data::Printer: the child declares no exports and inherits the
+    // parent's own `import`. The child is stored as written; the inherited
+    // surface is the query's answer.
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    register_module(&idx, "Printer", "package Printer;\nsub import { }\nour @EXPORT = qw(p);\nsub p { 1 }\n1;\n");
+    register_module(&idx, "Shortcut", "package Shortcut;\nour @ISA = ('Printer');\n1;\n");
+    register_module(&idx, "Shortcut::Kid", "package Shortcut::Kid;\nour @ISA = ('Shortcut');\n1;\n");
+    let kid = idx.get_cached("Shortcut").expect("Shortcut cached");
+    assert!(kid.analysis.export.is_empty(), "the child's own analysis exports nothing");
+
+    let surface = kid.analysis.export_surface_with_index("Shortcut", &idx);
+    assert_eq!(surface.default_set(), ["p".to_string()]);
+    let src = "use Shortcut;\np();\n";
+    assert!(!flags_fn(src, "p", &idx), "the inherited export binds");
+    assert_eq!(
+        idx.find_exporters("p"),
+        ["Printer", "Shortcut", "Shortcut::Kid"],
+        "the child, and its own child, export `p` for auto-import too",
+    );
+}
+
+#[test]
+fn a_class_inheriting_exporters_import_exports_only_its_own_lists() {
+    // `use My::Child qw(helper)` calls Exporter's `import` on My::Child,
+    // which reads `@My::Child::EXPORT_OK` — empty — and dies: nothing of
+    // My::Base's lists is lent to the class that inherits them.
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    register_module(
+        &idx,
+        "My::Base",
+        "package My::Base;\nuse Exporter 'import';\nour @EXPORT_OK = qw(helper);\nsub helper { 1 }\n1;\n",
+    );
+    register_module(&idx, "My::Child", "package My::Child;\nuse parent -norequire, 'My::Base';\n1;\n");
+    let kid = idx.get_cached("My::Child").expect("My::Child cached");
+    let surface = kid.analysis.export_surface_with_index("My::Child", &idx);
+    assert!(surface.optional_set().is_empty(), "lent: {:?}", surface.optional_set());
+    assert_eq!(idx.find_exporters("helper"), ["My::Base"]);
+}
+
+#[test]
 fn reexport_imported_names_evaluator_unchanged() {
     // Consumer-unchanged guard: `imported_names` is NOT special-cased for
     // re-exports — it binds whatever the surface reports. A surface built
@@ -1016,7 +1057,7 @@ fn reexport_imported_names_evaluator_unchanged() {
     );
 
     // Index-walked surface: same evaluator, transitive surface — base_fn binds.
-    let walked = m.analysis.export_surface_with_index(&idx);
+    let walked = m.analysis.export_surface_with_index("M", &idx);
     let bound_walked = crate::model::file_analysis::imported_names(import, &walked);
     assert!(bound_walked.iter().any(|(l, _)| l == "own_fn"));
     assert!(
