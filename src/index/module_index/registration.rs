@@ -1219,6 +1219,7 @@ impl ModuleIndex {
         let Some(names) = self.core.records.forget_workspace(&canon) else {
             return;
         };
+        self.core.forget_project_answers(&names);
         for (name, _) in &names {
             if let Some(mut v) = self.core.all_defs.get_mut(name) {
                 v.remove_path(&canon);
@@ -1819,6 +1820,7 @@ impl ModuleIndex {
         // inverse runs on the name list registration recorded, not on
         // `old.analysis.symbols`.
         let names = self.core.records.forget_workspace(&canon).unwrap_or_default();
+        self.core.forget_project_answers(&names);
         for leaf in super::widening_leaves(old.analysis.names(), &names) {
             if let Some(mut v) = self.core.leaf_defs.get_mut(&leaf) {
                 v.remove_path(&canon);

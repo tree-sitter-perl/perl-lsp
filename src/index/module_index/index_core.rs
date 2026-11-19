@@ -487,14 +487,29 @@ impl IndexCore {
         // The map's first file takes the slot — what `require` would load —
         // unless a workspace file holds it: project code shadows an
         // installed copy (`derive_slot`'s rank).
-        let shadowed = matches!(
-            self.cache.get(module_name).as_deref(),
-            Some(Some(c)) if self.records.role_of(&c.path) == Some(crate::model::file_analysis::FileRole::Workspace)
-        );
-        if !shadowed {
+        if !self.project_answers(module_name) {
             self.set_slot(module_name, stored.first().cloned());
         }
         Some(stored)
+    }
+
+    /// Whether a project file holds `name`'s slot. Project code shadows an
+    /// installed copy, so an ask for such a name is answered without the
+    /// tier: locating and parsing a twin the slot would never pick costs a
+    /// parse per vendored module and answers nothing.
+    pub(crate) fn project_answers(&self, name: &str) -> bool {
+        matches!(
+            self.cache.get(name).as_deref(),
+            Some(Some(c)) if self.records.role_of(&c.path) == Some(crate::model::file_analysis::FileRole::Workspace)
+        )
+    }
+
+    /// A project file that answered asks went away: those asks are open
+    /// again, so the tier is asked for an installed copy next time.
+    pub(crate) fn forget_project_answers(&self, names: &[(String, bool)]) {
+        for (name, _) in names {
+            self.asked.remove(&crate::build::dependency_map::Ask::Name(name.clone()));
+        }
     }
 
     /// The files of a landing the tier may hold: a path a front door

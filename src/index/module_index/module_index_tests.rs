@@ -3020,3 +3020,47 @@ fn a_map_move_restamps_what_it_still_places_and_sweeps_the_rest() {
     assert!(!idx.core.map_moving.load(std::sync::atomic::Ordering::Acquire));
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// A name a project file holds is the project's answer: the tier neither
+/// locates nor parses the installed twin the slot would never pick. When the
+/// project file goes, the ask reopens and the installed copy lands.
+#[test]
+fn a_name_the_project_holds_is_answered_without_the_tier() {
+    use crate::build::dependency_map::Ask;
+    use crate::model::file_analysis::{CrossFileLookup, FileRole};
+    use crate::util::canonical_path::CanonicalPath;
+    let base = std::env::temp_dir().join(format!(
+        "d5-project-answers-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    for d in ["inc", "proj/lib"] {
+        std::fs::create_dir_all(base.join(d)).unwrap();
+    }
+    let base = CanonicalPath::resolve(base).into_path_buf();
+    let src = "package Twin;\nsub t { 1 }\n1;\n";
+    std::fs::write(base.join("inc/Twin.pm"), src).unwrap();
+    let mine = base.join("proj/lib/Twin.pm");
+    std::fs::write(&mine, src).unwrap();
+
+    let idx = ModuleIndex::new_for_test();
+    idx.set_search_roots_for_test(&[base.join("inc")]);
+    idx.set_workspace_root(Some(&format!("file://{}", base.join("proj").display())));
+    let mut parser = crate::index::module_resolver::create_parser();
+    let tree = parser.parse(src, None).unwrap();
+    idx.register_workspace_module(mine.clone(), Arc::new(crate::build::builder::build(&tree, src.as_bytes())));
+
+    idx.request(Ask::Name("Twin".into()));
+    idx.wait_idle();
+    let installed = CanonicalPath::resolve(base.join("inc/Twin.pm"));
+    assert_eq!(idx.def_candidates("Twin").len(), 1, "only the project's file answers");
+    assert_eq!(idx.file_role(&installed), None, "the installed twin is not landed");
+    assert_eq!(idx.core.asked.get(&Ask::Name("Twin".into())).map(|e| e.1), Some(Outcome::Landed));
+
+    idx.unregister_workspace_path(&mine);
+    idx.request(Ask::Name("Twin".into()));
+    idx.wait_idle();
+    assert_eq!(idx.get_cached("Twin").map(|c| c.path.clone()), Some(installed.clone()), "the reopened ask lands the installed copy");
+    assert_eq!(idx.file_role(&installed), Some(FileRole::Dependency));
+    let _ = std::fs::remove_dir_all(&base);
+}

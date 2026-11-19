@@ -203,6 +203,11 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
             };
             let mut landed = false;
             for module_name in names {
+                if core.project_answers(&module_name) {
+                    crate::util::ghost_stats::count("resolver.project_answered");
+                    landed = true;
+                    continue;
+                }
                 log::info!("Resolving module '{}'", module_name);
                 crate::util::ghost_stats::count("resolver.module_resolved");
                 let (whole, stored) = land_module(
