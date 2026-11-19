@@ -83,10 +83,12 @@ pub(crate) fn land_module(
 
 /// THE landing of one file the map loads by path (`Ask::File`: Composer's
 /// `files`, which no name places): parsed or read from its row, persisted,
-/// and landed under every name the map places it under (the file loads as
-/// those) and every name it declares (its members) — a function it defines
-/// is called by name with nothing asking for its file. A file that offers
-/// no name lands nothing.
+/// and landed under every name the map places it under and every name it
+/// declares — a function it defines is called by name with nothing asking
+/// for its file. The file loads as the map's names and as what its
+/// language's `FileIdentity` makes of its own (a class a PHP `files` entry
+/// declares); the rest are its members. A file that offers no name lands
+/// nothing.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn land_file(
     core: &IndexCore,
@@ -109,9 +111,12 @@ pub(crate) fn land_file(
         }
     }
     for m in &whole {
-        for (name, _) in crate::index::module_index::collect_linkage_feed(&m.analysis) {
+        let declared = crate::index::module_index::collect_linkage_feed(&m.analysis);
+        let identities = m.analysis.identity_names(&declared);
+        for (name, _) in declared {
             if !names.iter().any(|(n, _)| *n == name) {
-                names.push((name, PlacedAs::Member));
+                let placed_as = if identities.contains(&name) { PlacedAs::Identity } else { PlacedAs::Member };
+                names.push((name, placed_as));
             }
         }
     }

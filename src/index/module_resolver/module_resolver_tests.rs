@@ -992,9 +992,9 @@ fn a_composer_files_entry_lands_under_every_name_it_declares() {
 }
 
 /// The indexed names an import path completes to are what each held file
-/// loads as: a landed class and a project class, never a function, a
-/// constant or a namespace either file declares, nor a Composer `files`
-/// entry outside the autoload roots, which no class name spells.
+/// loads as: a landed class, a project class and a class a Composer `files`
+/// entry declares — never a function, a constant or a namespace any of
+/// them declares, nor the `files` entry's own path, which no class spells.
 #[cfg(feature = "php")]
 #[test]
 fn a_php_import_path_completes_to_classes_not_what_they_declare() {
@@ -1010,7 +1010,7 @@ fn a_php_import_path_completes_to_classes_not_what_they_declare() {
                 "autoload": {"psr-4": {"Acme\\": "src/"}, "files": ["helpers.php"]}}]}"#,
         ),
         ("vendor/acme/base/src/Base.php", "<?php\nnamespace Acme;\nconst DEPTH = 2;\nclass Base {}\n"),
-        ("vendor/acme/base/helpers.php", "<?php\nnamespace Acme;\nfunction tap($v) { return $v; }\n"),
+        ("vendor/acme/base/helpers.php", "<?php\nnamespace Acme;\nfunction tap($v) { return $v; }\nclass Kit {}\n"),
         ("src/Config.php", "<?php\nnamespace App;\nconst LIMIT = 3;\nfunction helper() {}\nclass Config {}\n"),
     ];
     for (rel, body) in files {
@@ -1029,7 +1029,7 @@ fn a_php_import_path_completes_to_classes_not_what_they_declare() {
 
     let mut indexed: Vec<String> = idx.complete_module_names("").into_iter().filter(|(_, held)| *held).map(|(n, _)| n).collect();
     indexed.sort();
-    assert_eq!(indexed, ["Acme\\Base", "App\\Config"]);
+    assert_eq!(indexed, ["Acme\\Base", "Acme\\Kit", "App\\Config"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

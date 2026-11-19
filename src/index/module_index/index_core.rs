@@ -827,7 +827,8 @@ impl IndexCore {
     /// map places it at the module's file. Each is a placement of its own,
     /// so a move renews or sweeps it like the module's, and a name the map
     /// places elsewhere (another package in the same Perl file) is left to
-    /// the file that spells it.
+    /// the file that spells it. A member the file's language also loads it
+    /// as (`FileIdentity`) is placed as an identity.
     pub(crate) fn place_members(
         &self,
         map: &crate::build::dependency_map::DependencyMap,
@@ -839,6 +840,7 @@ impl IndexCore {
         for (precedence, path) in located.iter().enumerate() {
             let Some(names) = self.records.dependency_names(path) else { continue };
             let Some(held) = self.all_files.get(path).map(|e| e.clone()) else { continue };
+            let identities = held.analysis.identity_names(&names);
             for (name, _) in names {
                 // A member's name extends its module's (`member_of` strips
                 // trailing segments), so no other name needs the map asked.
@@ -852,7 +854,11 @@ impl IndexCore {
                 if !here {
                     continue;
                 }
-                self.place_held(path, &held, &name, file_records::PlacedAs::Member, precedence, map_gen);
+                let placed_as = match identities.contains(&name) {
+                    true => file_records::PlacedAs::Identity,
+                    false => file_records::PlacedAs::Member,
+                };
+                self.place_held(path, &held, &name, placed_as, precedence, map_gen);
             }
         }
     }
