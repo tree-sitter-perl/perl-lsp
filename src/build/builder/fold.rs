@@ -391,10 +391,8 @@ impl<'a> Builder<'a> {
     /// populated at walk time and trimmed by successor decls;
     /// a point-query gives the right answer at any byte.
     pub(super) fn apply_chain_typing_assignments(&mut self) {
-        static ASSIGNMENT: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
-        let kinds = ASSIGNMENT.get_or_init(|| perl_kind_ids(&["assignment_expression"]));
         let assignments: Vec<Node<'a>> =
-            self.syntax.file_nodes_of_kind(kinds).into_iter().map(|n| n.ts()).collect();
+            self.syntax.file_nodes_of_kind(&[Kind::AssignmentExpression]).into_iter().map(|n| n.ts()).collect();
         let mut to_push: Vec<(String, ScopeId, Span, InferredType)> = Vec::new();
         crate::util::ghost_stats::count_by("chain.assignment_nodes", assignments.len() as u64);
         // Snapshot of the bag's typed-Variable witnesses, keyed by
@@ -420,8 +418,8 @@ impl<'a> Builder<'a> {
         }
         for &node in &assignments {
             let (Some(left), Some(right)) = (
-                node.child_by_field_name("left"),
-                node.child_by_field_name("right"),
+                node.field(Field::Left),
+                node.field(Field::Right),
             ) else { continue };
             let span = node_to_span(node);
             // Where the write lands; the typed witness and the idempotency
@@ -455,17 +453,17 @@ impl<'a> Builder<'a> {
                     _ => None,
                 };
                 let row = row_from(&rhs).or_else(|| {
-                    if right.kind() != "method_call_expression" {
+                    if !right.is(Kind::MethodCallExpression) {
                         return None;
                     }
                     let m = right
-                        .child_by_field_name("method")
+                        .field(Field::Method)
                         .and_then(|m| m.utf8_text(self.source).ok())?;
                     if m != "all" && m != "populate" {
                         return None;
                     }
                     let inv_ty = right
-                        .child_by_field_name("invocant")
+                        .field(Field::Invocant)
                         .and_then(|inv| self.invocant_type_at_node(inv));
                     row_from(&inv_ty)
                 });
@@ -652,7 +650,7 @@ impl<'a> Builder<'a> {
             // method-call expression) are exactly the case
             // post-enrichment can fix.
             let is_chain_receiver = invocant_node
-                .map(|n| n.kind() == "method_call_expression")
+                .map(|n| n.is(Kind::MethodCallExpression))
                 .unwrap_or(false);
             if is_chain_receiver {
                 pending.push(Path::Deferred(args));
@@ -729,22 +727,20 @@ impl<'a> Builder<'a> {
     /// Runs post-fold (after `emit_method_call_arg_keys`) so
     /// `invocant_type_at_node` answers against the canonical bag.
     pub(super) fn emit_chained_hash_key_refs(&mut self) {
-        static HASH_ELEMENT: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
-        let kinds = HASH_ELEMENT.get_or_init(|| perl_kind_ids(&["hash_element_expression"]));
         // The chained shape only: a plain `$var->{key}` is the walk's.
         let chained: Vec<Node<'a>> = self
             .syntax
-            .file_nodes_of_kind(kinds)
+            .file_nodes_of_kind(&[Kind::HashElementExpression])
             .into_iter()
             .map(|n| n.ts())
-            .filter(|n| crate::cst::nth_element(*n, 0).is_some_and(|c| c.kind() == "method_call_expression"))
+            .filter(|n| crate::cst::nth_element(*n, 0).is_some_and(|c| c.is(Kind::MethodCallExpression)))
             .collect();
         // Snapshot resolved (key_span, key_text, access, owner, order) first
         // so the emit loop can `&mut self`.
         let mut pending: Vec<(Span, String, AccessKind, HashKeyOwner, Option<Box<Span>>)> = Vec::new();
         for &node in &chained {
             let Some(container) = node.named_child(0) else { continue };
-            let Some(key_node) = node.child_by_field_name("key") else { continue };
+            let Some(key_node) = node.field(Field::Key) else { continue };
             let Some((key_text, is_dynamic)) = self.extract_key_text(key_node) else { continue };
             if is_dynamic { continue; }
 
@@ -755,7 +751,7 @@ impl<'a> Builder<'a> {
             // identity (the value is a plain HashRef), so it must be
             // tried before the `hash_key_class()` fallback.
             let method_name = container
-                .child_by_field_name("method")
+                .field(Field::Method)
                 .and_then(|n| n.utf8_text(self.source).ok())
                 .map(|s| s.to_string());
             let sub_owner = method_name.as_ref().and_then(|name| {

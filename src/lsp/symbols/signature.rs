@@ -1,6 +1,7 @@
 //! Signature help and string-dispatch completion (dispatch arg-0, mid-string).
 
 use super::*;
+use crate::cst::{Kind, NodeExt};
 
 // ---- Signature help ----
 
@@ -49,14 +50,14 @@ pub(super) fn class_has_dispatch_handlers(
 pub(super) fn string_content_span_at(tree: &Tree, point: Point) -> Option<Span> {
     let mut node = tree.root_node().descendant_for_point_range(point, point)?;
     for _ in 0..4 {
-        match node.kind() {
-            "string_content" => {
+        match node.kind_of() {
+            Kind::StringContent => {
                 return Some(Span {
                     start: node.start_position(),
                     end: node.end_position(),
                 });
             }
-            "string_literal" | "interpolated_string_literal" => {
+            Kind::StringLiteral | Kind::InterpolatedStringLiteral => {
                 // Boundary case: when the cursor sits at the END of
                 // the content (just before the closing quote) or on
                 // the closing quote itself, `descendant_for_point_range`
@@ -122,9 +123,9 @@ fn cursor_in_string_or_autoquote(tree: &Tree, point: Point) -> bool {
     // token node first; the enclosing string_literal is typically one
     // or two parents up.
     for _ in 0..4 {
-        match node.kind() {
-            "string_literal" | "interpolated_string_literal"
-            | "string_content" | "autoquoted_bareword" => return true,
+        match node.kind_of() {
+            Kind::StringLiteral | Kind::InterpolatedStringLiteral
+            | Kind::StringContent | Kind::AutoquotedBareword => return true,
             _ => {}
         }
         let Some(p) = node.parent() else { break };
@@ -400,7 +401,7 @@ fn dispatch_info_for_enclosing_call(
     // Walk up from the cursor until we hit the enclosing method call.
     let mut node = tree.root_node().descendant_for_point_range(point, point)?;
     let call = loop {
-        if node.kind() == "method_call_expression" {
+        if node.is(Kind::MethodCallExpression) {
             break node;
         }
         node = node.parent()?;

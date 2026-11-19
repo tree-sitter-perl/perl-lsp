@@ -1148,7 +1148,7 @@ impl<'a> Builder<'a> {
         collect_data_section_subs(sub_tree.root_node(), &mut found);
         let mut synth_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         for sub_node in found {
-            let Some(name_node) = sub_node.child_by_field_name("name") else { continue };
+            let Some(name_node) = sub_node.field(Field::Name) else { continue };
             let Ok(name) = name_node.utf8_text(sub_src) else { continue };
             let params = extract_data_section_params(sub_node, sub_src);
             self.add_symbol(
