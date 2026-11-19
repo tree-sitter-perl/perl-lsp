@@ -1111,7 +1111,7 @@ fn sweep_one_file(
         std::sync::Arc::clone(fa),
     ));
     let _sweep = crate::util::ghost_stats::SweepScope::start();
-    let _memo = module_index::SweepMemoGuard::open();
+    let _memo = module_index::SweepMemoGuard::open(path);
     // The region the four `diag.*` tags did NOT cover, and the one that holds
     // the volume: enriching a file pulls its providers' analyses, and that
     // happens BEFORE `collect_diagnostics` is entered. Bounding the callee
