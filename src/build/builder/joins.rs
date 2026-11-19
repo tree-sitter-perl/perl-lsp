@@ -46,7 +46,7 @@ impl<'a> Builder<'a> {
         // one elsewhere by what its file says (the effect lane, at query
         // time). A builtin's call states its own effect.
         let local = self.local_callables();
-        let gate = |n: Node<'a>| self.gate_callee(&local, n);
+        let gate = |n: Node<'a>| self.statement_call(n).filter(|&c| self.gate_callee(&local, c));
         let mut walk = super::control::ViewWalk::default();
         let mut gates = walk.walk(around, source, &gate);
         let bodies: Vec<(SymbolId, Node<'a>)> = self
@@ -66,9 +66,7 @@ impl<'a> Builder<'a> {
         }
         let mut view = walk.finish();
         drop(local);
-        for g in gates {
-            self.emit_expr_witness(g);
-        }
+        self.gate_calls = gates;
         if !bodies.is_empty() {
             view.returns = self.syntax.file_nodes_of_kind(&[Kind::ReturnExpression, Kind::GotoExpression]).into_iter().map(|n| node_to_span(n.ts())).collect();
         }
@@ -222,6 +220,17 @@ impl<'a> Builder<'a> {
             out.entry(s.name.clone()).or_default().push((s.id, s.package.clone()));
         }
         out
+    }
+
+    /// The call a statement runs on its way through: the statement itself,
+    /// or the value an assignment stores (`my $r = f();`, `$a = $b = f();`).
+    /// Control reaches what follows only if that call comes back.
+    pub(super) fn statement_call(&self, node: Node<'a>) -> Option<Node<'a>> {
+        let mut node = crate::cst::peel_groups(node);
+        while node.is(Kind::AssignmentExpression) {
+            node = crate::cst::peel_groups(node.field(Field::Right)?);
+        }
+        Some(node)
     }
 
     /// Whether a call at `node` gates what follows it: a method call, a

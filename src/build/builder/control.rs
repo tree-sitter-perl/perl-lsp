@@ -181,7 +181,7 @@ fn captured<'t, 's>(caps: impl IntoIterator<Item = (CtlCap, Node<'t>)>, source: 
 pub(super) fn control_view_with_gates<'t>(
     nodes: impl IntoIterator<Item = Node<'t>>,
     source: &[u8],
-    gate: impl Fn(Node<'t>) -> bool,
+    gate: impl Fn(Node<'t>) -> Option<Node<'t>>,
 ) -> ControlView {
     let mut walk = ViewWalk::default();
     walk.walk(nodes, source, &gate);
@@ -205,13 +205,14 @@ impl<'s> ViewWalk<'s> {
     /// what decides whether an arm comes out at its end, and where a loop's
     /// `last` and `next` land. Each node is tried as a match's root and
     /// nothing below it starts one, so the cost is the nodes' own, not the
-    /// file's. A statement `gate` names is a call control comes back from
-    /// only if its callee does ([`ControlView::gates`]); it is returned.
+    /// file's. `gate` names the call a statement runs on its way through,
+    /// which control comes back from only if its callee does
+    /// ([`ControlView::gates`]); each is returned.
     pub(super) fn walk<'t>(
         &mut self,
         nodes: impl IntoIterator<Item = Node<'t>>,
         source: &'s [u8],
-        gate: &dyn Fn(Node<'t>) -> bool,
+        gate: &dyn Fn(Node<'t>) -> Option<Node<'t>>,
     ) -> Vec<Node<'t>> {
         use tree_sitter::StreamingIterator;
         let (query, caps) = ctl_query();
@@ -223,9 +224,9 @@ impl<'s> ViewWalk<'s> {
             if !self.seen.insert(node.id()) {
                 continue;
             }
-            if gate(node) {
-                self.gates.push(super::node_to_span(node));
-                gates.push(node);
+            if let Some(call) = gate(node) {
+                self.gates.push(super::node_to_span(call));
+                gates.push(call);
             }
             let mut it = cursor.matches(query, node, source);
             while let Some(m) = it.next() {

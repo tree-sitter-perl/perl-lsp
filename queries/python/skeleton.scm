@@ -362,13 +362,22 @@
 (continue_statement) @ctl.leave.continue
 (break_statement) @ctl.leave.break
 
-; How a call to a def ends is how its body does; a call that is a whole
-; statement lets control past it only if it comes back
-; (`docs/adr/cfg-tier.md` §Effects). A def's or a lambda's body runs later,
+; How a call to a def ends is how its body does; a call a statement runs
+; (the statement itself, or the value an assignment stores) lets control
+; past it only if it comes back (`docs/adr/cfg-tier.md` §Effects). A def's or a lambda's body runs later,
 ; so it reads the variables around it as they stand when it runs.
 (function_definition body: (block) @ctl.body)
 (lambda body: (_) @ctl.body)
 (expression_statement (call) @ctl.gate)
+(assignment right: (call) @ctl.gate)
+(parenthesized_expression (call) @ctl.gate)
+; The `gate` walk, rooted at `@ctl.gate`: each node links to the one a
+; level out that runs it whenever it runs, so `a = (b = f())` gates at any
+; depth. The walk's end is the statement.
+(expression_statement (_) @link.from.gate) @link.outer
+(assignment right: (_) @link.from.gate) @link.outer
+((parenthesized_expression (_) @link.from.gate) @link.outer
+ (#not-is-kind? @link.from.gate comment))
 
 ; `return EXPR` — the returned expression carries its own witness; this marks
 ; the site, an arm of the enclosing def's return when the def declares none.

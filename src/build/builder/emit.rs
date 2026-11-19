@@ -796,6 +796,15 @@ impl<'a> Builder<'a> {
         out
     }
 
+    /// One "expression"-source witness per `Expr(span)` is the contract:
+    /// every emitter of one asks this first.
+    fn has_expression_witness(&self, span: Span) -> bool {
+        use crate::model::witnesses::{WitnessAttachment, WitnessSource};
+        self.bag
+            .iter_attachment(&WitnessAttachment::Expr(span))
+            .any(|w| matches!(&w.source, WitnessSource::Builder(t) if t == "expression"))
+    }
+
     fn emit_expr_witness_inner(&mut self, node: Node<'a>) {
         use crate::model::witnesses::{tags, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let span = node_to_span(node);
@@ -876,12 +885,7 @@ impl<'a> Builder<'a> {
         // (child visit first, then the enclosing assignment/invocant
         // emitter). One "expression"-source witness per Expr(span) is
         // the contract; identical duplicates only bloat the bag.
-        let already = self
-            .bag
-            .for_attachment(&WitnessAttachment::Expr(span))
-            .iter()
-            .any(|w| matches!(&w.source, WitnessSource::Builder(t) if t == "expression"));
-        if already {
+        if self.has_expression_witness(span) {
             return;
         }
         if let Some(payload) = self.expr_payload(node) {
@@ -1053,13 +1057,21 @@ impl<'a> Builder<'a> {
     /// negative witnesses.
     pub(super) fn resolve_forward_expr_witnesses(&mut self) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessSource};
+        for call in std::mem::take(&mut self.gate_calls) {
+            self.emit_expr_witness(call);
+        }
         let queued = std::mem::take(&mut self.unresolved_expr_nodes);
         for node in queued {
+            // A later pass may have emitted the node since it queued (a gate
+            // names its call once every sub is declared).
+            let span = node_to_span(node);
+            if self.has_expression_witness(span) {
+                continue;
+            }
             let Some(payload) = self.expr_payload(node).or_else(|| self.imported_call_payload(node))
             else {
                 continue;
             };
-            let span = node_to_span(node);
             self.push_witness(Witness {
                 attachment: WitnessAttachment::Expr(span),
                 source: WitnessSource::Builder("expression".into()),

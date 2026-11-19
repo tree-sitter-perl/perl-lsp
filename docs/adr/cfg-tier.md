@@ -26,7 +26,8 @@ histories, the build mints a **join**:
   where the value leaves the arm (rule #14). An arm is `Edge(Place)` (the
   place as it stands there), or, for a bodiless arm, the value its condition
   proves. Each arm records its condition as `(Span, bool)` and may carry
-  **gates**: statement-position calls control must return from to reach it.
+  **gates**: calls a statement runs (the statement itself, or the value an
+  assignment or declaration stores) that control must return from to reach it.
 
 `JoinFold` folds the surviving arms with `types::join`. Nothing is concluded
 at build time; types reach arms through edges at query time, so a join sees
@@ -269,9 +270,14 @@ bitflags! { pub struct Ends: u8 { const COMPLETES = 1; const UNWINDS = 2; const 
   declarations (`never`, `NoReturn`, `[[noreturn]]`), a plugin override field,
   and inference from a body whose end and returns are unreachable.
 - A call's effect is the callee's effect, read through the call's existing
-  `Invoke` on the `Effects` aspect, memoized per callee. Dispatch joins the
+  `Invoke` on the `Effects` aspect, memoized per callee. How an expression
+  ends follows its call's ref and nothing else: value flow (an assignment's
+  edge to its right side) is not how it ends, so whoever asks names the call
+  — a gate, a guard's exit. Dispatch joins the
   candidates, including overrides in indexed subclasses.
-- **Gates.** A statement calling a callable of the file is a gate on every
+- **Gates.** A call a statement runs — the statement itself, or the value
+  an assignment or declaration stores (`my $r = f();`, `x = f()`,
+  `int x = f();`) — is a gate on every
   path past it (`ControlView::gates`): a join arm, or an arm of how the
   caller ends, is `Gated` by the calls on its path, and the registry drops
   it where one of them does not come back. In a test's region a path past
@@ -285,7 +291,9 @@ bitflags! { pub struct Ends: u8 { const COMPLETES = 1; const UNWINDS = 2; const 
   it, gated by the calls it makes there. What sits in a body nested inside
   it is the nested callable's. A body the parser could not read states
   nothing. A pack document names the bodies (`@ctl.body`) and the calls
-  that are whole statements (`@ctl.gate`), and every body it names mints;
+  its statements run (`@ctl.gate`, each led out to its statement by the
+  `gate` link walk, one level of store or parens per link), and every
+  body it names mints;
   Perl mints the bodies its gates reach. An arm whose path runs into a call
   that does not come back ends the way that call does, so a wrapper round
   `die` unwinds. A throw or a call inside the body of a `try` that catches
