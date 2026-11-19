@@ -214,6 +214,48 @@ fn test_db_plugin_fingerprint_invalidation() {
     let _ = std::fs::remove_file(&bar.path);
 }
 
+/// A kept map is served while its inputs hold and not after; no store gate
+/// clears it, and `--gc-cache` takes only the rows no run can serve.
+#[test]
+fn a_kept_dependency_map_is_served_while_its_inputs_hold() {
+    use crate::build::dependency_map::{DependencyMap, Lane};
+    let conn = test_db();
+    let dir = std::env::temp_dir().join(format!("kept-map-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = dir.join("manifest.json");
+    std::fs::write(&input, "{}").unwrap();
+    let map = || {
+        DependencyMap::new(vec![Lane::Table(vec![("A".into(), dir.join("A.x"))])], vec![dir.clone()], vec![input.clone()])
+    };
+    let root = dir.to_string_lossy().into_owned();
+
+    assert!(!save_dependency_map(&conn, &root, &map()), "a map not read from its inputs alone is never kept");
+    assert!(load_dependency_map(&conn, &root).is_none());
+    assert!(save_dependency_map(&conn, &root, &map().with_complete_inputs()));
+    let bytes = load_dependency_map(&conn, &root).expect("served while the stamps hold");
+    let kept = DependencyMap::decode(&bytes, &[]).unwrap();
+    assert_eq!(kept.generation(), map().generation());
+
+    // a store gate firing clears the analyses, not the map
+    validate_plugin_fingerprint(&conn, "gate-A").unwrap();
+    validate_plugin_fingerprint(&conn, "gate-B").unwrap();
+    assert!(load_dependency_map(&conn, &root).is_some());
+    assert_eq!(gc_dependency_maps(&conn), 0, "a row that holds stays");
+
+    std::fs::write(&input, "{\"moved\": 1}").unwrap();
+    assert!(load_dependency_map(&conn, &root).is_none(), "a moved input is not served");
+    assert_eq!(gc_dependency_maps(&conn), 1);
+    assert!(save_dependency_map(&conn, &root, &map().with_complete_inputs()), "rewritten in place");
+    assert!(load_dependency_map(&conn, &root).is_some());
+
+    // another epoch's row is neither served nor kept by the sweep
+    conn.execute("UPDATE dependency_maps SET version = 'an-older-epoch'", []).unwrap();
+    assert!(load_dependency_map(&conn, &root).is_none());
+    assert_eq!(gc_dependency_maps(&conn), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A dependency row describes its file alone: `--gc-cache` takes the rows
 /// no landing can take again (a file gone or changed), keeps a current one
 /// whatever map placed it, and never touches the walk's rows.

@@ -107,6 +107,7 @@ const EPOCH_GATES: &[(&str, &str, EpochType)] = &[
     ("conclusion-rows", "CONCLUSION_ROWS", EpochType::Str),
     ("schema", "SCHEMA", EpochType::Str),
     ("macro-cache", "MACRO_CACHE", EpochType::Int),
+    ("dependency-map", "DEPENDENCY_MAP", EpochType::Str),
 ];
 
 #[derive(Clone, Copy)]

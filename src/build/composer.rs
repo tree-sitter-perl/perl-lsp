@@ -150,6 +150,7 @@ fn sep() -> &'static str {
 
 /// PSR-4: the name past the prefix, each separator a directory.
 const PSR_4: ModuleSpelling = ModuleSpelling {
+    id: "psr-4",
     module_paths: |rest| vec![format!("{}.php", rest.replace(sep(), "/"))],
     module_of: |rel| from_rel(rel),
 };
@@ -158,6 +159,7 @@ const PSR_4: ModuleSpelling = ModuleSpelling {
 /// is a directory too. Asked by path, a file names its namespaced
 /// spelling: the `_` a directory stood for is not recoverable.
 const PSR_0: ModuleSpelling = ModuleSpelling {
+    id: "psr-0",
     module_paths: |name| {
         let (ns, leaf) = crate::model::conventions::split_qualified(name, names());
         let dir = ns.map(|ns| format!("{}/", ns.replace(sep(), "/"))).unwrap_or_default();
@@ -165,6 +167,9 @@ const PSR_0: ModuleSpelling = ModuleSpelling {
     },
     module_of: |rel| from_rel(rel),
 };
+
+/// Every spelling a Composer map's lanes use.
+pub const SPELLINGS: &[ModuleSpelling] = &[PSR_4, PSR_0];
 
 fn from_rel(rel: &Path) -> Option<String> {
     if rel.extension().is_none_or(|e| e != "php") {
@@ -191,7 +196,7 @@ pub fn read_map(root: Option<&Path>) -> Option<DependencyMap> {
         Ok(c) => c,
         Err(e) => {
             log::debug!("composer: no autoload map ({e})");
-            return Some(DependencyMap::new(Vec::new(), Vec::new(), inputs));
+            return Some(DependencyMap::new(Vec::new(), Vec::new(), inputs).with_complete_inputs());
         }
     };
     let classmap = crate::util::timings::phase("composer::classmap", || {
@@ -234,7 +239,11 @@ pub fn read_map(root: Option<&Path>) -> Option<DependencyMap> {
             .map(|(prefix, dirs)| Lane::Prefix { prefix, dirs, spelling: PSR_0, spells: Spells::WholeName }),
     );
     lanes.push(Lane::AlwaysLoad(files));
-    Some(crate::util::timings::phase("composer::assemble", || DependencyMap::new(lanes, vec![vendor_dir], inputs)))
+    // The three inputs are all the reader opens: the lanes' directories are
+    // taken as written, never listed, so their stamps keep the map.
+    Some(crate::util::timings::phase("composer::assemble", || {
+        DependencyMap::new(lanes, vec![vendor_dir], inputs).with_complete_inputs()
+    }))
 }
 
 /// The classmap Composer generates is read through this document.

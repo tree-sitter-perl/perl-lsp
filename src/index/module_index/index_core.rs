@@ -219,8 +219,9 @@ impl IndexCore {
         }
     }
 
-    /// The map this process locates from, read on first ask by `driver`'s
-    /// reader for `root` (it shells out, so it is never re-read on a query
+    /// The map this process locates from, taken on first ask from the
+    /// store when a kept copy still holds, else read by `driver`'s reader
+    /// for `root` (it may shell out, so it is never re-read on a query
     /// path). `None` when the language has no dependency tier.
     pub(crate) fn dependency_map_for(
         &self,
@@ -234,9 +235,23 @@ impl IndexCore {
         if let Some(m) = self.dependency_map() {
             return Some(m);
         }
-        let map = Arc::new(crate::util::timings::phase("dependency_map::read", || driver.dependency_map(root))?);
+        let conn = self.map_store(driver);
+        let map = Arc::new(
+            load_kept_map(driver, root, conn.as_ref()).or_else(|| read_and_keep(driver, root, conn.as_ref()))?,
+        );
         self.publish_dependency_map(Arc::clone(&map));
         Some(map)
+    }
+
+    /// The served language's store, where a map is kept between runs; `None`
+    /// before a workspace root is known, so nothing is kept under the global
+    /// cache by mistake.
+    fn map_store(
+        &self,
+        driver: &dyn crate::build::language_driver::LanguageDriver,
+    ) -> Option<rusqlite::Connection> {
+        let key = self.workspace_root.root.lock().unwrap_or_else(|e| e.into_inner()).clone()??;
+        crate::index::module_cache::open_cache_db(Some(&key), driver.id())
     }
 
     /// Re-read the map after one of its manifests moved. `true` when the
@@ -248,7 +263,7 @@ impl IndexCore {
         root: Option<&std::path::Path>,
     ) -> bool {
         let _g = self.map_read.lock().unwrap_or_else(|e| e.into_inner());
-        match crate::util::timings::phase("dependency_map::read", || driver.dependency_map(root)) {
+        match read_and_keep(driver, root, self.map_store(driver).as_ref()) {
             Some(map) => self.publish_dependency_map(Arc::new(map)),
             None => false,
         }
@@ -830,4 +845,34 @@ pub(crate) fn strip_import_copy_one(
     } else {
         m.clone()
     }
+}
+
+/// The map kept in `conn` for `root`, when every input it was read from
+/// still carries the stamp it was kept with. Its `generation()` is a fresh
+/// read's, so nothing downstream can tell the two apart.
+pub(crate) fn load_kept_map(
+    driver: &dyn crate::build::language_driver::LanguageDriver,
+    root: Option<&std::path::Path>,
+    conn: Option<&rusqlite::Connection>,
+) -> Option<crate::build::dependency_map::DependencyMap> {
+    let (conn, root) = (conn?, root?);
+    crate::util::timings::phase("dependency_map::load", || {
+        let bytes = crate::index::module_cache::load_dependency_map(conn, &root.to_string_lossy())?;
+        crate::build::dependency_map::DependencyMap::decode(&bytes, driver.dependency_spellings())
+    })
+}
+
+/// Read the map afresh and keep it in `conn` over whatever was kept for
+/// `root`. A map whose reader read something its inputs do not stamp is
+/// read, not kept (`DependencyMap::encode`).
+pub(crate) fn read_and_keep(
+    driver: &dyn crate::build::language_driver::LanguageDriver,
+    root: Option<&std::path::Path>,
+    conn: Option<&rusqlite::Connection>,
+) -> Option<crate::build::dependency_map::DependencyMap> {
+    let map = crate::util::timings::phase("dependency_map::read", || driver.dependency_map(root))?;
+    if let (Some(conn), Some(root)) = (conn, root) {
+        crate::index::module_cache::save_dependency_map(conn, &root.to_string_lossy(), &map);
+    }
+    Some(map)
 }

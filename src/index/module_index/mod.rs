@@ -211,6 +211,8 @@ pub use parts::*;
 mod index_core;
 pub(crate) use index_core::{FrontDoor, IndexCore, Outcome};
 #[cfg(test)]
+pub(crate) use index_core::{load_kept_map, read_and_keep};
+#[cfg(test)]
 pub(crate) use index_core::strip_import_copy_one;
 
 mod file_records;

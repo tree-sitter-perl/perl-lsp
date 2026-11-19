@@ -18,6 +18,7 @@ const SNAPSHOT: &str = "cpanfile.snapshot";
 
 /// How Perl spells a module under an `@INC` root.
 pub const SPELLING: ModuleSpelling = ModuleSpelling {
+    id: "inc",
     module_paths: |m| vec![crate::model::conventions::perl_module_rel_path(m)],
     module_of: |rel| {
         (rel.extension().is_some_and(|e| e == "pm")).then(|| crate::model::conventions::perl_module_from_rel_path(rel))
@@ -61,6 +62,9 @@ pub fn read_map(root: Option<&Path>) -> DependencyMap {
         }
         inputs.push(root.join(SNAPSHOT));
     }
+    // Not `with_complete_inputs`: the search path comes from running `perl`
+    // (its `@INC`, `PERL5LIB` included) and from which project dirs exist,
+    // none of which `cpanfile.snapshot` stamps. Reading it is one shell-out.
     DependencyMap::new(vec![Lane::SearchRoots { roots: search, spelling: SPELLING }], tier_roots, inputs)
 }
 

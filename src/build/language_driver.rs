@@ -174,6 +174,19 @@ pub trait LanguageDriver: Send + Sync {
     fn has_dependency_map(&self) -> bool {
         false
     }
+    /// The spellings this language's maps' lanes use, by which a kept map
+    /// names them back (`DependencyMap::decode`).
+    fn dependency_spellings(&self) -> &'static [crate::build::dependency_map::ModuleSpelling] {
+        &[]
+    }
+}
+
+/// A language's reader of the dependency map: the read itself, and every
+/// spelling the lanes it builds use.
+#[derive(Clone, Copy)]
+pub struct DependencyReader {
+    pub read: fn(Option<&Path>) -> Option<crate::build::dependency_map::DependencyMap>,
+    pub spellings: &'static [crate::build::dependency_map::ModuleSpelling],
 }
 
 /// How a language that names modules by path names one: the marker file
@@ -268,6 +281,9 @@ impl LanguageDriver for PerlDriver {
     fn has_dependency_map(&self) -> bool {
         true
     }
+    fn dependency_spellings(&self) -> &'static [crate::build::dependency_map::ModuleSpelling] {
+        std::slice::from_ref(&crate::build::inc::SPELLING)
+    }
 }
 
 /// A pack-language driver — the generic, query-driven path. One value
@@ -341,7 +357,7 @@ pub struct PackDriver {
     /// The language's reader of the dependency map (php:
     /// `build::composer`). `None` = no dependency tier; the walk is the
     /// whole story.
-    dependency_map: Option<fn(Option<&Path>) -> Option<crate::build::dependency_map::DependencyMap>>,
+    dependency_map: Option<DependencyReader>,
 }
 
 /// Pre-parse external state gathered in phase 1 (`gather_pack_context`) and
@@ -450,10 +466,13 @@ impl LanguageDriver for PackDriver {
         self.file_module.is_none() || self.module_of(path) == analysis.pack.file_module
     }
     fn dependency_map(&self, root: Option<&Path>) -> Option<crate::build::dependency_map::DependencyMap> {
-        self.dependency_map.and_then(|read| read(root))
+        self.dependency_map.and_then(|r| (r.read)(root))
     }
     fn has_dependency_map(&self) -> bool {
         self.dependency_map.is_some()
+    }
+    fn dependency_spellings(&self) -> &'static [crate::build::dependency_map::ModuleSpelling] {
+        self.dependency_map.map_or(&[], |r| r.spellings)
     }
 }
 
@@ -792,7 +811,10 @@ fn php_driver() -> PackDriver {
         input_fingerprint: None,
         access_regions: None,
         file_module: None,
-        dependency_map: Some(crate::build::composer::read_map),
+        dependency_map: Some(DependencyReader {
+            read: crate::build::composer::read_map,
+            spellings: crate::build::composer::SPELLINGS,
+        }),
     }
 }
 

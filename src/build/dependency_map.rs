@@ -11,9 +11,12 @@ use std::sync::Arc;
 
 /// How a language spells a module as a file under a directory: the files a
 /// module name may be, most-preferred first, and the name a root-relative
-/// file spells (`None`: no module's file).
+/// file spells (`None`: no module's file). `id` names the spelling among its
+/// reader's (`LanguageDriver::dependency_spellings`), so a persisted map
+/// can name the one each lane uses.
 #[derive(Clone, Copy)]
 pub struct ModuleSpelling {
+    pub id: &'static str,
     pub module_paths: fn(module: &str) -> Vec<String>,
     pub module_of: fn(rel: &Path) -> Option<String>,
 }
@@ -43,7 +46,7 @@ pub enum Lane {
 }
 
 /// What a `Prefix` lane's spelling spells under its dirs.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Spells {
     /// The name past the prefix (`App\Models\User` under `App\` is
     /// `Models/User.php`).
@@ -84,6 +87,42 @@ pub struct DependencyMap {
     /// The manifests the map was read from; their stamps are part of its
     /// generation.
     inputs: Vec<PathBuf>,
+    /// The reader read nothing its inputs do not stamp, so a copy kept
+    /// with those stamps is this map for as long as they hold
+    /// (`with_complete_inputs`).
+    inputs_complete: bool,
+}
+
+/// An input's stamp: its size and modification time, `None` while it does
+/// not exist. What the generation hashes and a persisted map is kept by.
+type InputStamp = Option<(u64, Option<u128>)>;
+
+fn input_stamp(path: &Path) -> InputStamp {
+    std::fs::metadata(path).ok().map(|m| {
+        let mtime = m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos());
+        (m.len(), mtime)
+    })
+}
+
+/// A map as it is kept: every lane with its spelling named by id.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Persisted {
+    lanes: Vec<PersistedLane>,
+    search_roots: Vec<PathBuf>,
+    tier_roots: Vec<PathBuf>,
+    inputs: Vec<PathBuf>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+enum PersistedLane {
+    Table(Vec<(String, PathBuf)>),
+    Prefix { prefix: String, dirs: Vec<PathBuf>, spelling: String, spells: Spells },
+    SearchRoots { roots: Vec<PathBuf>, spelling: String },
+    AlwaysLoad(Vec<PathBuf>),
 }
 
 impl DependencyMap {
@@ -118,7 +157,92 @@ impl DependencyMap {
             }
         }
         let tier_roots = spelled;
-        DependencyMap { lanes, search_roots: Arc::new(search), tier_roots, inputs }
+        DependencyMap { lanes, search_roots: Arc::new(search), tier_roots, inputs, inputs_complete: false }
+    }
+
+    /// The reader's word that its inputs cover everything it read: no
+    /// process run, no environment, no directory listing outside them. Only
+    /// such a map is kept across runs (`encode`).
+    pub fn with_complete_inputs(mut self) -> Self {
+        self.inputs_complete = true;
+        self
+    }
+
+    /// The inputs' stamps as they are now, kept beside a persisted map so
+    /// a reader can tell it still holds without decoding it.
+    pub fn encode_stamps(&self) -> Vec<u8> {
+        let stamps: Vec<(&PathBuf, InputStamp)> = self.inputs.iter().map(|p| (p, input_stamp(p))).collect();
+        bincode::serialize(&stamps).unwrap_or_default()
+    }
+
+    /// Whether every input still carries the stamp `encode_stamps` kept.
+    pub fn stamps_hold(stamps: &[u8]) -> bool {
+        bincode::deserialize::<Vec<(PathBuf, InputStamp)>>(stamps)
+            .is_ok_and(|kept| kept.iter().all(|(p, s)| input_stamp(p) == *s))
+    }
+
+    /// The map as it is kept, or `None` when the reader read something its
+    /// inputs do not stamp: such a map is read afresh every time.
+    pub fn encode(&self) -> Option<Vec<u8>> {
+        if !self.inputs_complete {
+            return None;
+        }
+        let lanes = self
+            .lanes
+            .iter()
+            .map(|lane| match lane {
+                Lane::Table(rows) => PersistedLane::Table(rows.clone()),
+                Lane::Prefix { prefix, dirs, spelling, spells } => PersistedLane::Prefix {
+                    prefix: prefix.clone(),
+                    dirs: dirs.clone(),
+                    spelling: spelling.id.to_string(),
+                    spells: *spells,
+                },
+                Lane::SearchRoots { roots, spelling } => {
+                    PersistedLane::SearchRoots { roots: roots.clone(), spelling: spelling.id.to_string() }
+                }
+                Lane::AlwaysLoad(files) => PersistedLane::AlwaysLoad(files.clone()),
+            })
+            .collect();
+        let kept = Persisted {
+            lanes,
+            search_roots: self.search_roots.to_vec(),
+            tier_roots: self.tier_roots.clone(),
+            inputs: self.inputs.clone(),
+        };
+        bincode::serialize(&kept).ok()
+    }
+
+    /// A kept map, its spellings found among `spellings` by id. `None` when
+    /// the bytes do not decode or a lane names a spelling the reader no
+    /// longer has. Fields are restored as kept, not re-derived, so the
+    /// generation is the one a fresh read gives while the stamps hold.
+    pub fn decode(bytes: &[u8], spellings: &[ModuleSpelling]) -> Option<Self> {
+        let kept: Persisted = bincode::deserialize(bytes).ok()?;
+        let spelling = |id: &str| spellings.iter().find(|s| s.id == id).copied();
+        let lanes = kept
+            .lanes
+            .into_iter()
+            .map(|lane| {
+                Some(match lane {
+                    PersistedLane::Table(rows) => Lane::Table(rows),
+                    PersistedLane::Prefix { prefix, dirs, spelling: id, spells } => {
+                        Lane::Prefix { prefix, dirs, spelling: spelling(&id)?, spells }
+                    }
+                    PersistedLane::SearchRoots { roots, spelling: id } => {
+                        Lane::SearchRoots { roots, spelling: spelling(&id)? }
+                    }
+                    PersistedLane::AlwaysLoad(files) => Lane::AlwaysLoad(files),
+                })
+            })
+            .collect::<Option<Vec<Lane>>>()?;
+        Some(DependencyMap {
+            lanes,
+            search_roots: Arc::new(kept.search_roots),
+            tier_roots: kept.tier_roots,
+            inputs: kept.inputs,
+            inputs_complete: true,
+        })
     }
 
     /// The map with no lanes: the tier holds nothing.
@@ -261,15 +385,7 @@ impl DependencyMap {
         self.tier_roots.hash(&mut h);
         for input in &self.inputs {
             input.hash(&mut h);
-            let stamp = std::fs::metadata(input).ok().map(|m| {
-                let mtime = m
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_nanos());
-                (m.len(), mtime)
-            });
-            stamp.hash(&mut h);
+            input_stamp(input).hash(&mut h);
         }
         format!("{:016x}", h.finish())
     }
