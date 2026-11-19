@@ -281,54 +281,24 @@ pub fn strings_generation(conn: &Connection) -> i64 {
     .unwrap_or(0)
 }
 
-pub fn compute_inc_hash(inc_paths: &[PathBuf]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    for p in inc_paths {
-        p.hash(&mut hasher);
-    }
-    format!("{:016x}", hasher.finish())
-}
+/// `meta` keys no reader asks any more: the store-wide dependency gates
+/// (`inc_hash`, then `dependency_map`). A dependency row is valid by its own
+/// stamp, so nothing replaced them; `--gc-cache` deletes them.
+const RETIRED_META_KEYS: &[&str] = &["inc_hash", "dependency_map"];
 
-pub fn validate_inc_paths(conn: &Connection, inc_paths: &[PathBuf]) -> rusqlite::Result<()> {
-    // Same atomic check-and-stamp rationale as `validate_plugin_fingerprint`.
-    in_immediate_txn(conn, || validate_inc_paths_inner(conn, inc_paths))
-}
-
-fn validate_inc_paths_inner(conn: &Connection, inc_paths: &[PathBuf]) -> rusqlite::Result<()> {
-    let current_hash = compute_inc_hash(inc_paths);
-    let stored: Option<String> = conn
-        .query_row(sql::META_GET.registered(), params!["inc_hash"], |row| row.get(0))
-        .ok();
-
-    if stored.as_deref() != Some(&current_hash) {
-        log::info!(
-            "@INC changed (was {:?}, now {}), clearing module cache",
-            stored,
-            current_hash
-        );
-        // Import-tier only: workspace blobs bake plugin emissions and their
-        // own source, not @INC paths — and the workspace indexer may have
-        // written its rows BEFORE this validation runs (two writers, one
-        // DB), so anything broader would delete rows mid-write and leave
-        // already-evicted resident copies with no retrieval source.
-        conn.execute(sql::MODULES_CLEAR_IMPORT.registered(), [])?;
-        conn.execute(sql::REFS_CLEAR_IMPORT.registered(), [])?;
-        conn.execute(sql::SYMS_CLEAR_IMPORT.registered(), [])?;
-        conn.execute(sql::HELD_CLEAR_IMPORT.registered(), [])?;
-        conn.execute(sql::FILES_CLEAR_IMPORT.registered(), [])?;
-        conn.execute(sql::META_SET.registered(), params!["inc_hash", current_hash])?;
-    }
-    Ok(())
+/// Delete the `RETIRED_META_KEYS` rows; returns how many were present.
+pub fn forget_retired_meta(conn: &Connection) -> usize {
+    RETIRED_META_KEYS
+        .iter()
+        .map(|k| conn.execute(sql::META_DELETE.registered(), params![k]).unwrap_or(0))
+        .sum()
 }
 
 /// Hydrate the in-memory `builtins` mirror from SQLite, parsing
 /// `perlfunc.pod` and writing rows on first use (or when the perl
 /// version tag changes since the last run). Returns the populated
 /// map. Keyed in `meta` under `builtins_perl_version`: mismatch wipes
-/// the table and re-parses, same pattern as `validate_inc_paths` /
-/// `validate_plugin_fingerprint`.
+/// the table and re-parses, same pattern as `validate_plugin_fingerprint`.
 pub fn hydrate_builtins(conn: &Connection) -> rusqlite::Result<DashMap<String, String>> {
     let map: DashMap<String, String> = DashMap::new();
 
@@ -424,8 +394,7 @@ fn validate_conclusion_fingerprint_inner(
 /// Without this check, a plugin author who edits a `.rhai`, restarts
 /// the LSP, and inspects a cross-file query will see the *old*
 /// plugin's emissions in the cached `FileAnalysis` blobs — making
-/// plugin QA impossible. Mirrors `validate_inc_paths`: same meta-row
-/// pattern, same hard-clear on mismatch.
+/// plugin QA impossible.
 pub fn validate_plugin_fingerprint(conn: &Connection, fingerprint: &str) -> rusqlite::Result<()> {
     // IMMEDIATE: check-and-stamp must be atomic against the other writer
     // (resolver thread vs workspace indexer) — two validators both reading
@@ -455,8 +424,8 @@ fn validate_plugin_fingerprint_inner(conn: &Connection, fingerprint: &str) -> ru
 /// Drop the modules table when the driver's external analysis inputs (the
 /// C++ toolchain: system include roots, predefined macros — or its probe
 /// FAILURE) changed since the rows were written. Same meta-row pattern as
-/// `validate_inc_paths`: a generation built under degraded/different inputs
-/// must not be served under the current ones (H8).
+/// `validate_plugin_fingerprint`: a generation built under degraded/different
+/// inputs must not be served under the current ones (H8).
 pub fn validate_input_fingerprint(conn: &Connection, fingerprint: u64) -> rusqlite::Result<()> {
     // Same atomic check-and-stamp rationale as `validate_plugin_fingerprint`.
     in_immediate_txn(conn, || validate_input_fingerprint_inner(conn, fingerprint))

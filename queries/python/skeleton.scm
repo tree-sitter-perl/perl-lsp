@@ -23,12 +23,16 @@
 ; base; member completion + method resolution walk the ancestors). The
 ; written spelling resolves through the file's imports to the parent's
 ; identity, and is a class reference — a dotted one by its whole spelling,
-; rewriting only its last name.
+; rewriting only its last name. A generic base (`CallbackDict[str, Any]`)
+; is the class it subscripts.
 (class_definition
   name: (identifier) @def.class.name
   superclasses: (argument_list
     [(identifier) @parent @ref.type
-     (attribute attribute: (identifier) @ref.type) @parent @ref.spelled]))
+     (attribute attribute: (identifier) @ref.type) @parent @ref.spelled
+     (subscript
+       value: [(identifier) @parent @ref.type
+               (attribute attribute: (identifier) @ref.type) @parent @ref.spelled])]))
 
 ; `-> NoReturn` / `-> Never` (bare or through `typing.`) says a call
 ; never comes back; how it leaves is the body's business.

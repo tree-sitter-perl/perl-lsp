@@ -202,7 +202,8 @@ pub(crate) fn print_usage() {
     eprintln!("                                                         (scripts/equiv/README.md)");
     eprintln!("  perl-lsp --dump-package <root> <package>               Dump every sub in <package>");
     eprintln!("                                                         with derived type info");
-    eprintln!("  perl-lsp --gc-cache <root>                             Reclaim unreferenced interned");
+    eprintln!("  perl-lsp --gc-cache <root>                             Drop stale dependency rows and");
+    eprintln!("                                                          reclaim unreferenced interned");
     eprintln!("                                                          strings (run when nothing else");
     eprintln!("                                                          is writing the cache)");
     eprintln!("  perl-lsp --clear-cache [<root>]                        Wipe the module cache for");
@@ -279,12 +280,11 @@ fn canonical_root_and_uri(root: &str) -> (std::path::PathBuf, String) {
     (path, uri)
 }
 
-/// Full CLI workspace setup: index the workspace, open the SQLite cache,
-/// warm cached modules, resolve missing imports + ancestors via @INC,
-/// save fresh entries back to disk. Mirrors the LSP server's startup
-/// minus the resolver thread (one-shot, synchronous). Used by every
-/// CLI command that needs cross-file resolution to behave like the
-/// running server.
+/// Full CLI workspace setup: index the workspace, then ask the dependency
+/// tier for what the project's files name and wait for the resolver thread
+/// to land it. Mirrors the LSP server's startup, synchronously: a one-shot
+/// run has no partial answer to give. Used by every CLI command that needs
+/// cross-file resolution to behave like the running server.
 fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleIndex) {
     // `--check --timings` already flipped this on; the env var lets any
     // startup-driven CLI mode (dump-package, etc.) opt in too.
@@ -302,7 +302,7 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
     let module_index = module_index::ModuleIndex::new_for_cli();
     module_index.mark_long_lived_from_env();
     // Wake the headless resolver: it blocks on this channel for the
-    // @INC scan + SQLite warm.
+    // map's name listing + SQLite warm.
     module_index.set_workspace_root(Some(root_uri.as_str()));
     let ws = open_docs::OpenDocs::new();
     // Only the served language's tree is walked — the same choice the
@@ -332,128 +332,25 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
         );
     }
 
-    // @INC is the Perl hub's dependency tier; a pack process has none.
-    if !served.caps().hub_enrichment {
+    // A language with no dependency map has no tier to ask.
+    if !module_index.serves_dependency_tier() {
         return (ws, module_index);
     }
 
-    let mut inc_paths = timings::phase("cli::discover_inc", module_resolver::discover_inc_paths);
-    module_resolver::add_project_lib_paths(&mut inc_paths, &root_path);
-
-    let db = module_cache::open_cache_db(Some(&root_uri), "perl");
-    let mut stale_set: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if let Some(ref conn) = db {
-        let _ = module_cache::validate_inc_paths(conn, &inc_paths);
-        let _ = module_cache::validate_plugin_fingerprint(
-            conn,
-            &plugin::rhai_host::plugin_fingerprint(),
-        );
-        // Beside the plugin gate, and for the same reason: a cached artifact
-        // that describes a derivation we no longer run. This one clears
-        // conclusions only — the blobs stay, because the repair is a re-bake.
-        let _ = module_cache::validate_conclusion_fingerprint(
-            conn,
-            module_cache::conclusion_fingerprint(),
-        );
-        let (warmed, stale) = timings::phase("cli::warm_inc_cache", || {
-            module_cache::warm_cache(
-                conn,
-                module_index.cache_raw(),
-                module_index.all_defs_raw(),
-                module_index.is_long_lived() && module_resolver::eviction_enabled(),
-            )
-        });
-        // Stamp generations for the warm-loaded @INC providers (the warm
-        // scan bypasses the registration front doors) so `enrichment_key`
-        // reads a real token for every provider.
-        module_index.stamp_import_generations();
-        if warmed > 0 {
-            eprintln!("Cache: {} modules loaded from disk", warmed);
-        }
-        stale_set = stale.into_iter().collect();
-    }
-
-    let mut needed = std::collections::HashSet::new();
-    module_index.for_each_registered_file(&mut |cached| {
-        for imp in &cached.analysis.imports {
-            needed.insert(imp.module_name.clone());
-        }
-        for (_pkg, parents) in cached.analysis.package_parent_edges() {
-            for p in parents {
-                needed.insert(p.clone());
-            }
-        }
-    });
-
-    let mut parser = module_resolver::create_parser();
-    let mut parse_memo: module_resolver::ParseMemo = std::collections::HashMap::new();
-    let mut resolved = 0usize;
-    let mut already_cached = 0usize;
-    // Worklist, not a fixed set: re-exporting modules (Test::Most → Test::More)
-    // pull their re-exported producers' surfaces transitively, so those
-    // producers must be resolved too even though no workspace file `use`s them
-    // directly. Enqueue each resolved module's `reexport_modules`. Bounded by
-    // the seen-set (`queued`); the cross-file surface walk handles cycles.
-    let mut queue: std::collections::VecDeque<String> = needed.iter().cloned().collect();
-    let mut queued: std::collections::HashSet<String> = needed.clone();
+    // The project's demand goes through the one acquisition, as an editor's
+    // does: the resolver thread reads the map, gates the store and lands
+    // every ask; a one-shot run waits for it to go idle.
     let _resolve_phase = timings::PhaseGuard::start("cli::resolve_imports");
-    while let Some(name) = queue.pop_front() {
-        let cached_arc = if module_index.cache_raw().contains_key(name.as_str())
-            && !stale_set.contains(&name)
-        {
-            already_cached += 1;
-            timings::record_cached(&name);
-            // The relation, not the winner — the descent below must see
-            // every provider's re-export edges.
-            let cands = {
-                use crate::model::file_analysis::CrossFileLookup;
-                module_index.def_candidates(&name)
-            };
-            (!cands.is_empty()).then_some(cands)
-        } else {
-            if stale_set.contains(&name) {
-                parse_memo.remove(&name);
-            }
-            module_resolver::resolve_and_parse_with_memo(&inc_paths, &name, &mut parser, &mut parse_memo)
-                .map(|providers| {
-                    if let Some(ref conn) = db {
-                        // One row per provider — the name maps to a set.
-                        for m in &providers {
-                            module_cache::save_to_db(
-                                conn,
-                                &name,
-                                &Some(std::sync::Arc::clone(m)),
-                                module_cache::NAME_KEYED_SOURCE,
-                            );
-                        }
-                    }
-                    module_index.insert_cache_providers(&name, Some(providers.clone()));
-                    resolved += 1;
-                    providers
-                })
-        };
-        if let Some(providers) = cached_arc {
-            // Every provider's re-export edges: a shadowed twin can name a
-            // producer the winner never mentions.
-            for cached in &providers {
-                for re in &cached.analysis.reexport_modules {
-                    if queued.insert(re.clone()) {
-                        queue.push_back(re.clone());
-                    }
-                }
-            }
-        }
-    }
+    module_index.for_each_registered_file(&mut |cached| module_index.request_demand_of(&cached.analysis));
+    module_index.wait_idle();
     drop(_resolve_phase);
-    eprintln!("Modules: {} cached, {} resolved, {} total", already_cached, resolved, queued.len());
-
-    // `warm_cache` populated `cache_raw()` directly, bypassing the reverse
-    // index, and `insert_cache` only indexes export/export_ok. Rebuild the
-    // full `func → modules` index from the cache so `find_exporters` answers
-    // identically on cold and warm runs (B6 export-attribution regression).
-    timings::phase("cli::rebuild_reverse_index", || {
-        module_index.rebuild_reverse_index_from_cache()
-    });
+    let (landed, missed) = module_index.asked_counts();
+    eprintln!("Modules: {} landed, {} missed", landed, missed);
+    if crate::util::ghost_stats::enabled() {
+        let (records, bytes) = module_index.freshness_heap_estimate();
+        crate::util::ghost_stats::count_by("freshness.records", records as u64);
+        crate::util::ghost_stats::count_by("freshness.heap_kib", (bytes / 1024) as u64);
+    }
 
     (ws, module_index)
 }
@@ -476,7 +373,8 @@ fn severity_rank(s: &str) -> u8 {
     }
 }
 
-/// --gc-cache <root> — reclaim interned strings nothing references.
+/// --gc-cache <root> — drop dependency rows and kept maps no run can take, and reclaim
+/// interned strings nothing references.
 ///
 /// A MAINTENANCE verb, not an automatic sweep, and the distinction is the
 /// point. `strings` is append-only in normal operation: every deletion path
@@ -493,7 +391,10 @@ fn severity_rank(s: &str) -> u8 {
 /// runs only when the caller knows nothing else is writing.
 pub(crate) fn cli_gc_cache(root: &str) {
     let (_, root_uri) = canonical_root_and_uri(root);
-    let Some(conn) = module_cache::open_cache_db(Some(&root_uri), "perl") else {
+    // The served language's store: a pack's dependency rows and kept map
+    // live in its own, never in Perl's.
+    let lang = crate::build::language_driver::LanguageRegistry::served().id();
+    let Some(conn) = module_cache::open_cache_db(Some(&root_uri), lang) else {
         eprintln!("No cache database for {root}");
         exit_with(1, "exit");
     };
@@ -514,6 +415,14 @@ pub(crate) fn cli_gc_cache(root: &str) {
         n(sql::GC_COUNT_HELD),
         before,
         n(sql::GC_COUNT_ORPHANED_STRINGS),
+    );
+    // Before the strings sweep, so the names a dropped row held are freed
+    // in the same run.
+    let dependency_rows = module_cache::gc_dependency_rows(&conn);
+    let retired_meta = module_cache::forget_retired_meta(&conn);
+    let maps = module_cache::gc_dependency_maps(&conn);
+    eprintln!(
+        "Dropped {dependency_rows} dependency rows no landing can take; {maps} kept dependency maps no run can serve; {retired_meta} retired meta rows"
     );
     let missing = n(sql::GC_COUNT_WORKSPACE_FILES);
     let reclaimed = module_cache::gc_strings(&conn);

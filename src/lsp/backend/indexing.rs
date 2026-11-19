@@ -83,6 +83,11 @@ impl Backend {
             let conn = crate::index::module_cache::open_cache_db(ws_key.as_deref(), "perl");
             for (path, typ) in perl_changes {
                 let canon = crate::util::canonical_path::CanonicalPath::resolve(path.as_path()).into_path_buf();
+                // A file under the dependency map's tier root is the tier's,
+                // never a workspace file, though the watcher's glob hears it.
+                if module_index.dependency_map().is_some_and(|m| m.owns(&canon)) {
+                    continue;
+                }
                 if let Some(ref conn) = conn {
                     crate::index::module_cache::invalidate_generation(conn, &canon.to_string_lossy());
                     if canon != path {
@@ -113,11 +118,18 @@ impl Backend {
                         // its persisted generation was just invalidated, so
                         // the resident copy is the only source until the
                         // next bulk index re-persists.
+                        // TODO(perl-watcher-cap): read through
+                        // `source_files::analyze_file` under the driver's cap and
+                        // take the DELETED arm when it refuses, as the pack
+                        // invalidator does; a file saved past 1 MB keeps
+                        // registering here although the walk would skip it.
                         if let Ok(source) = crate::util::text::read_source(&path) {
                             let mut parser = crate::index::module_resolver::create_parser();
                             if let Some(tree) = parser.parse(&source, None) {
                                 let analysis = crate::build::builder::build(&tree, source.as_bytes());
                                 let arc = Arc::new(analysis);
+                                // A save can name a module nothing asked for yet.
+                                module_index.request_demand_of(&arc);
                                 module_index.record_workspace_projections(&canon, &arc);
                                 // register_workspace_resident routes through
                                 // record_and_dirty: the dirty set is bound to

@@ -3,7 +3,7 @@
 //! the document's own predicate picks.
 
 use super::*;
-use crate::model::file_analysis::{ImportPrefix, ImportReach};
+use crate::model::file_analysis::{ImportBinding, ImportPrefix, ImportReach};
 
 pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     match e.cap {
@@ -65,12 +65,23 @@ fn name_row(st: &mut ExtractState, e: &Event) {
         (None, Some(_)) => NameTable::Constant,
         (None, None) => NameTable::Class,
     };
+    let alias = in_match(ImportCap::Alias).map(|a| a.text.clone());
+    // Only a top-level row is a member of the module: an import inside a
+    // function binds a local of that call.
+    let member = match (names.imports.binds, st.file_module, st.cur_scope) {
+        (ImportBinding::ModuleMember, Some(m), ScopeId(0)) => Some(crate::model::file_analysis::QualifiedName {
+            namespace: m.segments.iter().fold(String::new(), |ns, seg| crate::model::conventions::join_qualified(&ns, seg, sep)),
+            leaf: alias.clone().unwrap_or_else(|| leaf.to_string()),
+        }),
+        _ => None,
+    };
     let row = crate::model::file_analysis::UseRow {
         span: e.span(),
         name: crate::model::file_analysis::QualifiedName { namespace, leaf: leaf.to_string() },
-        alias: in_match(ImportCap::Alias).map(|a| a.text.clone()),
+        alias,
         reach,
         table,
+        member,
     };
     if table == NameTable::Class {
         push_import(st, &row.name.identity(sep));

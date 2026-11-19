@@ -908,6 +908,13 @@
     . [(name) @import.name @ref.constant
        (qualified_name (name) @ref.constant) @import.name]
     alias: (name)? @import.alias))
+; A `use` line still being typed, with no `;` yet, is an ERROR that holds
+; the keyword and the path: it states the import all the same, so the
+; cursor's module-path slot and the use-map read it.
+(ERROR
+  "use"
+  .
+  (namespace_name) @import.name)
 ; `use A\B\{C, D as E}`: each clause hangs off the shared prefix.
 (namespace_use_declaration
   !type

@@ -90,8 +90,8 @@ fn shred_derived_rows_inner(
     held: &[String],
 ) -> rusqlite::Result<()> {
     // Sticky workspace tier: project lib/ files are inside the walk AND on
-    // @INC (add_project_lib_paths), so the resolver re-shreds them as
-    // 'import'. The walk's verdict wins — downgrading would let the @INC
+    // the dependency map's search path, so the resolver could re-shred them
+    // as a dependency. The walk's verdict wins — downgrading would let the map's
     // hard-clear take an editable file's generation out from under its
     // stripped resident copy.
     conn.execute(sql::FILES_UPSERT.registered(), params![path, source])?;
@@ -232,6 +232,84 @@ pub fn gc_strings(conn: &Connection) -> usize {
     .unwrap_or(0)
 }
 
+/// `--gc-cache`: drop every dependency row no landing can take again — its
+/// file is gone or changed, or another extract version wrote it. A current
+/// row the map no longer reaches stays: it describes its file, not the map
+/// that placed it, and another map (an editor's `PERL5LIB`, the next
+/// manifest) may place that file again.
+pub fn gc_dependency_rows(conn: &Connection) -> usize {
+    let stale: Vec<String> = conn
+        .prepare(sql::GC_DEPENDENCY_STAMPS.registered())
+        .and_then(|mut stmt| {
+            let rows = stmt.query_map(params![DEPENDENCY_SOURCE], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?))
+            })?;
+            Ok(rows
+                .filter_map(Result::ok)
+                .filter(|(path, mtime, size, version)| {
+                    !matches!(classify_row_generation(path, *mtime, *size, *version), RowGeneration::Current(_))
+                })
+                .map(|(path, ..)| path)
+                .collect())
+        })
+        .unwrap_or_default();
+    for path in &stale {
+        invalidate_generation_tier(conn, path, DEPENDENCY_SOURCE);
+    }
+    stale.len()
+}
+
+/// The dependency map kept for the project at `root`, when its inputs
+/// still carry the stamps it was kept with. A row that does not hold is
+/// simply not served; the caller reads afresh and writes over it.
+pub fn load_dependency_map(conn: &Connection, root: &str) -> Option<Vec<u8>> {
+    let (stamps, map): (Vec<u8>, Vec<u8>) = conn
+        .query_row(
+            sql::DEPENDENCY_MAP_LOAD.registered(),
+            params![root, crate::util::cache_epochs::DEPENDENCY_MAP],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok()?;
+    crate::build::dependency_map::DependencyMap::stamps_hold(&stamps).then_some(map)
+}
+
+/// Keep `map` for the project at `root` with its inputs' stamps as they
+/// are now. A map whose reader read something its inputs do not stamp is
+/// not kept.
+pub fn save_dependency_map(conn: &Connection, root: &str, map: &crate::build::dependency_map::DependencyMap) -> bool {
+    let Some(bytes) = map.encode() else { return false };
+    conn.execute(
+        sql::DEPENDENCY_MAP_SAVE.registered(),
+        params![root, crate::util::cache_epochs::DEPENDENCY_MAP, map.encode_stamps(), bytes],
+    )
+    .is_ok()
+}
+
+/// `--gc-cache`'s sweep of kept maps: drop each a load would not serve —
+/// another epoch's, or one whose inputs moved since.
+pub fn gc_dependency_maps(conn: &Connection) -> usize {
+    let stale: Vec<String> = conn
+        .prepare(sql::DEPENDENCY_MAP_ALL.registered())
+        .and_then(|mut stmt| {
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Vec<u8>>(2)?))
+            })?;
+            Ok(rows
+                .filter_map(Result::ok)
+                .filter(|(_, version, stamps)| {
+                    version != crate::util::cache_epochs::DEPENDENCY_MAP
+                        || !crate::build::dependency_map::DependencyMap::stamps_hold(stamps)
+                })
+                .map(|(root, ..)| root)
+                .collect())
+        })
+        .unwrap_or_default();
+    for root in &stale {
+        let _ = conn.execute(sql::DEPENDENCY_MAP_DELETE.registered(), params![root]);
+    }
+    stale.len()
+}
+
 /// Drop one file's whole persisted generation — blob row AND derived ref
 /// rows, together (the eraser twin of the write invariant "blob + rows
 /// describe one generation"). Every invalidation seam calls this; nobody
@@ -284,13 +362,13 @@ fn forget_orphaned_derivations(conn: &Connection, path: &str) {
 }
 
 /// Tier-scoped eraser: drops the generation ONLY when its rows carry
-/// `source` — the walk's dead-row GC must not take a dual-homed file's
-/// import-tier generation (project-lib files leave the walk when
-/// gitignored but stay valid @INC modules).
+/// `source` — the walk's dead-row GC must not take a file the dependency
+/// tier persisted (project-lib files leave the walk when gitignored but
+/// stay valid @INC modules).
 pub fn invalidate_generation_tier(conn: &Connection, path: &str, source: &str) {
     let _ = conn.execute(sql::MODULES_DELETE_PATH_TIER.registered(), params![path, source]);
-    // Stubs are workspace-tier only — an import-tier invalidation must not
-    // orphan a dual-homed file's still-valid workspace stub.
+    // Stubs are workspace-tier only — a dependency-tier invalidation must
+    // not orphan a workspace stub.
     if source == "workspace" {
         delete_stub(conn, path);
     }
@@ -592,29 +670,29 @@ pub fn ref_candidate_file_count(conn: &Connection, key: &str) -> u64 {
 /// Deferred-write chunking: N items per `BEGIN IMMEDIATE`…`COMMIT`, the
 /// SQLITE_BUSY_SNAPSHOT-safe shape every post-scan backfill shares (writing
 /// inside a streaming SELECT's snapshot turns a concurrent commit into an
-/// unretried BUSY_SNAPSHOT abort). A failed txn OPEN abandons the remaining
-/// queue (the writer is likely gone); a failed COMMIT rolls back and keeps
-/// going — later chunks may land.
+/// unretried BUSY_SNAPSHOT abort). The first BEGIN, item or COMMIT the store
+/// refuses rolls its chunk back and ends the backfill with that
+/// `PersistFailure`, fatal like every other refused persist.
 pub fn write_in_chunks<T>(
     conn: &Connection,
     items: &[T],
     chunk_size: usize,
     label: &str,
-    per_item: impl Fn(&Connection, &T),
-) {
+    per_item: impl Fn(&Connection, &T) -> rusqlite::Result<()>,
+) -> Result<(), PersistFailure> {
     for chunk in items.chunks(chunk_size) {
-        if conn.execute_batch(sql::TXN_BEGIN_IMMEDIATE.registered()).is_err() {
-            log::error!("{label}: txn open failed; remaining items defer to next warm");
-            break;
-        }
-        for item in chunk {
-            per_item(conn, item);
-        }
-        if let Err(e) = conn.execute_batch(sql::TXN_COMMIT.registered()) {
-            log::error!("{label}: commit failed: {}", e);
+        conn.execute_batch(sql::TXN_BEGIN_IMMEDIATE.registered())
+            .map_err(|e| PersistFailure::new(conn, format_args!("{label}: BEGIN: {e}")))?;
+        let written = chunk
+            .iter()
+            .try_for_each(|item| per_item(conn, item))
+            .and_then(|()| conn.execute_batch(sql::TXN_COMMIT.registered()));
+        if let Err(e) = written {
             let _ = conn.execute_batch(sql::TXN_ROLLBACK.registered());
+            return Err(PersistFailure::new(conn, format_args!("{label}: {e}")));
         }
     }
+    Ok(())
 }
 
 /// Total SOURCE bytes of every persisted analysis (all tiers — a sweep

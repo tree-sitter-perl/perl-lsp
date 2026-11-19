@@ -464,6 +464,62 @@ fn an_unindexed_identity_widens_to_its_leaf_out_loud() {
     assert!(widening_codes(&idx, &vendored).is_empty());
 }
 
+/// A package's `__init__` re-exports what it imports at its top level:
+/// `pkg.Group` IS `pkg.core.Group`. Every lane lands on it exactly — no
+/// stand-in, though a same-leaf stranger is indexed — and the ancestry
+/// walk climbs through it to its parents. An import inside a function
+/// binds no member.
+#[cfg(feature = "python")]
+#[test]
+fn a_package_member_is_the_class_its_init_imports() {
+    use crate::build::language_driver::LanguageRegistry;
+    use crate::model::file_analysis::MethodResolution;
+    let files = [
+        (
+            "pkg/__init__.py",
+            "from .core import Group\nfrom .loaders import BaseLoader as Loader\n\ndef lazy():\n    from .loaders import BaseLoader as Hidden\n    return Hidden\n",
+        ),
+        ("pkg/base.py", "class Base:\n    def name(self):\n        return 1\n"),
+        ("pkg/core.py", "from .base import Base\n\nclass Group(Base):\n    pass\n"),
+        ("pkg/loaders.py", "class BaseLoader:\n    pass\n"),
+        ("other/__init__.py", ""),
+        ("other/group.py", "class Group:\n    pass\n"),
+        (
+            "app.py",
+            "import pkg\nfrom pkg import Loader\n\nclass G(pkg.Group):\n    pass\n\nclass L(Loader):\n    pass\n\nclass S(Loader[int], pkg.Group[str]):\n    pass\n",
+        ),
+    ];
+    let t = Tree::new("members", &files);
+    let driver = LanguageRegistry::compiled().for_path(std::path::Path::new("x.py")).unwrap();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    for (rel, src) in files {
+        let p = t.0.join(rel);
+        idx.insert_workspace_for_test(p.clone(), driver.analyze_with_path(src, Some(&p)));
+    }
+    let init = idx.workspace_file_for_test(&t.0.join("pkg/__init__.py")).unwrap();
+    assert_eq!(
+        init.module_members().collect::<Vec<_>>(),
+        [
+            ("pkg.Group".to_string(), "pkg.core.Group".to_string()),
+            ("pkg.Loader".to_string(), "pkg.loaders.BaseLoader".to_string()),
+        ]
+    );
+    let app = t.0.join("app.py");
+    // a generic base is the class it subscripts
+    assert_eq!(idx.workspace_file_for_test(&app).unwrap().declared_parents("app.S"), ["pkg.Loader", "pkg.Group"]);
+    for (at, file, row) in [(Point::new(3, 12), "core.py", 2), (Point::new(6, 8), "loaders.py", 0)] {
+        let (defs, hover, labels) = landing(&idx, &app, at);
+        assert_eq!(defs, [(file.to_string(), row)], "goto-def from {at:?}");
+        assert_eq!(hover.as_deref(), Some(file), "hover from {at:?}");
+        assert_eq!(labels, [None], "no stand-in from {at:?}");
+    }
+    assert!(matches!(
+        member_on(&idx, &app, "app.G"),
+        Some(MethodResolution::CrossFile { ref class, widened: false, .. }) if class == "pkg.base.Base"
+    ));
+    assert!(widening_codes(&idx, &app).is_empty());
+}
+
 /// A class body is a namespace for the code written directly in it: a
 /// nested class is filed under its enclosing class, a bare name there
 /// that the class declares names the nested class first, and a method —

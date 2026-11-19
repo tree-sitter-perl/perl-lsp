@@ -15,9 +15,8 @@ use std::path::Path;
 /// Per-language behavioral capabilities — the properties core layers ask
 /// instead of naming languages (rule #10). Each field is one behavior a
 /// serving site genuinely tests; a driver declares the ones that hold for
-/// its language. `Default` is every capability OFF/empty — the honest
-/// answer for an id no driver claims (which also matches how the serving
-/// paths treated an unrecognized language before the capabilities existed).
+/// its language. `Default` is every capability OFF/empty and the pack file
+/// cap — the honest answer for an id no driver claims.
 ///
 /// This is the CLOSED set of axes on which served languages may differ in
 /// core; growing it should feel expensive — the first question on a new
@@ -26,7 +25,7 @@ use std::path::Path;
 /// `..`), so adding one is a compile error until every declared answer is
 /// reviewed — a capability added-and-silently-defaulted is how a caps
 /// struct decays back into the branching it replaced.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct DriverCaps {
     /// Analyses integrate with the Perl module hub's cross-file lane:
     /// import/export enrichment (`enrich_imported_types_with_keys`),
@@ -63,6 +62,26 @@ pub struct DriverCaps {
     /// See `LangPack::entrypoint_symbols` — symbols the runtime enters
     /// through the ABI, alive at zero fan-in by contract.
     pub entrypoint_symbols: &'static [&'static str],
+    /// Files at or over this many bytes are never analyzed — the walk
+    /// lists them, and a re-analysis refuses them.
+    pub file_cap: u64,
+}
+
+impl Default for DriverCaps {
+    fn default() -> Self {
+        DriverCaps {
+            hub_enrichment: false,
+            cursor_context: false,
+            hover_info: false,
+            signature_help: false,
+            selection_range: false,
+            synchronous_rebuild: false,
+            context_gather: false,
+            pack_invalidation: false,
+            entrypoint_symbols: &[],
+            file_cap: crate::build::source_files::PACK_FILE_CAP,
+        }
+    }
 }
 
 /// Everything the server needs to host one language: parse + analyze a
@@ -143,6 +162,31 @@ pub trait LanguageDriver: Send + Sync {
     fn path_inputs_current(&self, _path: &Path, _analysis: &FileAnalysis) -> bool {
         true
     }
+    /// This language's reader of the dependency map for a project at
+    /// `root` (`None`: no project open). `None` = the language has no
+    /// dependency tier and the workspace walk is the whole story.
+    fn dependency_map(&self, _root: Option<&Path>) -> Option<crate::build::dependency_map::DependencyMap> {
+        None
+    }
+    /// Whether this language has a reader of the dependency map at all —
+    /// asked before any project is open, so a process whose language has
+    /// none runs no dependency tier.
+    fn has_dependency_map(&self) -> bool {
+        false
+    }
+    /// The spellings this language's maps' lanes use, by which a kept map
+    /// names them back (`DependencyMap::decode`).
+    fn dependency_spellings(&self) -> &'static [crate::build::dependency_map::ModuleSpelling] {
+        &[]
+    }
+}
+
+/// A language's reader of the dependency map: the read itself, and every
+/// spelling the lanes it builds use.
+#[derive(Clone, Copy)]
+pub struct DependencyReader {
+    pub read: fn(Option<&Path>) -> Option<crate::build::dependency_map::DependencyMap>,
+    pub spellings: &'static [crate::build::dependency_map::ModuleSpelling],
 }
 
 /// How a language that names modules by path names one: the marker file
@@ -222,6 +266,7 @@ impl LanguageDriver for PerlDriver {
             signature_help: true,
             selection_range: true,
             synchronous_rebuild: true,
+            file_cap: 1_000_000,
             ..Default::default()
         }
     }
@@ -229,6 +274,15 @@ impl LanguageDriver for PerlDriver {
         // Sigils open variable completion; `>`/`:`/`{` open
         // method/pkg/hash-key slots; `(`/`,` are signature-help adjacent.
         &["$", "@", "%", ">", ":", "{", "(", ","]
+    }
+    fn dependency_map(&self, root: Option<&Path>) -> Option<crate::build::dependency_map::DependencyMap> {
+        Some(crate::build::inc::read_map(root))
+    }
+    fn has_dependency_map(&self) -> bool {
+        true
+    }
+    fn dependency_spellings(&self) -> &'static [crate::build::dependency_map::ModuleSpelling] {
+        std::slice::from_ref(&crate::build::inc::SPELLING)
     }
 }
 
@@ -300,6 +354,10 @@ pub struct PackDriver {
     /// (python). Asks the walk's marker snapshot, else the disk, so it
     /// runs in the gather phase.
     file_module: Option<FileModuleRule>,
+    /// The language's reader of the dependency map (php:
+    /// `build::composer`, python: `build::venv`). `None` = no dependency tier; the walk is the
+    /// whole story.
+    dependency_map: Option<DependencyReader>,
 }
 
 /// Pre-parse external state gathered in phase 1 (`gather_pack_context`) and
@@ -406,6 +464,15 @@ impl LanguageDriver for PackDriver {
     }
     fn path_inputs_current(&self, path: &Path, analysis: &FileAnalysis) -> bool {
         self.file_module.is_none() || self.module_of(path) == analysis.pack.file_module
+    }
+    fn dependency_map(&self, root: Option<&Path>) -> Option<crate::build::dependency_map::DependencyMap> {
+        self.dependency_map.and_then(|r| (r.read)(root))
+    }
+    fn has_dependency_map(&self) -> bool {
+        self.dependency_map.is_some()
+    }
+    fn dependency_spellings(&self) -> &'static [crate::build::dependency_map::ModuleSpelling] {
+        self.dependency_map.map_or(&[], |r| r.spellings)
     }
 }
 
@@ -693,6 +760,7 @@ fn cpp_driver() -> PackDriver {
         input_fingerprint: Some(crate::build::cpp_reparse::toolchain_fingerprint),
         access_regions: Some(crate::build::cpp_reparse::access_regions),
         file_module: None,
+        dependency_map: None,
     }
 }
 
@@ -715,7 +783,14 @@ fn python_driver() -> PackDriver {
         include_closure: None,
         input_fingerprint: None,
         access_regions: None,
-        file_module: Some(FileModuleRule { marker: "__init__.py", name: crate::build::packs::python_file_module }),
+        file_module: Some(FileModuleRule {
+            marker: crate::build::packs::PYTHON_PACKAGE_MARKER,
+            name: crate::build::packs::python_file_module,
+        }),
+        dependency_map: Some(DependencyReader {
+            read: crate::build::venv::read_map,
+            spellings: crate::build::venv::SPELLINGS,
+        }),
     }
 }
 
@@ -742,6 +817,10 @@ fn php_driver() -> PackDriver {
         input_fingerprint: None,
         access_regions: None,
         file_module: None,
+        dependency_map: Some(DependencyReader {
+            read: crate::build::composer::read_map,
+            spellings: crate::build::composer::SPELLINGS,
+        }),
     }
 }
 
@@ -765,6 +844,7 @@ fn r_driver() -> PackDriver {
         input_fingerprint: None,
         access_regions: None,
         file_module: None,
+        dependency_map: None,
     }
 }
 
@@ -789,6 +869,7 @@ fn cmake_driver() -> PackDriver {
         input_fingerprint: None,
         access_regions: None,
         file_module: None,
+        dependency_map: None,
     }
 }
 

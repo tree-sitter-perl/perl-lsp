@@ -5,6 +5,17 @@ use super::*;
 
 // ---- Cross-file lookup capability ----
 
+/// The tier a file the index holds belongs to. A fact on the file's record,
+/// minted where the file lands: a front door registers the project's own
+/// files, the dependency tier lands the rest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileRole {
+    Workspace,
+    /// Read-only: visible to references, never rewritten by rename, never
+    /// swept for the project's diagnostics.
+    Dependency,
+}
+
 /// A module in the cache — its filesystem path plus the full FileAnalysis of
 /// its source. Shared by reference-count so async handlers don't deep-copy.
 #[derive(Debug)]
@@ -592,6 +603,13 @@ pub trait CrossFileLookup {
     fn leaf_def_candidates(&self, _leaf: &str) -> Vec<std::sync::Arc<CachedModule>> {
         Vec::new()
     }
+    /// The identity a module member names (`click.Group` → `click.core.Group`,
+    /// `FileAnalysis::module_members`) in the files this lookup holds; one
+    /// hop — `ScopedLookup::use_map_candidates` follows a chain. Default:
+    /// none, so no member resolves.
+    fn module_member_target(&self, _member: &str) -> Option<String> {
+        None
+    }
     /// `def_candidates` AS SEEN from the querying scope — the forward-
     /// resolution face of the candidate table. Raw indexes pass the full
     /// relation through; `ScopedLookup` narrows a CLOSURE-scoped origin
@@ -604,16 +622,18 @@ pub trait CrossFileLookup {
     fn visible_def_candidates(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
         self.def_candidates(name)
     }
-    /// `visible_def_candidates` with its WIDENING verdict: `true` when the
-    /// name is an identity nothing indexed declares and the candidates are
-    /// the same-leaf classes of other namespaces — the over-approximation
-    /// dirty code wants, which every answer built on it must say out loud
-    /// (`MethodResolution::CrossFile::widened`). A raw index never widens.
+    /// `visible_def_candidates` with its verdict: `Widened` when the name is
+    /// an identity nothing indexed declares and the candidates are the
+    /// same-leaf classes of other namespaces — the over-approximation dirty
+    /// code wants, which every answer built on it must say out loud
+    /// (`MethodResolution::CrossFile::widened`); `Member` when the name is a
+    /// module member and the candidates declare what it names. A raw index
+    /// never widens.
     fn visible_def_candidates_widening(
         &self,
         name: &str,
-    ) -> (Vec<std::sync::Arc<CachedModule>>, bool) {
-        (self.visible_def_candidates(name), false)
+    ) -> (Vec<std::sync::Arc<CachedModule>>, CandidateVerdict) {
+        (self.visible_def_candidates(name), CandidateVerdict::Exact)
     }
     /// Among the files declaring `pkg`, the one that DEFINES sub/method
     /// `member` — package-attributed first (a reopened package's sub lives
@@ -852,8 +872,11 @@ pub trait CrossFileLookup {
     /// raw candidate analyses answer without rehydration.
     fn parents_cached(&self, module_name: &str) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
-        for c in self.visible_def_candidates(module_name) {
-            for p in c.analysis.declared_parents(module_name) {
+        // A module member's parents are those of the class it names.
+        let (cands, verdict) = self.visible_def_candidates_widening(module_name);
+        let declared = verdict.identity(module_name);
+        for c in cands {
+            for p in c.analysis.declared_parents(declared) {
                 if !out.iter().any(|x| x == p) {
                     out.push(p.clone());
                 }
@@ -862,27 +885,29 @@ pub trait CrossFileLookup {
         out
     }
     fn modules_with_symbol(&self, name: &str) -> Vec<String>;
+    /// Whether `module` is in `modules_with_symbol(name)`, without
+    /// materializing the bucket: a per-query membership test.
+    fn module_has_symbol(&self, name: &str, module: &str) -> bool {
+        self.modules_with_symbol(name).iter().any(|m| m == module)
+    }
     fn find_exporters(&self, func_name: &str) -> Vec<String>;
     fn defining_module_cached(&self, entry: &str, name: &str) -> Option<std::sync::Arc<CachedModule>>;
     fn module_declaring_method_in_package(&self, name: &str, class: &str) -> Option<String>;
-    /// The search-path roots this index resolved modules from — the
-    /// process-wide `@INC`, most-preferred first, ALREADY CANONICAL
-    /// (canonicalized once when the resolver published it, never per
+    /// The search path this index locates dependencies through (the
+    /// dependency map's search roots), most-preferred first, ALREADY
+    /// CANONICAL (canonicalized once when the map was read, never per
     /// query: this is read on request paths). Shared, so the common origin
     /// — one with no `use lib` of its own — builds its axis with an Arc
     /// clone and no filesystem I/O at all. Default empty (an index with no
     /// module universe), which makes the search-path axis transparent
     /// rather than blind.
-    fn inc_roots(&self) -> std::sync::Arc<Vec<std::path::PathBuf>> {
+    fn search_roots(&self) -> std::sync::Arc<Vec<std::path::PathBuf>> {
         std::sync::Arc::new(Vec::new())
     }
-    /// Is `path` in this lookup's read-only DEPENDENCY tier? Tier
-    /// attribution for the masked backward walk: a dependency site is
-    /// visible to references but never rewritten by rename; every other
-    /// file the lookup holds is WORKSPACE. The default (no front door, so
-    /// everything held came from elsewhere) is the conservative answer.
-    fn is_dependency_path(&self, _path: &crate::util::canonical_path::CanonicalPath) -> bool {
-        true
+    /// The role recorded for the file at `path`; `None` when this lookup
+    /// holds no file there (the default: a lookup without a path home).
+    fn file_role(&self, _path: &crate::util::canonical_path::CanonicalPath) -> Option<FileRole> {
+        None
     }
     /// The workspace root, for resolving an origin's relative `use lib`
     /// entries — Perl resolves those against the process CWD, which for a
@@ -939,8 +964,7 @@ pub trait CrossFileLookup {
             }
         });
     }
-    /// The WORKSPACE-tier subset of `for_each_cached_file`: exactly the
-    /// files `is_dependency_path` answers false for. Default: none.
+    /// The WORKSPACE-role subset of `for_each_cached_file`. Default: none.
     fn for_each_workspace_file(&self, _f: &mut dyn FnMut(&std::sync::Arc<CachedModule>)) {}
     fn for_each_reexport_module(
         &self,
@@ -1179,7 +1203,7 @@ impl VisibilityAxis {
             }
             PackVisibility::Host => {}
         }
-        let inc = index.inc_roots();
+        let inc = index.search_roots();
         // The overwhelmingly common origin declares no `use lib`, and this
         // runs on every request path — so that case is an Arc clone with
         // ZERO filesystem calls. Only a file that actually names its own
@@ -1317,11 +1341,11 @@ impl<'a> ScopedLookup<'a> {
         &self,
         pins: &UseMapPins,
         name: &str,
-    ) -> (Vec<std::sync::Arc<CachedModule>>, bool) {
+    ) -> (Vec<std::sync::Arc<CachedModule>>, CandidateVerdict) {
         if let (Some(ns), leaf) = split_qualified(name, &pins.names) {
             let exact = self.inner.def_candidates(name);
             if !exact.is_empty() {
-                return (exact, false);
+                return (exact, CandidateVerdict::Exact);
             }
             let mut agree: Vec<std::sync::Arc<CachedModule>> = Vec::new();
             let mut rest: Vec<std::sync::Arc<CachedModule>> = Vec::new();
@@ -1332,22 +1356,25 @@ impl<'a> ScopedLookup<'a> {
                 }
             }
             if !agree.is_empty() {
-                return (agree, false);
+                return (agree, CandidateVerdict::Exact);
             }
-            let widened = !rest.is_empty();
-            return (rest, widened);
+            if let Some((target, cands)) = self.member_declarations(name) {
+                return (cands, CandidateVerdict::Member(target));
+            }
+            let verdict = if rest.is_empty() { CandidateVerdict::Exact } else { CandidateVerdict::Widened };
+            return (rest, verdict);
         }
         let cands = self.inner.def_candidates(name);
         // One candidate has nothing to disambiguate; the table read
         // below rehydrates symbols, so only a genuinely ambiguous
         // leaf pays it.
         if cands.len() < 2 {
-            return (cands, false);
+            return (cands, CandidateVerdict::Exact);
         }
                 let want = pins.namespace_of(name);
                 let visible = pins.visible.get(name);
                 if want.is_none() && visible.is_none() {
-                    return (cands, false);
+                    return (cands, CandidateVerdict::Exact);
                 }
                 // A declaration under a namespace the file can NAME this leaf
                 // in (its pin, or an aliased import of the same leaf) is a
@@ -1378,7 +1405,58 @@ impl<'a> ScopedLookup<'a> {
                 let mut out: Vec<std::sync::Arc<CachedModule>> =
                     agree.into_iter().map(|(_, c)| c).collect();
                 out.extend(rest);
-                (out, false)
+                (out, CandidateVerdict::Exact)
+    }
+
+    /// The declarations a module member names, and their identity: the
+    /// member's chain followed (`flask.Response` → `flask.wrappers.Response`,
+    /// itself a class) to the first identity something indexed declares.
+    /// A cycle or a chain past its cap names nothing.
+    fn member_declarations(&self, member: &str) -> Option<(String, Vec<std::sync::Arc<CachedModule>>)> {
+        const MAX_HOPS: usize = 8;
+        let mut seen: Vec<String> = vec![member.to_string()];
+        let mut at = member.to_string();
+        for _ in 0..MAX_HOPS {
+            let target = self.inner.module_member_target(&at)?;
+            if seen.contains(&target) {
+                return None;
+            }
+            let cands = self.inner.def_candidates(&target);
+            if !cands.is_empty() {
+                return Some((target, cands));
+            }
+            seen.push(target.clone());
+            at = target;
+        }
+        None
+    }
+}
+
+/// How a candidate set answers the identity it was asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CandidateVerdict {
+    /// The identity's own declarations, or none.
+    Exact,
+    /// The asked identity is a module member: the candidates declare the
+    /// identity it names, which every match against them uses.
+    Member(String),
+    /// Nothing indexed declares the identity: same-leaf classes of other
+    /// namespaces stand in, each under its own identity.
+    Widened,
+}
+
+impl CandidateVerdict {
+    pub fn widened(&self) -> bool {
+        matches!(self, CandidateVerdict::Widened)
+    }
+
+    /// The identity the candidates declare, for an `Exact` or `Member`
+    /// answer to `asked`.
+    pub fn identity<'a>(&'a self, asked: &'a str) -> &'a str {
+        match self {
+            CandidateVerdict::Member(target) => target,
+            _ => asked,
+        }
     }
 }
 
@@ -1392,8 +1470,8 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn member_ends(&self, class: &str, name: &str) -> MemberEnds {
         self.inner.member_ends(class, name)
     }
-    fn is_dependency_path(&self, path: &crate::util::canonical_path::CanonicalPath) -> bool {
-        self.inner.is_dependency_path(path)
+    fn file_role(&self, path: &crate::util::canonical_path::CanonicalPath) -> Option<FileRole> {
+        self.inner.file_role(path)
     }
     fn get_cached(&self, module_name: &str) -> Option<std::sync::Arc<CachedModule>> {
         // A search-path origin's winner is PER-ASKER: the same name means
@@ -1414,8 +1492,8 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     ) -> Option<std::sync::Arc<CachedModule>> {
         self.get_cached(module_name)
     }
-    fn inc_roots(&self) -> std::sync::Arc<Vec<std::path::PathBuf>> {
-        self.inner.inc_roots()
+    fn search_roots(&self) -> std::sync::Arc<Vec<std::path::PathBuf>> {
+        self.inner.search_roots()
     }
     fn workspace_root_path(&self) -> Option<std::path::PathBuf> {
         self.inner.workspace_root_path()
@@ -1429,13 +1507,16 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn leaf_def_candidates(&self, leaf: &str) -> Vec<std::sync::Arc<CachedModule>> {
         self.inner.leaf_def_candidates(leaf)
     }
+    fn module_member_target(&self, member: &str) -> Option<String> {
+        self.inner.module_member_target(member)
+    }
     fn visible_def_candidates_widening(
         &self,
         name: &str,
-    ) -> (Vec<std::sync::Arc<CachedModule>>, bool) {
+    ) -> (Vec<std::sync::Arc<CachedModule>>, CandidateVerdict) {
         match &self.axis {
             VisibilityAxis::UseMap(pins) => self.use_map_candidates(pins, name),
-            _ => (self.visible_def_candidates(name), false),
+            _ => (self.visible_def_candidates(name), CandidateVerdict::Exact),
         }
     }
     fn visible_def_candidates(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
@@ -1585,6 +1666,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     // (pack closure narrowing) applies to the parent relation too.
     fn modules_with_symbol(&self, name: &str) -> Vec<String> {
         self.inner.modules_with_symbol(name)
+    }
+    fn module_has_symbol(&self, name: &str, module: &str) -> bool {
+        self.inner.module_has_symbol(name, module)
     }
     fn find_exporters(&self, func_name: &str) -> Vec<String> {
         self.inner.find_exporters(func_name)
@@ -1781,8 +1865,8 @@ pub fn widened_class_stand_ins(
     identity: &str,
     names: &NameSpellings,
 ) -> Vec<WidenedStandIn> {
-    let (cands, widened) = index.visible_def_candidates_widening(identity);
-    if !widened {
+    let (cands, verdict) = index.visible_def_candidates_widening(identity);
+    if !verdict.widened() {
         return Vec::new();
     }
     let leaf = name_match_key(identity, names);

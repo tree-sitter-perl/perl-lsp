@@ -76,51 +76,26 @@ pub fn index_workspace_with_index(
     // drain completes.
     walk_done: Option<&(dyn Fn() + Sync)>,
 ) -> usize {
-    use ignore::types::TypesBuilder;
-    use ignore::WalkBuilder;
+    use crate::build::language_driver::LanguageDriver;
+    use crate::build::source_files;
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // Extensioned Perl (`*.pm/*.pl/*.t`) — type-pruned at the walk
-    // level (cheap; never descends into a JS tree's files).
-    let mut types_builder = TypesBuilder::new();
-    types_builder.add("perl", "*.pm").unwrap();
-    types_builder.add("perl", "*.pl").unwrap();
-    types_builder.add("perl", "*.t").unwrap();
-    types_builder.select("perl");
-    let types = types_builder.build().unwrap();
-
-    let mut oversize: Vec<(PathBuf, u64)> = Vec::new();
-    let mut paths: Vec<PathBuf> = WalkBuilder::new(root)
-        .types(types)
-        .build()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-        .filter(|e| {
-            let len = e.metadata().map(|m| m.len()).unwrap_or(0);
-            if len >= 1_000_000 {
-                oversize.push((e.path().to_path_buf(), len));
-                return false;
-            }
-            true
-        })
-        .map(|e| e.into_path())
-        .collect();
-    // Say what the size cap dropped, once per walk: a skipped file gets no
-    // diagnostics from `--check` or the workspace index, and silence there
-    // reads as "no problems found" (FHEM ships four such files). The open-doc
-    // path has no cap — the editor still analyzes these on didOpen.
-    if !oversize.is_empty() {
-        oversize.sort();
-        eprintln!(
-            "perl-lsp: {} file(s) over the 1 MB workspace-index cap were skipped \
-             (no --check/workspace diagnostics for them; opening in an editor still works):",
-            oversize.len()
-        );
-        for (p, len) in &oversize {
-            eprintln!("perl-lsp:   {:.1} MB  {}", *len as f64 / 1e6, p.display());
-        }
-    }
+    static PERL: crate::build::language_driver::PerlDriver = crate::build::language_driver::PerlDriver;
+    // The dependency map first: its tier roots (carton's `local/`) are the
+    // tier's, so the walk leaves them out whether or not the project
+    // ignores them.
+    let skip: Vec<PathBuf> =
+        idx.dependency_map_for(&PERL, Some(root)).map(|m| m.tier_roots().to_vec()).unwrap_or_default();
+    // Extensioned Perl, type-pruned at the walk level (cheap; never
+    // descends into a JS tree's files). FHEM ships four files over the cap.
+    let cap = PERL.caps().file_cap;
+    let walked = source_files::walk(
+        root,
+        &source_files::Walk { extensions: PERL.extensions(), cap, skip: &skip, ignores: true, follow_links: false },
+    );
+    source_files::report_oversize(&walked.oversize, cap);
+    let mut paths = walked.files;
 
     // Extensionless entrypoint SCRIPTS (`#!/usr/bin/env perl` — crm's
     // `jobs`/`login`/… Mojo::Lite apps) carry no glob, so a SHALLOW
@@ -268,16 +243,10 @@ pub fn index_workspace_with_index(
             128,
             "workspace row backfill",
             |conn, (path, seeds)| {
-                if let Err(e) = module_cache::shred_derived_rows(
-                    conn,
-                    &path.to_string_lossy(),
-                    "workspace",
-                    seeds,
-                ) {
-                    log::error!("Failed to backfill derived rows for {:?}: {}", path, e);
-                }
+                module_cache::shred_derived_rows(conn, &path.to_string_lossy(), "workspace", seeds)
             },
-        );
+        )
+        .unwrap_or_else(|failure| failure.exit());
         // Rows whose FILE is gone. The membership check above never sees
         // them — the scan skips a row it cannot stamp — so without this they
         // are never collectable at all and the store keeps a dead generation
@@ -318,16 +287,13 @@ pub fn index_workspace_with_index(
     // Deliberate whole-copy accounting for the workspace-tier residency
     // tripwire — the Perl twin of the pack indexer's counter.
     let expected_whole = Arc::new(AtomicUsize::new(0));
-    let expected_whole_writer = Arc::clone(&expected_whole);
 
     // The Connection moves INTO the writer thread (rusqlite connections are
     // Send, not Sync); nothing after the scope needs it.
     let writer_conn = conn;
     std::thread::scope(|scope| {
         let writer = scope.spawn(move || {
-            // Same failure-bounded whole-copy budget as the pack writer.
-            let mut fallback_bytes = 0usize;
-            run_persist_writer(
+            let persisted = run_persist_writer(
                 fresh_rx,
                 writer_conn.as_ref(),
                 "workspace persist writer",
@@ -347,8 +313,9 @@ pub fn index_workspace_with_index(
                             stub: None,
                         },
                     )
+                    .map(|()| true)
                 },
-                |e: WsFresh| {
+                |e: WsFresh, _| {
                     // Clear any stale LRU pin BEFORE the stripped copy
                     // becomes reachable, so its first rehydration reads the
                     // just-committed blob.
@@ -357,35 +324,10 @@ pub fn index_workspace_with_index(
                         idx.register_workspace_residency(e.path, parts);
                     }
                 },
-                |e: WsFresh| {
-                    // This entry's generation never landed (its chunk failed,
-                    // or its own write did) but the copy was stripped for it. The blob in hand IS the whole analysis —
-                    // register full copies instead, so nothing is lost
-                    // beyond the persistence itself (disk full / lock storm
-                    // stays loud AND self-heals) — up to the budget.
-                    idx.invalidate_derived_copies(&e.path);
-                    if let Some(fa) = e.blob.decode_whole() {
-                        let bytes = fa.heap_estimate().total();
-                        if fallback_bytes.saturating_add(bytes) > FALLBACK_WHOLE_BYTE_CAP {
-                            // Over budget: DROP (the chunk didn't commit, so a
-                            // stripped copy has no blob to rehydrate from —
-                            // honest absence, re-indexed next run).
-                            log::warn!(
-                                "workspace persist writer: fallback budget ({} MiB) exceeded — \
-                                 dropping resident copy for {:?}; re-indexes next run",
-                                FALLBACK_WHOLE_BYTE_CAP / (1024 * 1024),
-                                e.path,
-                            );
-                            return;
-                        }
-                        fallback_bytes += bytes;
-                        let _ = idx.register_workspace_resident(e.path.clone(), std::sync::Arc::new(fa));
-                        // A deliberate whole pin — account it so the
-                        // tripwire flags only UNEXPLAINED residents.
-                        expected_whole_writer.fetch_add(1, Ordering::Relaxed);
-                    }
-                },
             );
+            if let Err(failure) = persisted {
+                failure.exit();
+            }
         });
 
         // Force the plugin registry — plugin load AND pattern/flow query

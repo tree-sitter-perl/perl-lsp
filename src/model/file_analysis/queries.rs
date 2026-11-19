@@ -10,6 +10,22 @@ impl FileAnalysis {
         &self.pack.names
     }
 
+    /// The names this file is loaded as — what an import path completes
+    /// to — by its language's `FileIdentity`, given the names it is
+    /// registered under. `registered` is the registration's own record,
+    /// read from the whole analysis: a resident copy's symbols may be gone.
+    pub fn identity_names(&self, registered: &[(String, bool)]) -> Vec<String> {
+        use crate::model::conventions::FileIdentity;
+        match crate::model::conventions::conventions_of(&self.language).file_identity {
+            FileIdentity::Packages => registered.iter().map(|(name, _)| name.clone()).collect(),
+            FileIdentity::Classes => registered.iter().filter(|(_, class)| *class).map(|(name, _)| name.clone()).collect(),
+            FileIdentity::FileModule => {
+                let sep = self.names().use_map_sep();
+                self.pack.file_module.as_ref().zip(sep).map(|(m, sep)| m.identity(sep)).into_iter().collect()
+            }
+        }
+    }
+
     /// The namespaces this file's language holds members in.
     pub fn member_spaces(&self) -> &'static MemberSpaces {
         crate::model::conventions::member_spaces_for(&self.language)

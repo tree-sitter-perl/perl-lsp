@@ -2,7 +2,8 @@
 //!
 //! Stores a full `Option<FileAnalysis>` per module, serialized via bincode
 //! and compressed with zstd. Validates entries against mtime + file size to
-//! detect stale data. Invalidates the entire cache when `@INC` changes.
+//! detect stale data. A dependency row describes its file alone, so no map
+//! change invalidates it; `--gc-cache` drops the ones no landing can take.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,15 +13,12 @@ use dashmap::DashMap;
 use rusqlite::{params, Connection};
 
 use crate::model::file_analysis::FileAnalysis;
-use crate::index::module_index::{CachedModule, DefCandidates};
+use crate::index::module_index::CachedModule;
 
-/// The `source` tag for name-keyed rows — the @INC provider tier, whoever
-/// resolved it. The resolver thread and the one-shot CLI share one pool:
-/// tagging by writer instead of by keying scheme made every CLI-resolved
-/// row write-only (nothing read them back), so each CLI verb re-resolved
-/// the whole tier. Path-keyed rows use their own tags (`workspace`) and
-/// stream through `warm_cache_streaming`; only name-keyed rows belong here.
-pub const NAME_KEYED_SOURCE: &str = "import";
+/// The `source` tag for the dependency tier's rows: path-keyed like the
+/// workspace's, one row per file whatever names the map placed it under,
+/// read back by the landing that locates the file (`load_dependency_row`).
+pub const DEPENDENCY_SOURCE: &str = "dependency";
 
 mod blob;
 pub use blob::*;

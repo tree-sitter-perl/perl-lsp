@@ -40,6 +40,9 @@ pub struct LangPack {
     /// Which classes a protected member reaches beyond its own, registered
     /// by id with the lattice: access checks read it, no file.
     pub family_reach: crate::model::file_analysis::FamilyReach,
+    /// What a file is loaded as, registered by id with the lattice: the
+    /// index reads it when it registers a project file, no file carries it.
+    pub file_identity: crate::model::conventions::FileIdentity,
     /// Shape a captured name token's text into the identity it is filed
     /// under (cpp canonicalizes template spellings). Applied to every
     /// captured name alike.
@@ -131,6 +134,7 @@ impl LangPack {
             self.member_spaces.clone(),
             self.free_names,
             self.family_reach,
+            self.file_identity,
         )
     }
 
@@ -157,6 +161,7 @@ impl LangPack {
             // `@space.<name>` captures (`bundled_documents_speak_the_vocabulary`).
             member_spaces: _,
             family_reach: _,
+            file_identity: _,
             shape_name: _,
             default_name: _,
             annot_type: _,
@@ -234,4 +239,4 @@ pub(super) fn param_return_expr(
     }
 }
 
-pub use crate::model::conventions::FreeNameLookup;
+pub use crate::model::conventions::{FileIdentity, FreeNameLookup};

@@ -1,5 +1,12 @@
 use super::*;
-use crate::index::module_index::strip_import_copy_one;
+use crate::build::dependency_map::Ask;
+use crate::build::inc::{discover_inc_paths, map_over};
+use crate::index::module_index::{strip_import_copy_one, FrontDoor};
+
+/// The file a `require` of `name` loads under `roots`: the map's first.
+fn winner(roots: &[PathBuf], name: &str) -> Option<PathBuf> {
+    map_over(roots.to_vec()).locate(&Ask::Name(name.to_string())).into_iter().next().map(|l| l.path.into_path_buf())
+}
 
 #[test]
 fn test_resolve_module_list_util() {
@@ -7,7 +14,7 @@ fn test_resolve_module_list_util() {
     if inc_paths.is_empty() {
         return;
     }
-    let path = resolve_module_path(&inc_paths, "List::Util");
+    let path = winner(&inc_paths, "List::Util");
     assert!(path.is_some(), "List::Util should be resolvable");
     let p = path.unwrap();
     assert!(p.to_str().unwrap().contains("List/Util.pm"));
@@ -80,11 +87,11 @@ sub new {
     let cached = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/x/Demo/Has/Event.pm")), analysis));
 
     // Workspace-index style insert: a resolved module.
-    core.insert_resolved("Demo::Has::Event", Some(vec![cached]), false, false);
+    core.land_providers("Demo::Has::Event", Some(vec![cached]), false, Default::default(), false, 1, crate::index::module_index::PlacedAs::Identity, FrontDoor::Hub);
     assert!(core.cache.get("Demo::Has::Event").as_deref().unwrap().is_some());
 
     // On-demand resolver miss: `None`. Must NOT clobber the indexed copy.
-    core.insert_resolved("Demo::Has::Event", None, false, false);
+    core.land_providers("Demo::Has::Event", None, false, Default::default(), false, 1, crate::index::module_index::PlacedAs::Identity, FrontDoor::Hub);
     assert!(
         core.cache.get("Demo::Has::Event").as_deref().unwrap().is_some(),
         "a None on-demand miss clobbered an already-indexed module",
@@ -95,7 +102,7 @@ sub new {
     let tree2 = parser.parse(source, None).unwrap();
     let analysis2 = std::sync::Arc::new(crate::build::builder::build(&tree2, source.as_bytes()));
     let cached2 = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/y/Demo/Has/Event.pm")), analysis2));
-    core.insert_resolved("Demo::Has::Event", Some(vec![cached2]), false, false);
+    core.land_providers("Demo::Has::Event", Some(vec![cached2]), false, Default::default(), false, 1, crate::index::module_index::PlacedAs::Identity, FrontDoor::Hub);
     assert_eq!(
         core.cache.get("Demo::Has::Event").as_deref().unwrap().as_ref().unwrap().path,
         crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/y/Demo/Has/Event.pm")),
@@ -239,47 +246,34 @@ fn import_tier_strip_gates_on_persistence() {
 }
 
 
-/// The priority lane is guarded by its OWN mutex while the drain waits on the
-/// `pending` one, so a `request_resolve` for a stale module can land after the
-/// drain's priority check and before it parks — the notify reaches nobody and
-/// the wait loop, which only re-checked `pending`, never looks at priority
-/// again. In an all-stale workload (an `EXTRACT_VERSION` bump: every
-/// `request_resolve` takes the priority branch) nothing ever pushes `pending`,
-/// so the resolver sleeps for the rest of the session and cross-file
-/// resolution silently never completes.
+/// A map move sets a flag, not a queue entry, so with nothing asked the
+/// parked drain must still wake and hand back an empty batch — otherwise the
+/// thread adopts the new map only when some unrelated ask arrives, and
+/// `wait_idle` waits on a flag nobody clears. The batch marks the queue busy
+/// as it is taken, so an idle check cannot slip between the two.
 #[test]
-fn priority_push_wakes_a_parked_drain() {
+fn a_map_move_wakes_a_parked_drain() {
     use std::sync::mpsc;
-    use std::sync::{Condvar, Mutex};
 
-    let queue = Arc::new(ResolveQueue {
-        priority: Mutex::new(Vec::new()),
-        pending: Mutex::new(Vec::new()),
-        condvar: Condvar::new(),
-    });
+    let queue = Arc::new(ResolveQueue::new());
     let (tx, rx) = mpsc::channel();
     let q = Arc::clone(&queue);
     std::thread::spawn(move || {
         let _ = tx.send(drain_next_batch(&q));
     });
 
-    // Let the drain get past its priority check and park in `wait(pending)`.
-    // Generous: the drain reaches the park in microseconds, so an early push
-    // (which the first priority check would catch, hiding the bug) is not a
-    // realistic outcome here.
+    // Let the drain park in `wait(pending)`; an earlier flag would be caught
+    // by its first check and hide a lost wake.
     std::thread::sleep(std::time::Duration::from_millis(300));
 
-    // Exactly what `ModuleIndex::request_resolve` does for a stale module.
-    {
-        let mut p = queue.priority.lock().unwrap();
-        p.push("Stale::Module".to_string());
-    }
-    queue.condvar.notify_one();
+    queue.map_moved.store(true, std::sync::atomic::Ordering::Release);
+    queue.wake();
 
     let batch = rx
         .recv_timeout(std::time::Duration::from_secs(5))
-        .expect("a priority push must wake the parked drain");
-    assert_eq!(batch, vec!["Stale::Module".to_string()]);
+        .expect("a map move must wake the parked drain");
+    assert!(batch.is_empty(), "a move alone is an empty batch, got {batch:?}");
+    assert!(queue.busy.load(std::sync::atomic::Ordering::Acquire), "the taken batch marks the queue busy");
 }
 
 // ---- The @INC tier's candidate relation ----
@@ -312,7 +306,8 @@ fn twin_roots(tag: &str) -> (PathBuf, PathBuf) {
 #[test]
 fn inc_resolution_enumerates_every_providing_root_in_inc_order() {
     let (a, b) = twin_roots("paths");
-    let found = resolve_module_paths(&[a.clone(), b.clone()], "Twin");
+    let found: Vec<_> =
+        map_over(vec![a.clone(), b.clone()]).locate(&Ask::Name("Twin".into())).into_iter().map(|l| l.path).collect();
     assert_eq!(
         found,
         vec![crate::util::canonical_path::CanonicalPath::resolve(a.join("Twin.pm")), crate::util::canonical_path::CanonicalPath::resolve(b.join("Twin.pm"))],
@@ -320,13 +315,13 @@ fn inc_resolution_enumerates_every_providing_root_in_inc_order() {
     );
     // The winner is still exactly what `require` would load.
     assert_eq!(
-        resolve_module_path(&[a.clone(), b.clone()], "Twin"),
-        Some(a.join("Twin.pm")),
+        winner(&[a.clone(), b.clone()], "Twin"),
+        Some(crate::util::canonical_path::CanonicalPath::resolve(a.join("Twin.pm")).into_path_buf()),
     );
     // Reversing @INC reverses the winner, not the membership.
     assert_eq!(
-        resolve_module_path(&[b.clone(), a.clone()], "Twin"),
-        Some(b.join("Twin.pm")),
+        winner(&[b.clone(), a.clone()], "Twin"),
+        Some(crate::util::canonical_path::CanonicalPath::resolve(b.join("Twin.pm")).into_path_buf()),
     );
 }
 
@@ -339,10 +334,8 @@ fn a_name_keeps_every_provider_not_just_the_last_inserted() {
     use crate::model::file_analysis::CrossFileLookup;
     let (a, b) = twin_roots("relation");
     let mut parser = create_parser();
-    let mut memo: ParseMemo = HashMap::new();
     let providers =
-        resolve_and_parse_with_memo(&[a.clone(), b.clone()], "Twin", &mut parser, &mut memo)
-            .expect("Twin resolves");
+        resolve_and_parse_all(&map_over(vec![a.clone(), b.clone()]), "Twin", &mut parser).expect("Twin resolves");
     assert_eq!(providers.len(), 2, "both providers parse");
 
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
@@ -459,17 +452,11 @@ fn two_askers_with_different_use_lib_see_different_providers() {
 
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let mut parser = create_parser();
-    let mut memo: ParseMemo = HashMap::new();
     // The process @INC has only the app lib: `t/lib` is a root ONLY the
     // test file declares, which is exactly the discriminator.
-    idx.set_inc_roots_for_test(&[applib.clone()]);
-    let providers = resolve_and_parse_with_memo(
-        &[applib.clone(), testlib.clone()],
-        "Twin",
-        &mut parser,
-        &mut memo,
-    )
-    .expect("Twin resolves");
+    idx.set_search_roots_for_test(&[applib.clone()]);
+    let providers = resolve_and_parse_all(&map_over(vec![applib.clone(), testlib.clone()]), "Twin", &mut parser)
+        .expect("Twin resolves");
     assert_eq!(providers.len(), 2);
     idx.insert_cache_providers("Twin", Some(providers));
 
@@ -594,7 +581,10 @@ fn the_writer_drains_more_entries_than_the_queue_holds() {
     // No connection: the harness drains unregistered, which is enough to
     // prove the producer/consumer pairing. The committed lane is exercised by
     // the persist-lane tests in `pack_invalidator_tests`.
-    run_persist_writer(rx, None, "test", |_c| (), |_c, (), _e: &usize| true, |_e| { c.fetch_add(1, O::SeqCst); }, |_e| {});
+    run_persist_writer(rx, None, "test", |_c| (), |_c, (), _e: &usize| Ok(true), |_e, _| {
+        c.fetch_add(1, O::SeqCst);
+    })
+    .unwrap();
     producer.join().unwrap();
     assert_eq!(committed.load(O::SeqCst), 0, "no connection ⇒ drained unregistered");
 }
@@ -672,51 +662,600 @@ fn a_bulk_index_marks_the_consumers_of_what_changed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A file whose own blob fails to save inside a chunk that still commits
-/// must stay WHOLE: a copy stripped against a blob that is not on disk
-/// answers empty. Its chunk siblings landed and must strip. The failure is
-/// injected with a statement-scoped `RAISE(ABORT)` trigger, so the
-/// transaction commits with the siblings' rows.
+/// A store that refuses a write ends the writer with a `PersistFailure`
+/// naming the store and the error, and no entry of the refused chunk
+/// reaches registration: the caller exits rather than strip a copy whose
+/// generation never landed, or keep it whole without bound. The refusal is
+/// statement-scoped (`RAISE(ABORT)`) and hits the chunk's second entry, so
+/// the first entry's write succeeded inside a transaction that must still
+/// roll back.
 #[test]
-fn a_workspace_file_whose_save_failed_in_a_committed_chunk_stays_whole() {
-    let base = std::env::temp_dir().join(format!("ws-perfile-strip-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    let (root, cache) = (base.join("root"), base.join("cache"));
-    std::fs::create_dir_all(&root).unwrap();
-    for name in ["Alpha", "Beta", "Gamma"] {
-        std::fs::write(
-            root.join(format!("{name}.pm")),
-            format!("package {name};\nsub run {{ my $self = shift; return {{ k => 1 }}; }}\n1;\n"),
-        )
-        .unwrap();
+fn a_store_that_refuses_a_write_ends_the_writer_with_its_failure() {
+    let dir = std::env::temp_dir().join(format!("refusing-store-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("store.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE t (n INTEGER);
+         CREATE TRIGGER refuse BEFORE INSERT ON t WHEN NEW.n = 1
+         BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;",
+    )
+    .unwrap();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    for n in 0..3 {
+        tx.send(n).unwrap();
     }
-    let failing = std::fs::canonicalize(root.join("Beta.pm")).unwrap();
+    drop(tx);
+    let mut registered = Vec::new();
+    let failure = run_persist_writer(
+        rx,
+        Some(&conn),
+        "test writer",
+        |_c| (),
+        |c, (), n: &i64| {
+            c.execute("INSERT INTO t (n) VALUES (?1)", [n])
+                .map(|_| true)
+                .map_err(|e| module_cache::PersistFailure::new(c, e))
+        },
+        |n, _| registered.push(n),
+    )
+    .expect_err("a refused write is the writer's failure");
+
+    let said = failure.to_string();
+    assert!(said.contains("database or disk is full"), "names the error: {said}");
+    assert!(said.contains(&*db.to_string_lossy()), "names the store: {said}");
+    assert!(said.contains("--clear-cache"), "says what to do: {said}");
+    assert!(registered.is_empty(), "nothing of the refused chunk registers");
+    let rows: i64 = conn.query_row("SELECT count(*) FROM t", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 0, "the chunk's landed write rolled back with it");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The tier's rows are path-keyed and are the landing's parse cache: a
+/// first landing writes one `dependency` row keyed by the file's path; a
+/// second landing in a fresh index takes the file from that row instead of
+/// parsing it; a miss writes nothing.
+#[test]
+fn a_landing_reads_the_files_row_in_place_of_parsing_it() {
+    let root = std::env::temp_dir().join(format!("d3_land_rows_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("Row")).unwrap();
+    let pm = root.join("Row/Cached.pm");
+    std::fs::write(&pm, "package Row::Cached;\nsub aa { 1 }\n1;\n").unwrap();
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    module_cache::init_schema(&conn).unwrap();
+    let inc = map_over(vec![root.clone()]);
+    let mut parser = Parse::Hub(create_parser());
+
+    let core = IndexCore::new();
+    let (_, stored) = land_module(&core, Some(&conn), &inc, 1, "Row::Cached", &mut parser, &mut Prepared::new(), false);
+    assert!(stored.is_some());
+    let canon = crate::util::canonical_path::CanonicalPath::resolve(pm.clone());
+    let (key, source): (String, String) = conn
+        .query_row("SELECT module_name, source FROM modules", [], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap();
+    assert_eq!((key.as_str(), source.as_str()), (&*canon.to_string_lossy(), module_cache::DEPENDENCY_SOURCE));
+
+    // Same size, same mtime, different body: only a row read can still
+    // answer `aa`.
+    let mtime = std::fs::metadata(&pm).unwrap().modified().unwrap();
+    std::fs::write(&pm, "package Row::Cached;\nsub bb { 1 }\n1;\n").unwrap();
+    std::fs::File::options().write(true).open(&pm).unwrap().set_modified(mtime).unwrap();
+    let core = IndexCore::new();
+    let (whole, _) = land_module(&core, Some(&conn), &inc, 1, "Row::Cached", &mut parser, &mut Prepared::new(), false);
+    let names: Vec<String> = whole.unwrap()[0].analysis.symbols().iter().map(|s| s.name.clone()).collect();
+    assert!(names.iter().any(|n| n == "aa") && !names.iter().any(|n| n == "bb"), "{names:?}");
+
+    let (_, missed) = land_module(&core, Some(&conn), &inc, 1, "Row::Absent", &mut parser, &mut Prepared::new(), false);
+    assert!(missed.is_none());
+    let rows: i64 = conn.query_row("SELECT COUNT(*) FROM modules", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 1, "a miss is never remembered");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A batch prepared in the pool lands what the serial landing lands: the
+/// same providers, in the same order, from the same rows. The rows are read
+/// through the reader pool, not the resolver's connection: a body changed
+/// under an unchanged stamp still answers from its row.
+#[test]
+fn a_prepared_batch_lands_what_a_serial_one_does() {
+    let root = std::env::temp_dir().join(format!("d9b_prepared_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let (a, b) = (root.join("a"), root.join("b"));
+    for (dir, body) in [(&a, "sub in_a { 1 }"), (&b, "sub in_b { 1 }")] {
+        std::fs::create_dir_all(dir.join("Prep")).unwrap();
+        std::fs::write(dir.join("Twin.pm"), format!("package Twin;\n{body}\n1;\n")).unwrap();
+    }
+    std::fs::write(a.join("Prep/One.pm"), "package Prep::One;\nsub aa { 1 }\n1;\n").unwrap();
+    std::fs::write(a.join("Prep/Two.pm"), "package Prep::Two;\nuse parent 'Twin';\nsub two { 1 }\n1;\n").unwrap();
+    // More files than the pool has workers, so a full budget has parses to hold back.
+    let extra: Vec<String> = (0..12).map(|i| format!("Prep::More{i}")).collect();
+    for (i, name) in extra.iter().enumerate() {
+        std::fs::write(a.join(format!("Prep/More{i}.pm")), format!("package {name};\nsub m{i} {{ 1 }}\n1;\n")).unwrap();
+    }
+    let db_path = root.join("modules.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    module_cache::init_schema(&conn).unwrap();
+    let map = map_over(vec![a.clone(), b.clone()]);
+    let batch: Vec<Ask> = ["Prep::One", "Twin", "Prep::Two", "Prep::Absent"]
+        .iter()
+        .map(|n| n.to_string())
+        .chain(extra.iter().cloned())
+        .map(Ask::Name)
+        .collect();
+    let driver = crate::build::language_driver::LanguageRegistry::served();
+    let reader = std::sync::Arc::new(module_cache::RetainedReader::new());
+    let stock = crate::index::cache_policy::PREPARE_AHEAD_STOCK;
+
+    let land_all = |core: &IndexCore, prepared: &mut Prepared| -> Vec<(String, Vec<String>)> {
+        let mut parse = Parse::of(driver);
+        let mut out = Vec::new();
+        for ask in &batch {
+            let Ask::Name(n) = ask else { unreachable!() };
+            for m in landing_names(core, &map, n) {
+                let (whole, _) = land_module(core, Some(&conn), &map, 1, &m, &mut parse, prepared, false);
+                for cm in whole.into_iter().flatten() {
+                    let mut syms: Vec<String> = cm.analysis.symbols().iter().map(|s| s.name.clone()).collect();
+                    syms.sort();
+                    out.push((cm.path.to_string_lossy().into_owned(), syms));
+                }
+            }
+        }
+        out
+    };
+
+    let serial = land_all(&IndexCore::new(), &mut Prepared::new());
+    assert_eq!(serial.len(), 16, "One, both Twins, Two, the twelve: {serial:?}");
+
+    let core = IndexCore::new();
+    let mut prepared = prepare_batch(&core, &map, 1, &batch, driver, None, &reader, stock);
+    assert_eq!(prepared.outstanding(), 16, "every located file is prepared once");
+    assert_eq!(land_all(&core, &mut prepared), serial, "parsed in the pool");
+    assert_eq!(prepared.outstanding(), 0, "every prepared file was landed");
+
+    // A budget the first finished parse fills holds the parse-ahead back;
+    // the landings still get every file, in order.
+    let core = IndexCore::new();
+    let mut prepared = prepare_batch(&core, &map, 1, &batch, driver, None, &reader, 1);
+    assert_eq!(land_all(&core, &mut prepared), serial, "parsed under a full budget");
+    assert_eq!(prepared.outstanding(), 0);
+
+    // Same size, same stamp, new body: only a row read answers `aa`.
+    let one = a.join("Prep/One.pm");
+    let mtime = std::fs::metadata(&one).unwrap().modified().unwrap();
+    std::fs::write(&one, "package Prep::One;\nsub bb { 1 }\n1;\n").unwrap();
+    std::fs::File::options().write(true).open(&one).unwrap().set_modified(mtime).unwrap();
+    let core = IndexCore::new();
+    let mut prepared = prepare_batch(&core, &map, 1, &batch, driver, Some(&db_path), &reader, stock);
+    assert_eq!(land_all(&core, &mut prepared), serial, "read from the rows");
+
+    // A held file is left to its landing.
+    let core = IndexCore::new();
+    land_all(&core, &mut Prepared::new());
+    assert_eq!(prepare_batch(&core, &map, 1, &batch, driver, None, &reader, stock).outstanding(), 0);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A located file the project registered is the walk's: the tier does not
+/// land a second copy of it, and the project's record stays.
+#[test]
+fn the_tier_does_not_land_a_project_file() {
+    use crate::model::file_analysis::CrossFileLookup;
+    let source = "package Mine::Here;\nsub f { 1 }\n1;\n";
+    let mut parser = create_parser();
+    let tree = parser.parse(source, None).unwrap();
+    let analysis = Arc::new(crate::build::builder::build(&tree, source.as_bytes()));
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let path = PathBuf::from("/proj/lib/Mine/Here.pm");
+    idx.register_workspace_module(path.clone(), Arc::clone(&analysis));
+    let canon = crate::util::canonical_path::CanonicalPath::resolve(path);
+    let copy = Arc::new(CachedModule::new(canon.clone(), analysis));
+    idx.insert_cache("Mine::Alias", Some(copy));
+    assert!(idx.get_cached("Mine::Alias").is_none(), "the walk's file is not landed again");
+    assert_eq!(idx.file_role(&canon), Some(crate::model::file_analysis::FileRole::Workspace));
+}
+
+/// Carton's `local/` is the dependency map's tier root: the walk leaves it
+/// out even though nothing ignores it, so its files reach the index only as
+/// dependencies, through the map.
+#[test]
+fn the_walk_leaves_the_map_s_tier_root_to_the_tier() {
+    use crate::model::file_analysis::{CrossFileLookup, FileRole};
+    let dir = std::env::temp_dir().join(format!("d4_tier_root_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    std::fs::create_dir_all(dir.join("local/lib/perl5")).unwrap();
+    std::fs::write(dir.join("lib/App.pm"), "package App;\nuse Dep;\n1;\n").unwrap();
+    std::fs::write(dir.join("local/lib/perl5/Dep.pm"), "package Dep;\nsub d { 1 }\n1;\n").unwrap();
+    let dir = crate::util::canonical_path::CanonicalPath::resolve(dir).into_path_buf();
 
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
-    crate::index::module_cache::with_test_cache_dir(&cache, std::time::Duration::from_secs(10), || {
-        {
-            let conn = crate::index::module_cache::open_cache_db(None, "perl").expect("test cache db");
-            let target = failing.to_string_lossy().replace('\'', "''");
-            conn.execute_batch(&format!(
-                "CREATE TRIGGER kill_one BEFORE INSERT ON modules \
-                 WHEN NEW.path = '{target}' \
-                 BEGIN SELECT RAISE(ABORT, 'injected'); END;"
-            ))
-            .unwrap();
-        }
-        index_workspace_with_index(&root, &idx, None, None);
-    });
+    index_workspace_with_index(&dir, &idx, None, None);
+    let app = crate::util::canonical_path::CanonicalPath::resolve(dir.join("lib/App.pm"));
+    let dep = crate::util::canonical_path::CanonicalPath::resolve(dir.join("local/lib/perl5/Dep.pm"));
+    assert_eq!(idx.file_role(&app), Some(FileRole::Workspace));
+    assert_eq!(idx.file_role(&dep), None, "the walk does not register the tier's file");
 
-    let mut seen = 0;
-    idx.for_each_registered_file(&mut |cm| {
-        seen += 1;
-        let stripped = cm.analysis.symbols_are_evicted() || cm.analysis.bag_is_evicted();
-        if cm.path.as_path() == failing.as_path() {
-            assert!(!stripped, "{:?} was stripped though its blob never landed", cm.path);
-        } else {
-            assert!(stripped, "{:?} landed but was not stripped", cm.path);
-        }
+    let map = idx.dependency_map_for(&crate::build::language_driver::PerlDriver, Some(&dir)).expect("perl reads a map");
+    assert_eq!(map.search_roots()[0], dir.join("local/lib/perl5"));
+    let mut parser = create_parser();
+    let (_, stored) = idx.land_module(None, &map, "Dep", &mut parser);
+    assert!(stored.is_some());
+    assert_eq!(idx.file_role(&dep), Some(FileRole::Dependency), "the map lands it as a dependency");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A php project's `vendor/` is the Composer map's tier root: the walk
+/// leaves it out though nothing ignores it, and a class the map places
+/// lands through the pack door as a dependency, its own parent edge
+/// published as a project file's would be.
+#[cfg(feature = "php")]
+#[test]
+fn a_vendor_class_lands_through_the_pack_door_from_composer_s_map() {
+    use crate::model::file_analysis::{CrossFileLookup, FileRole};
+    let php = crate::build::language_driver::LanguageRegistry::compiled().for_id("php").expect("php driver");
+    let dir = std::env::temp_dir().join(format!("d7_vendor_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let files = [
+        ("composer.json", r#"{"autoload": {"psr-4": {"App\\": "src/"}}}"#),
+        (
+            "vendor/composer/installed.json",
+            r#"{"packages": [{"name": "acme/base", "install-path": "../acme/base",
+                "autoload": {"psr-4": {"Acme\\": "src/"}}}]}"#,
+        ),
+        ("vendor/acme/base/src/Root.php", "<?php\nnamespace Acme;\nclass Root {}\n"),
+        ("vendor/acme/base/src/Base.php", "<?php\nnamespace Acme;\nclass Base extends Root { public function hello() {} }\n"),
+        ("src/User.php", "<?php\nnamespace App;\nuse Acme\\Base;\nclass User extends Base {}\n"),
+    ];
+    for (rel, body) in files {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = crate::util::canonical_path::CanonicalPath::resolve(dir).into_path_buf();
+    let canon = |rel: &str| crate::util::canonical_path::CanonicalPath::resolve(dir.join(rel));
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    index_pack_language(php, &dir, None, &idx, None, 0);
+    assert_eq!(idx.file_role(&canon("src/User.php")), Some(FileRole::Workspace));
+    assert_eq!(idx.file_role(&canon("vendor/acme/base/src/Base.php")), None, "the walk leaves `vendor/` to the tier");
+
+    let map = idx.dependency_map().expect("the walk read php's map");
+    let (_, stored) = idx.land_pack_module(&map, "Acme\\Base", php);
+    assert!(stored.is_some(), "Acme\\Base lands");
+    let base = canon("vendor/acme/base/src/Base.php");
+    assert_eq!(idx.file_role(&base), Some(FileRole::Dependency));
+    assert_eq!(idx.get_cached("Acme\\Base").map(|m| m.path.clone()), Some(base));
+    assert!(
+        idx.direct_children_of("Acme\\Root").iter().any(|(child, _)| child == "Acme\\Base"),
+        "a landed class's parent edge is published"
+    );
+    assert!(idx.land_pack_module(&map, "App\\User", php).1.is_none(), "the project's own class is the walk's");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A Composer `files` entry is declared demand: the map hands it out by
+/// path, and it lands under every name it declares — a guarded global
+/// helper and a namespaced one — so a call with no import resolves. A
+/// class a project file only references (no `use`, no `extends`) is
+/// demand too.
+#[cfg(feature = "php")]
+#[test]
+fn a_composer_files_entry_lands_under_every_name_it_declares() {
+    use crate::build::dependency_map::Ask;
+    use crate::model::file_analysis::{CrossFileLookup, FileRole};
+    let php = crate::build::language_driver::LanguageRegistry::compiled().for_id("php").expect("php driver");
+    let dir = std::env::temp_dir().join(format!("d9_files_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let files = [
+        ("composer.json", r#"{"autoload": {"psr-4": {"App\\": "src/"}}}"#),
+        (
+            "vendor/composer/installed.json",
+            r#"{"packages": [{"name": "acme/support", "install-path": "../acme/support",
+                "autoload": {"psr-4": {"Acme\\": "src/"}, "files": ["src/helpers.php"]}}]}"#,
+        ),
+        (
+            "vendor/acme/support/src/helpers.php",
+            "<?php\nnamespace Acme {\nfunction tap($v) { return $v; }\n}\nnamespace {\nif (! function_exists('env')) {\n    function env($k) { return $k; }\n}\n}\n",
+        ),
+        ("src/Config.php", "<?php\nnamespace App;\nclass Config { function get() { return \\Acme\\Str::of(env('X')); } }\n"),
+    ];
+    for (rel, body) in files {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = crate::util::canonical_path::CanonicalPath::resolve(dir).into_path_buf();
+    let canon = |rel: &str| crate::util::canonical_path::CanonicalPath::resolve(dir.join(rel));
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    index_pack_language(php, &dir, None, &idx, None, 0);
+    let config = idx.workspace_file_for_test(&dir.join("src/Config.php")).unwrap();
+    assert!(config.used_identities().iter().any(|u| u == "Acme\\Str"), "a referenced-only class is demand: {:?}", config.used_identities());
+
+    let map = idx.dependency_map().expect("the walk read php's map");
+    let helpers = canon("vendor/acme/support/src/helpers.php");
+    assert_eq!(map.declared(), [Ask::File(helpers.clone())]);
+    let (_, stored) = idx.land_pack_file(&map, &helpers, php);
+    assert!(stored.is_some(), "the files entry lands");
+    assert_eq!(idx.file_role(&helpers), Some(FileRole::Dependency));
+    for name in ["env", "Acme\\tap"] {
+        assert_eq!(
+            idx.def_candidates(name).iter().map(|m| m.path.clone()).collect::<Vec<_>>(),
+            [helpers.clone()],
+            "{name} answers from the files entry"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The indexed names an import path completes to are what each held file
+/// loads as: a landed class, a project class and a class a Composer `files`
+/// entry declares — never a function, a constant or a namespace any of
+/// them declares, nor the `files` entry's own path, which no class spells.
+#[cfg(feature = "php")]
+#[test]
+fn a_php_import_path_completes_to_classes_not_what_they_declare() {
+    use crate::model::file_analysis::CrossFileLookup;
+    let php = crate::build::language_driver::LanguageRegistry::compiled().for_id("php").expect("php driver");
+    let dir = std::env::temp_dir().join(format!("d11b_php_ident_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let files = [
+        ("composer.json", r#"{"autoload": {"psr-4": {"App\\": "src/"}}}"#),
+        (
+            "vendor/composer/installed.json",
+            r#"{"packages": [{"name": "acme/base", "install-path": "../acme/base",
+                "autoload": {"psr-4": {"Acme\\": "src/"}, "files": ["helpers.php"]}}]}"#,
+        ),
+        ("vendor/acme/base/src/Base.php", "<?php\nnamespace Acme;\nconst DEPTH = 2;\nclass Base {}\n"),
+        ("vendor/acme/base/helpers.php", "<?php\nnamespace Acme;\nfunction tap($v) { return $v; }\nclass Kit {}\n"),
+        ("src/Config.php", "<?php\nnamespace App;\nconst LIMIT = 3;\nfunction helper() {}\nclass Config {}\n"),
+    ];
+    for (rel, body) in files {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = crate::util::canonical_path::CanonicalPath::resolve(dir).into_path_buf();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    index_pack_language(php, &dir, None, &idx, None, 0);
+    let map = idx.dependency_map().expect("the walk read php's map");
+    assert!(idx.land_pack_module(&map, "Acme\\Base", php).1.is_some(), "Acme\\Base lands");
+    let helpers = crate::util::canonical_path::CanonicalPath::resolve(dir.join("vendor/acme/base/helpers.php"));
+    assert!(idx.land_pack_file(&map, &helpers, php).1.is_some(), "the files entry lands");
+    assert!(!idx.def_candidates("Acme\\tap").is_empty(), "the function is held, by name");
+
+    let mut indexed: Vec<String> = idx.complete_module_names("").into_iter().filter(|(_, held)| *held).map(|(n, _)| n).collect();
+    indexed.sort();
+    assert_eq!(indexed, ["Acme\\Base", "Acme\\Kit", "App\\Config"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The indexed names a Python import path completes to are modules: a
+/// landed one by the name the map located it as, a project one by the name
+/// its place names. The classes and functions inside either are reached
+/// through the module, so they are not offered as paths.
+#[cfg(feature = "python")]
+#[test]
+fn a_python_import_path_completes_to_modules_not_their_members() {
+    use crate::model::file_analysis::CrossFileLookup;
+    let python = crate::build::language_driver::LanguageRegistry::compiled().for_id("python").expect("python driver");
+    let dir = std::env::temp_dir().join(format!("d11b_py_ident_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    const SITE: &str = ".venv/lib/python3.12/site-packages";
+    let files = [
+        (".venv/pyvenv.cfg".to_string(), "home = /usr/bin\n"),
+        (format!("{SITE}/acme/__init__.py"), ""),
+        (format!("{SITE}/acme/models.py"), "class Base:\n    pass\n\ndef make():\n    return Base()\n"),
+        ("app/__init__.py".to_string(), ""),
+        ("app/user.py".to_string(), "from acme.models import Base\n\nclass User(Base):\n    pass\n\ndef run():\n    pass\n"),
+    ];
+    for (rel, body) in &files {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = crate::util::canonical_path::CanonicalPath::resolve(dir).into_path_buf();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    index_pack_language(python, &dir, None, &idx, None, 0);
+    let map = idx.dependency_map().expect("the walk read python's map");
+    assert!(idx.land_pack_module(&map, "acme.models", python).1.is_some(), "acme.models lands");
+    assert!(!idx.def_candidates("acme.models.Base").is_empty(), "its class is placed with it");
+
+    let mut indexed: Vec<String> = idx.complete_module_names("").into_iter().filter(|(_, held)| *held).map(|(n, _)| n).collect();
+    indexed.sort();
+    assert_eq!(indexed, ["acme.models", "app", "app.user"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An ask for a module MEMBER lands its module, which only imports it:
+/// the acquisition then asks for the identity the member names.
+#[cfg(feature = "python")]
+#[test]
+fn an_ask_for_a_module_member_asks_for_what_it_names() {
+    use crate::build::dependency_map::Ask;
+    let python = crate::build::language_driver::LanguageRegistry::compiled().for_id("python").expect("python driver");
+    let dir = std::env::temp_dir().join(format!("d9_member_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    const SITE: &str = ".venv/lib/python3.12/site-packages";
+    let files = [
+        (".venv/pyvenv.cfg".to_string(), "home = /usr/bin\n"),
+        (format!("{SITE}/acme/__init__.py"), "from .models import Base as Base\n"),
+        (format!("{SITE}/acme/models.py"), "class Base:\n    pass\n"),
+        ("app.py".to_string(), "import acme\n\nclass User(acme.Base):\n    pass\n"),
+    ];
+    for (rel, body) in &files {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = crate::util::canonical_path::CanonicalPath::resolve(dir).into_path_buf();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    index_pack_language(python, &dir, None, &idx, None, 0);
+    let map = idx.dependency_map().expect("the walk read python's map");
+    let located = map.locate(&Ask::Name("acme.Base".into()));
+    assert_eq!(located.iter().filter_map(|l| l.loads_as.as_deref()).collect::<Vec<_>>(), ["acme"], "the member loads its module");
+    let (_, stored) = idx.land_pack_module(&map, "acme", python);
+    let stored = stored.expect("acme lands");
+    assert_eq!(member_targets(&stored, "acme.Base"), [Ask::Name("acme.models.Base".into())]);
+    assert!(member_targets(&stored, "acme.Other").is_empty(), "a name the module does not bind asks nothing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Python's map is each environment's `site-packages`: the walk leaves the
+/// environment out, an import the map places lands as a dependency, and a
+/// module outside any package is named from its search root, not from the
+/// workspace root it also lies under.
+#[cfg(feature = "python")]
+#[test]
+fn a_site_packages_module_lands_named_from_its_search_root() {
+    use crate::model::file_analysis::{CrossFileLookup, FileRole};
+    let python = crate::build::language_driver::LanguageRegistry::compiled().for_id("python").expect("python driver");
+    let dir = std::env::temp_dir().join(format!("d8_venv_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    const SITE: &str = ".venv/lib/python3.12/site-packages";
+    let files = [
+        (".venv/pyvenv.cfg".to_string(), "home = /usr/bin\n"),
+        (format!("{SITE}/acme/__init__.py"), ""),
+        (format!("{SITE}/acme/models.py"), "class Root:\n    pass\n\nclass Base(Root):\n    pass\n"),
+        (format!("{SITE}/six.py"), "class Six:\n    pass\n"),
+        ("app/__init__.py".to_string(), ""),
+        ("app/user.py".to_string(), "from acme.models import Base\nimport six\n\nclass User(Base):\n    pass\n"),
+    ];
+    for (rel, body) in &files {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = crate::util::canonical_path::CanonicalPath::resolve(dir).into_path_buf();
+    let canon = |rel: &str| crate::util::canonical_path::CanonicalPath::resolve(dir.join(rel));
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    index_pack_language(python, &dir, None, &idx, None, 0);
+    assert_eq!(idx.file_role(&canon("app/user.py")), Some(FileRole::Workspace));
+    assert_eq!(idx.file_role(&canon(&format!("{SITE}/six.py"))), None, "the walk leaves the environment to the tier");
+
+    let map = idx.dependency_map().expect("the walk read python's map");
+    let module_of = |m: &str| {
+        let (_, stored) = idx.land_pack_module(&map, m, python);
+        let stored = stored.unwrap_or_else(|| panic!("{m} lands"));
+        assert_eq!(idx.file_role(&stored[0].path), Some(FileRole::Dependency));
+        stored[0].analysis.pack.file_module.as_ref().map(|f| f.segments.join("."))
+    };
+    assert_eq!(module_of("acme.models").as_deref(), Some("acme.models"));
+    // the module's members are its candidates too, so an identity a project
+    // names (`acme.models.Base`, a parent) is declared by something indexed
+    let models = canon(&format!("{SITE}/acme/models.py"));
+    for class in ["acme.models.Base", "acme.models.Root"] {
+        assert_eq!(idx.def_candidates(class).iter().map(|m| m.path.clone()).collect::<Vec<_>>(), [models.clone()], "{class}");
+        assert_eq!(idx.get_cached(class).map(|m| m.path.clone()), Some(models.clone()), "{class}");
+    }
+    assert_eq!(module_of("six").as_deref(), Some("six"), "named from site-packages, not the workspace root");
+    assert_eq!(idx.get_cached("six").map(|m| m.path.clone()), Some(canon(&format!("{SITE}/six.py"))));
+    assert!(idx.land_pack_module(&map, "app.user", python).1.is_none(), "the project's own module is the walk's");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A one-shot run against an unmoved Composer project takes the map it
+/// kept: the generated classmap is not read again until an input's stamp
+/// moves, and then it is read afresh and kept over the old row.
+#[cfg(feature = "php")]
+#[test]
+fn a_kept_composer_map_is_served_until_an_input_moves() {
+    use crate::build::dependency_map::{Ask, DependencyMap};
+    use crate::index::module_index::{load_kept_map, read_and_keep};
+    let php = crate::build::language_driver::LanguageRegistry::compiled().for_id("php").expect("php driver");
+    let dir = std::env::temp_dir().join(format!("d7_kept_map_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let classmap = |class: &str| {
+        format!("<?php\n$vendorDir = dirname(__DIR__);\nreturn array(\n    '{class}' => $vendorDir . '/old/legacy.php',\n);\n")
+    };
+    let files = [
+        ("composer.json".to_string(), r#"{"autoload": {"psr-4": {"App\\": "src/"}}}"#.to_string()),
+        (
+            "vendor/composer/installed.json".to_string(),
+            r#"{"packages": [{"name": "old/lib", "install-path": "../old", "autoload": {"classmap": ["."]}}]}"#.to_string(),
+        ),
+        ("vendor/composer/autoload_classmap.php".to_string(), classmap("Legacy_Widget")),
+        ("vendor/old/legacy.php".to_string(), "<?php\nclass Legacy_Widget {}\n".to_string()),
+    ];
+    for (rel, body) in &files {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = crate::util::canonical_path::CanonicalPath::resolve(&dir).into_path_buf();
+    let cache = dir.join(".cache");
+    let located = |map: &DependencyMap, class: &str| !map.locate(&Ask::Name(class.into())).is_empty();
+    crate::index::module_cache::with_test_cache_dir(&cache, std::time::Duration::from_secs(10), || {
+        let conn = crate::index::module_cache::open_cache_db(None, php.id()).expect("test store");
+        let root = Some(dir.as_path());
+        assert!(load_kept_map(php, root, Some(&conn)).is_none(), "nothing kept yet");
+        let fresh = read_and_keep(php, root, Some(&conn)).unwrap();
+        let kept = load_kept_map(php, root, Some(&conn)).expect("the read was kept");
+        assert_eq!(kept.generation(), fresh.generation());
+        assert_eq!(kept.generation(), php.dependency_map(root).unwrap().generation());
+
+        // The classmap rewritten under the same size and mtime: its stamp
+        // holds, so the kept map answers as it was read: not re-read.
+        let cm = dir.join("vendor/composer/autoload_classmap.php");
+        let installed = dir.join("vendor/composer/installed.json");
+        let mtime = |p: &std::path::Path| std::fs::metadata(p).unwrap().modified().unwrap();
+        let was = mtime(&cm);
+        std::fs::write(&cm, classmap("Legacy_Gadget")).unwrap();
+        std::fs::File::options().write(true).open(&cm).unwrap().set_modified(was).unwrap();
+        let kept = load_kept_map(php, root, Some(&conn)).expect("its stamps hold");
+        assert!(located(&kept, "Legacy_Widget") && !located(&kept, "Legacy_Gadget"));
+
+        // Touching `installed.json` moves an input: the row is not served,
+        // and the read that replaces it reads the classmap afresh.
+        let later = mtime(&installed) + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&installed).unwrap().set_modified(later).unwrap();
+        assert!(load_kept_map(php, root, Some(&conn)).is_none(), "a moved input is not served");
+        let reread = read_and_keep(php, root, Some(&conn)).unwrap();
+        assert!(located(&reread, "Legacy_Gadget") && !located(&reread, "Legacy_Widget"));
+        let kept = load_kept_map(php, root, Some(&conn)).expect("rewritten in place");
+        assert_eq!(kept.generation(), reread.generation());
+        assert!(located(&kept, "Legacy_Gadget"));
     });
-    assert_eq!(seen, 3, "every file must stay registered");
-    let _ = std::fs::remove_dir_all(&base);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The Perl pin: a search root's modules complete as available before
+/// anything parses them, a file that is no module lists nothing, and the
+/// listing is taken once per map generation.
+#[test]
+fn perl_module_completion_lists_the_search_roots_unparsed() {
+    let ws = std::env::temp_dir().join(format!("d10_perl_names_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ws);
+    for rel in ["local/lib/perl5/Dep/Unused.pm", "local/lib/perl5/Dep/Used.pm", "lib/Mine/Thing.pm", "lib/Mine/script.pl"] {
+        let p = ws.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "package X;\n1;\n").unwrap();
+    }
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.set_search_roots_for_test(&[ws.join("local/lib/perl5"), ws.join("lib")]);
+    idx.set_workspace_root(Some(&format!("file://{}", ws.display())));
+    let mut got = idx.complete_module_names("");
+    got.sort();
+    assert_eq!(
+        got,
+        [("Dep::Unused".to_string(), false), ("Dep::Used".to_string(), false), ("Mine::Thing".to_string(), false)]
+    );
+    let mut got = idx.complete_module_names("dep::u");
+    got.sort();
+    assert_eq!(got.len(), 2, "the prefix matches case-blind: {got:?}");
+
+    std::fs::write(ws.join("local/lib/perl5/Dep/Later.pm"), "package X;\n1;\n").unwrap();
+    assert!(
+        !idx.complete_module_names("dep::l").iter().any(|(n, _)| n == "Dep::Later"),
+        "the listing holds for its generation"
+    );
+    idx.set_search_roots_for_test(&[ws.join("local/lib/perl5")]);
+    let mut got: Vec<String> = idx.complete_module_names("").into_iter().map(|(n, _)| n).collect();
+    got.sort();
+    assert_eq!(got, ["Dep::Later", "Dep::Unused", "Dep::Used"], "a moved map lists again");
+    let _ = std::fs::remove_dir_all(&ws);
 }

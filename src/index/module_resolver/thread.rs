@@ -1,37 +1,49 @@
-//! The one resolver loop: workspace-root wait, SQLite warm, queue
-//! drain, and the per-module resolve protocol (server and headless).
+//! The one resolver loop: workspace-root wait, the store's gates, the ask
+//! drain, map moves, and the per-ask acquisition (server and headless).
+//! Every asker — a didOpen's or a save's imports, a one-shot run's demand,
+//! a query file's imports, descent from a landed file — reaches the tier
+//! through `IndexCore::ask`, and only this thread lands.
 
 use super::*;
-use std::collections::HashSet;
+use crate::build::dependency_map::Ask;
+use crate::index::module_index::{FrontDoor, Outcome};
 
 /// The ONE resolver loop, server and headless alike. Mode differences are
 /// explicit `server` gates inside this body — the per-module resolve
 /// protocol (memoization, persistence, strip, `insert_resolved`) has a
 /// single spelling and cannot drift between the two spawn fronts.
 pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>) {
-    let mut inc_paths = discover_inc_paths();
-
     // Wait for workspace root from initialize() for per-project cache path.
     let ws_root = wait_for_workspace_root(&core.workspace_root);
+    let root_path = ws_root.as_ref().and_then(|u| uri_to_path(u));
 
-    // Auto-discover project-local lib paths (lib/, local/lib/perl5/).
-    if let Some(root_path) = ws_root.as_ref().and_then(|u| uri_to_path(u)) {
-        add_project_lib_paths(&mut inc_paths, &root_path);
+    // The map, read before anything can query: an origin's visibility rank
+    // prefix-matches candidates against its search roots, and a reader may
+    // shell out (perl's) or read a generated table (php's classmap), so no
+    // request path may re-derive it. The walk may have read it first;
+    // either way it is read once.
+    let served = crate::build::language_driver::LanguageRegistry::served();
+    core.dependency_map_for(served, root_path.as_deref());
+    let (mut map, mut map_gen) = core.current_map();
+    let mut parse = Parse::of(served);
+    // The hub's store gates, builtin docs, cpanfile demand and conclusion
+    // repair are its own; a pack's store has the one gate its indexer runs.
+    let hub = FrontDoor::of(served) == FrontDoor::Hub;
+
+    // The store's gates run before any landing reads a row. There is no
+    // warm lane: a landing takes each located file from its row in place of
+    // parsing it, so a warm start lands what a cold one would. No gate reads
+    // the map: a dependency row describes its file alone, valid by its own
+    // stamp, whichever map located it.
+    let db = module_cache::open_cache_db(ws_root.as_deref(), served.id());
+    // The batch's parses read rows through their own connections, checked
+    // out of one pool for the thread's life (`prepare_batch`).
+    let db_path: Option<std::path::PathBuf> = db.as_ref().and_then(|c| c.path()).filter(|p| !p.is_empty()).map(std::path::PathBuf::from);
+    let readers = Arc::new(module_cache::RetainedReader::new());
+    if let (Some(conn), false) = (&db, hub) {
+        let _ = module_cache::validate_input_fingerprint(conn, served.analysis_input_fingerprint());
     }
-
-    // Publish the resolved search path before anything can query: an
-    // origin's visibility rank prefix-matches candidates against it, and
-    // discovery shells out to `perl`, so no request path may re-derive it.
-    core.set_inc_roots(&inc_paths);
-
-    // Scan @INC for available module names (fast, no parsing — just readdir)
-    scan_inc_module_names(&inc_paths, &core.available_modules);
-    log::info!("@INC scan: {} modules available", core.available_modules.len());
-
-    // Warm the in-memory cache from SQLite.
-    let db = module_cache::open_cache_db(ws_root.as_deref(), "perl");
-    if let Some(ref conn) = db {
-        let _ = module_cache::validate_inc_paths(conn, &inc_paths);
+    if let (Some(conn), true) = (&db, hub) {
         let _ = module_cache::validate_plugin_fingerprint(
             conn,
             &crate::build::plugin::rhai_host::plugin_fingerprint(),
@@ -57,54 +69,21 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                 Err(e) => log::warn!("Builtins hydrate failed: {}", e),
             }
         }
-        // Warm-copy strip is a long-lived-server behavior; one-shot CLI
-        // keeps warm copies whole for wall (rehydration never amortizes).
-        let strip_warm = server.is_some()
-            && core.long_lived.load(std::sync::atomic::Ordering::Relaxed)
-            && eviction_enabled();
-        let (n, stale_names) = module_cache::warm_cache(conn, &core.cache, &core.all_defs, strip_warm);
-        log::info!("Warmed module cache: {} entries loaded from disk, {} stale", n, stale_names.len());
-        // Stamp generations for the warm-loaded @INC providers (they
-        // landed in the cache without a registration front door).
-        core.stamp_missing_import_gens();
-        for name in &stale_names {
-            core.stale_modules.insert(name.clone(), ());
-        }
-        // Server sessions re-resolve stale modules eagerly; headless ones
-        // re-resolve on demand (`request_resolve` queues stale names with
-        // priority).
-        if server.is_some() && !stale_names.is_empty() {
-            {
-                let mut pq = core.queue.priority.lock().unwrap();
-                pq.extend(stale_names);
-            }
-            core.queue.notify_new_work();
-        }
-        // Build reverse index from warmed cache.
-        core.rebuild_reverse_index();
     }
 
-    // Each module resolves at most once per process.
-    let mut seen: HashSet<String> = HashSet::new();
-
-    // One parser + one parent-fallback memo for the whole sweep.
-    // Without the memo, every child whose own exports are empty re-parses
-    // its parent (e.g. ~50× Exporter, ~30× URI on a cold cpanfile run).
-    let mut parser = create_parser();
-    let mut parse_memo: ParseMemo = HashMap::new();
-
-    // Queue cpanfile dependencies (non-blocking — lets priority items go first).
+    // Queue cpanfile dependencies (non-blocking).
     // Track total for progress reporting in the main loop. Server-only: a
     // one-shot session must not burn its wall resolving the dep tree in the
     // background.
     let mut cpanfile_total = 0usize;
     let mut cpanfile_done = 0usize;
-    if let Some(srv) = &server {
+    if let (Some(srv), true) = (&server, hub) {
         if let Some(root_path) = ws_root.as_ref().and_then(|u| uri_to_path(u)) {
             let cpanfile_modules = cpanfile::parse_cpanfile(&root_path);
-            let to_resolve: Vec<String> = cpanfile_modules
+            let to_resolve: Vec<Ask> = cpanfile_modules
                 .into_iter()
-                .filter(|m| !core.cache.contains_key(m.as_str()))
+                .map(Ask::Name)
+                .filter(|a| !core.asked_now(a))
                 .collect();
 
             if !to_resolve.is_empty() {
@@ -130,9 +109,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                     },
                 ));
 
-                let mut pending = core.queue.pending.lock().unwrap();
-                pending.extend(to_resolve);
-                core.queue.condvar.notify_one();
+                core.queue.ask(to_resolve);
             }
         }
     }
@@ -158,6 +135,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     // un-repaired surfaces.
     let mut repair_frontier: Vec<String> = db
         .as_ref()
+        .filter(|_| hub)
         .map(|conn| {
             let at = module_cache::current_generation(conn);
             let f = module_cache::paths_needing_repair(
@@ -177,9 +155,44 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         })
         .unwrap_or_default();
 
-    // Main resolve loop — drain priority first, then pending.
+    // A server descends further than a one-shot run (`descent`), and strips
+    // what it lands: the rehydration a strip costs only amortizes in a
+    // process that lives. A one-shot run keeps its landings whole.
+    let prefetch = server.is_some();
+    let strip = eviction_enabled()
+        && (server.is_some() || core.long_lived.load(std::sync::atomic::Ordering::Relaxed));
+    let mut sweep_owed = false;
+    // What the map loads in every session is asked in every session, a
+    // server's and a one-shot run's alike.
+    core.ask(map.declared());
+    core.queue.started.store(true, std::sync::atomic::Ordering::Release);
+    notify_resolved(&core);
+    if server.is_some() {
+        warm_available(&core);
+    }
+
     loop {
         let batch = drain_or_repair(&core, &core.queue, &mut repair_frontier, db.as_ref());
+
+        if core.queue.map_inputs_moved.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            core.reread_dependency_map(served, root_path.as_deref());
+        }
+        // A move: every ask is asked again against the new map, which
+        // restamps what it still places and lands what it newly places; the
+        // sweep, once the re-asks drain, takes back what it no longer places.
+        // The store's rows stay: a row describes its file, not the map that
+        // placed it, and one the new map no longer reaches is `--gc-cache`'s.
+        if core.queue.map_moved.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            (map, map_gen) = core.current_map();
+            log::info!("Dependency map moved (generation {}); asking {} names again", map_gen, core.asked.len());
+            if server.is_some() {
+                warm_available(&core);
+            }
+            let again: Vec<Ask> = core.asked.iter().map(|e| e.key().clone()).collect();
+            core.queue.ask(again);
+            core.ask(map.declared());
+            sweep_owed = true;
+        }
 
         // One diagnostics refresh per drained BATCH, not per module: a
         // resolve takes longer than the refresh debounce's settle window,
@@ -190,141 +203,73 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         // always ends with a fire — diagnostics converge once the queue
         // drains.
         let mut resolved_any = false;
-        for module_name in batch {
-            if !seen.insert(module_name.clone()) {
+        let mut prepared = prepare_batch(
+            &core,
+            &map,
+            map_gen,
+            &batch,
+            served,
+            db_path.as_deref(),
+            &readers,
+            crate::index::cache_policy::PREPARE_AHEAD_STOCK,
+        );
+        for ask in batch {
+            if core.asked.get(&ask).is_some_and(|e| e.0 == map_gen) {
                 continue;
             }
-
-            let is_re_resolve = core.stale_modules.contains_key(&module_name);
-            if is_re_resolve {
-                log::info!("Re-resolving stale module '{}'", module_name);
-                // Stale entry must not be served from the run-local memo.
-                parse_memo.remove(&module_name);
-            } else {
+            if let Ask::File(path) = &ask {
+                crate::util::ghost_stats::count("resolver.file_landed");
+                let (whole, stored) = crate::util::ghost_stats::timed("resolver.land", || {
+                    land_file(&core, db.as_ref(), &map, map_gen, path, &mut parse, &mut prepared, strip)
+                });
+                if let Some(providers) = &whole {
+                    core.ask(descent(providers, prefetch));
+                }
+                let outcome = if stored.is_some() { Outcome::Landed } else { Outcome::Miss };
+                core.asked.insert(ask, (map_gen, outcome));
+                notify_resolved(&core);
+                resolved_any = true;
+                continue;
+            }
+            let names: Vec<String> = match &ask {
+                Ask::Name(n) => landing_names(&core, &map, n),
+                Ask::File(_) => unreachable!("a file lands by path, above"),
+            };
+            let mut landed = false;
+            for module_name in names {
+                if core.project_answers(&module_name) {
+                    crate::util::ghost_stats::count("resolver.project_answered");
+                    landed = true;
+                    continue;
+                }
                 log::info!("Resolving module '{}'", module_name);
-            }
-
-            crate::util::ghost_stats::count("resolver.module_resolved");
-            let result = parse_module(&inc_paths, &module_name, &mut parser, &mut parse_memo);
-            match &result {
-                Some(providers) => log::info!(
-                    "Resolved '{}': {} provider(s), {} export, {} export_ok",
-                    module_name,
-                    providers.len(),
-                    providers[0].analysis.export.len(),
-                    providers[0].analysis.export_ok.len()
-                ),
-                None => log::info!("No exports found for '{}'", module_name),
-            }
-            // Persistence is per FILE: each provider gets its own row, so a
-            // shadowed twin survives the warm start too.
-            let persisted = db
-                .as_ref()
-                .map(|conn| save_module_generation(conn, &module_name, &result))
-                .unwrap_or(false);
-            // The one spelling of "a resolution landed": stale-pin clear +
-            // generation mint + whole-analysis projections + registration-
-            // owned strip + the None-never-clobbers guard, all inside
-            // `insert_resolved`.
-            let stored = core.insert_resolved(
-                &module_name,
-                result.clone(),
-                persisted,
-                eviction_enabled(),
-            );
-            // The memo would otherwise pin the WHOLE closure for the
-            // thread's lifetime — a second copy of the tier. Failed
-            // resolves are NOT memoized (pre-existing semantics: the
-            // parent-fallback re-probes, catching mid-session
-            // installs).
-            match &stored {
-                Some(_) => {
-                    parse_memo.insert(module_name.clone(), stored.clone());
+                crate::util::ghost_stats::count("resolver.module_resolved");
+                let (whole, stored) = crate::util::ghost_stats::timed("resolver.land", || {
+                    land_module(&core, db.as_ref(), &map, map_gen, &module_name, &mut parse, &mut prepared, strip)
+                });
+                match &stored {
+                    Some(providers) => log::info!(
+                        "Resolved '{}': {} provider(s), {} export, {} export_ok",
+                        module_name,
+                        providers.len(),
+                        providers[0].analysis.export.len(),
+                        providers[0].analysis.export_ok.len()
+                    ),
+                    None => log::info!("No exports found for '{}'", module_name),
                 }
-                None => {
-                    parse_memo.remove(&module_name);
+                landed |= stored.is_some();
+                if let Some(providers) = &whole {
+                    core.ask(descent(providers, prefetch));
+                }
+                if let (Ask::Name(n), Some(providers)) = (&ask, &stored) {
+                    core.ask(member_targets(providers, n));
                 }
             }
-
-            // Descend into the module's own dependencies so the
-            // chain keeps resolving beyond the open doc's direct
-            // imports. Without this the cache stops at depth 1 —
-            // e.g. opening a Mojolicious::Lite script resolves
-            // Mojolicious.pm, but Mojolicious.pm's
-            // `has routes => sub { Mojolicious::Routes->new }`
-            // never triggers a resolve on Mojolicious::Routes,
-            // and `$r->get` on line 71 of the demo chain-dies
-            // because the intermediate class is a cache miss.
-            //
-            // The `seen` guard above makes this cycle-safe: a
-            // transitively-enqueued name that was already
-            // resolved at the current EXTRACT_VERSION gets
-            // skipped on its next turn. Server-only: a one-shot
-            // session resolves exactly what its query asks for.
-            if server.is_some() {
-                if let Some(ref providers) = result {
-                    let mut pending = core.queue.pending.lock().unwrap();
-                    let enqueue = |pending: &mut Vec<String>, name: String| {
-                        if name.is_empty() { return; }
-                        if core.cache.contains_key(&name) { return; }
-                        if seen.contains(&name) { return; }
-                        if !pending.iter().any(|p| p == &name) {
-                            pending.push(name);
-                        }
-                    };
-                    // Every provider's deps, not just the winner's: a
-                    // shadowed twin has its own `use` list and `@ISA`, and a
-                    // class only it names must still resolve.
-                    for m in providers {
-                    // Explicit imports — the module's own `use` statements.
-                    for imp in &m.analysis.imports {
-                        enqueue(&mut pending, imp.module_name.clone());
-                    }
-                    // Re-export edges — a re-exporting module (Test::Most →
-                    // Test::More) pulls its producers' surfaces transitively,
-                    // so those producers must be resolved even when no file
-                    // `use`s them directly.
-                    for re in &m.analysis.reexport_modules {
-                        enqueue(&mut pending, re.clone());
-                    }
-                    // Parent classes — inheritance chain.
-                    for (_pkg, parents) in m.analysis.package_parent_edges() {
-                        for parent in parents {
-                            enqueue(&mut pending, parent.clone());
-                        }
-                    }
-                    // ClassName return types — `has foo => sub { Bar->new }`,
-                    // plugin-emitted typed Subs, method return annotations.
-                    // These are the chain-invisible-but-reachable classes
-                    // the user's chain walks through at query time.
-                    for sym in m.analysis.symbols() {
-                        use crate::model::file_analysis::{InferredType, SymKind, SymbolDetail};
-                        if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
-                        if !matches!(sym.detail, SymbolDetail::Sub { .. }) { continue; }
-                        if let Some(InferredType::ClassName(c)) =
-                            m.analysis.symbol_return_type_via_bag(sym.id, None)
-                        {
-                            enqueue(&mut pending, c);
-                        }
-                    }
-                    // A gated emission's accessors name classes too (a
-                    // `belongs_to` its target); queued as candidates, like
-                    // every other feed of gated content.
-                    for w in m.analysis.gated_candidates().witnesses {
-                        use crate::model::{file_analysis::InferredType, witnesses::WitnessPayload};
-                        if let WitnessPayload::InferredType(InferredType::ClassName(c)) = w.payload {
-                            enqueue(&mut pending, c);
-                        }
-                    }
-                    }
-                    if !pending.is_empty() {
-                        core.queue.condvar.notify_one();
-                    }
-                }
-            }
-
-            // Remove from stale set after re-resolution (no-op otherwise).
-            core.stale_modules.remove(&module_name);
+            let label = match &ask {
+                Ask::Name(n) => n.clone(),
+                Ask::File(p) => p.to_string_lossy().into_owned(),
+            };
+            core.asked.insert(ask, (map_gen, if landed { Outcome::Landed } else { Outcome::Miss }));
 
             // Report cpanfile progress.
             if let Some(srv) = &server {
@@ -339,7 +284,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                                 value: ProgressParamsValue::WorkDone(WorkDoneProgress::Report(
                                     WorkDoneProgressReport {
                                         cancellable: Some(false),
-                                        message: Some(format!("{} ({}/{})", module_name, cpanfile_done, cpanfile_total)),
+                                        message: Some(format!("{} ({}/{})", label, cpanfile_done, cpanfile_total)),
                                         percentage: Some(pct),
                                     },
                                 )),
@@ -360,13 +305,24 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                 }
             }
 
-            // Signal waiters (per module — bounded waits key on names).
-            {
-                let _g = core.resolved.mu.lock().unwrap();
-                core.resolved.cv.notify_all();
-            }
+            // Signal waiters (per ask — bounded waits key on asks).
+            notify_resolved(&core);
             resolved_any = true;
         }
+
+        // The sweep runs at idle, and only against the map this thread
+        // re-asked through: a move published mid-batch is the next turn's.
+        if sweep_owed
+            && map_gen == core.map_generation()
+            && !core.queue.map_moved.load(std::sync::atomic::Ordering::Acquire)
+            && core.queue.pending.lock().unwrap().is_empty()
+        {
+            core.sweep_stale_placements();
+            sweep_owed = false;
+            resolved_any = true;
+        }
+        core.queue.busy.store(false, std::sync::atomic::Ordering::Release);
+        notify_resolved(&core);
         if resolved_any {
             if let Some(srv) = &server {
                 crate::util::ghost_stats::count("resolver.on_resolved_fired");
@@ -376,25 +332,78 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     }
 }
 
-/// Drain the next batch from the queue, checking priority first.
-///
-/// Both checks live INSIDE the wait loop and `pending` is held across them.
-/// `priority` has its own mutex, so — unlike a `pending` push — a priority
-/// push is not serialized against this park by the condvar's mutex: a check
-/// made before taking `pending` could be overtaken by a push whose notify
-/// then reaches nobody, and the batch would sleep until unrelated `pending`
-/// traffic arrived (forever, in an all-stale workload where every
-/// `request_resolve` takes the priority branch). Producers close the other
-/// half by notifying under `pending` (`ResolveQueue::notify_new_work`).
-///
-/// Lock order here is pending-then-priority; producers must never hold
-/// `priority` while acquiring `pending`.
+/// What a landed file asks for next. Parents and re-exports always: the
+/// MRO and a module's export surface read them at query time. With
+/// `prefetch` (a server), also its imports and the classes its subs
+/// return — the chain a long-lived session walks before anyone asks.
+fn descent(providers: &[Arc<CachedModule>], prefetch: bool) -> Vec<Ask> {
+    use crate::model::file_analysis::{InferredType, SymKind, SymbolDetail};
+    let mut asks: Vec<String> = Vec::new();
+    // Every provider's, not just the winner's: a shadowed twin has its own
+    // `use` list and `@ISA`, and a class only it names must still resolve.
+    for m in providers {
+        let fa = &m.analysis;
+        for (_pkg, parents) in fa.package_parent_edges() {
+            asks.extend(parents.iter().cloned());
+        }
+        // A re-exporting module (Test::Most → Test::More) pulls its
+        // producers' surfaces transitively, so those producers must land
+        // even when no file `use`s them directly.
+        asks.extend(fa.reexport_modules.iter().cloned());
+        if !prefetch {
+            continue;
+        }
+        asks.extend(fa.imports.iter().map(|i| i.module_name.clone()));
+        // `has foo => sub { Bar->new }`, plugin-emitted typed subs, return
+        // annotations: classes a chain walks through at query time.
+        for sym in fa.symbols() {
+            if !matches!(sym.kind, SymKind::Sub | SymKind::Method) || !matches!(sym.detail, SymbolDetail::Sub { .. }) {
+                continue;
+            }
+            if let Some(InferredType::ClassName(c)) = fa.symbol_return_type_via_bag(sym.id, None) {
+                asks.push(c);
+            }
+        }
+        // A gated emission's accessors name classes too (a `belongs_to` its
+        // target); asked as candidates, like every other feed of gated
+        // content.
+        for w in fa.gated_candidates().witnesses {
+            if let crate::model::witnesses::WitnessPayload::InferredType(InferredType::ClassName(c)) = w.payload {
+                asks.push(c);
+            }
+        }
+    }
+    asks.retain(|n| !n.is_empty());
+    asks.into_iter().map(Ask::Name).collect()
+}
+
+/// An ask for a module MEMBER (`jinja2.Environment`, which lands `jinja2`)
+/// asks for what the member names: the module only imports it, and the
+/// asker means the class its own module declares. Read off the stored
+/// copies, so a module an earlier ask landed still answers.
+pub(super) fn member_targets(providers: &[Arc<CachedModule>], asked: &str) -> Vec<Ask> {
+    let mut asks: Vec<Ask> = Vec::new();
+    for m in providers {
+        for (_, target) in m.analysis.module_members().filter(|(member, _)| member == asked) {
+            if !asks.iter().any(|a| matches!(a, Ask::Name(t) if *t == target)) {
+                asks.push(Ask::Name(target));
+            }
+        }
+    }
+    asks
+}
+
+fn notify_resolved(core: &IndexCore) {
+    let _g = core.resolved.mu.lock().unwrap();
+    core.resolved.cv.notify_all();
+}
+
 /// `drain_next_batch`, except the idle wait is spent re-baking conclusions.
 ///
-/// Real work always wins: the queue is checked before every slice, so a resolve
-/// request waits at most one slice (32 files) behind repair rather than behind
-/// the whole frontier. When the frontier is empty this is exactly the old
-/// blocking drain.
+/// Real work always wins: the queue is checked before every slice, so an ask
+/// waits at most one slice (32 files) behind repair rather than behind the
+/// whole frontier. When the frontier is empty this is exactly the blocking
+/// drain.
 /// Move what consults pushed onto the repair frontier.
 ///
 /// The frontier is enumerated once from the store's own "what is missing"
@@ -431,7 +440,7 @@ fn drain_or_repair(
     queue: &ResolveQueue,
     frontier: &mut Vec<String>,
     db: Option<&rusqlite::Connection>,
-) -> Vec<String> {
+) -> Vec<Ask> {
     adopt_pushed_repairs(core, frontier);
     while !frontier.is_empty() {
         if let Some(batch) = try_drain_next_batch(queue) {
@@ -457,34 +466,37 @@ fn drain_or_repair(
 /// The non-blocking half of `drain_next_batch`. `None` means "nothing queued
 /// right now", which is a different answer from the blocking form's "nothing
 /// queued, so I waited".
-fn try_drain_next_batch(queue: &ResolveQueue) -> Option<Vec<String>> {
+fn try_drain_next_batch(queue: &ResolveQueue) -> Option<Vec<Ask>> {
     let mut pending = queue.pending.lock().unwrap();
-    {
-        let mut priority = queue.priority.lock().unwrap();
-        if !priority.is_empty() {
-            return Some(std::mem::take(&mut *priority));
-        }
-    }
-    if !pending.is_empty() {
-        return Some(std::mem::take(&mut *pending));
-    }
-    None
+    take_batch(queue, &mut pending)
 }
 
-pub(super) fn drain_next_batch(queue: &ResolveQueue) -> Vec<String> {
+pub(super) fn drain_next_batch(queue: &ResolveQueue) -> Vec<Ask> {
     let mut pending = queue.pending.lock().unwrap();
     loop {
-        {
-            let mut priority = queue.priority.lock().unwrap();
-            if !priority.is_empty() {
-                return std::mem::take(&mut *priority);
-            }
-        }
-        if !pending.is_empty() {
-            return std::mem::take(&mut *pending);
+        if let Some(batch) = take_batch(queue, &mut pending) {
+            return batch;
         }
         pending = queue.condvar.wait(pending).unwrap();
     }
+}
+
+/// Take what is queued, or an empty batch when only a map flag is set (the
+/// loop acts on the flag). Marks the queue busy under `pending`, so
+/// `wait_idle` never sees an empty queue with a batch in flight.
+fn take_batch(queue: &ResolveQueue, pending: &mut Vec<Ask>) -> Option<Vec<Ask>> {
+    use std::sync::atomic::Ordering;
+    let batch = if !pending.is_empty() {
+        Some(std::mem::take(pending))
+    } else if queue.map_moved.load(Ordering::Acquire) || queue.map_inputs_moved.load(Ordering::Acquire) {
+        Some(Vec::new())
+    } else {
+        None
+    };
+    if batch.is_some() {
+        queue.busy.store(true, Ordering::Release);
+    }
+    batch
 }
 
 // ---- Internal helpers ----
@@ -505,6 +517,15 @@ fn wait_for_workspace_root(ws_root_channel: &WorkspaceRootChannel) -> Option<Str
         guard = g;
     }
     guard.clone().flatten()
+}
+
+/// List the map's names on the pool, off the resolver thread, so a
+/// server's first module-name completion finds them listed.
+fn warm_available(core: &Arc<IndexCore>) {
+    let core = Arc::clone(core);
+    rayon::spawn(move || {
+        core.available_names();
+    });
 }
 
 pub fn uri_to_path(uri: &str) -> Option<PathBuf> {

@@ -37,6 +37,17 @@ or by being explicitly declined.
   `register_workspace_stripping` on commit, whole-copy fallback only on
   persist failure. (The one remaining KNOWN unbounded residency residual
   alongside the deliberate CLI one-shot warm-whole profile.)
+- **A refused persist is fatal, so it is not a residency residual.** Every
+  writer of analyses, rows or dependency landings (the bulk writers, the
+  pack swap, the backfills, the dependency lane) ends the process with one
+  `PersistFailure` message and exit 74 when the store refuses a write.
+  There used to be a whole-copy fallback capped at 128 MiB per writer,
+  and past the cap it dropped copies from the index: on a full cache disk
+  a one-shot `--check` on curl kept between 0 and 37 of its 92 rows and
+  exited 0. Without the cap, keeping every refused copy whole holds what a
+  run with eviction off holds (about 1.1 GB on curl against 265 MB), and
+  it hides the failure as well as the drop did. A full disk refuses every
+  write after the first, so the process says so and stops.
 - **Rows-missing re-strip after backfill.** After a REF_ROWS_VERSION
   bump, refs+symbols stay resident for one session (self-healing at next
   restart; never trips the fully-resident wire). Re-registering post-

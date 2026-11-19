@@ -175,3 +175,44 @@ impl<'t, 's> CursorDocument<'t, 's> {
         facts
     }
 }
+
+impl<'t> CursorDocument<'t, '_> {
+    /// The identity typed so far at byte `at`, where the document spells
+    /// one a dependency map places: the widest identity-spelling capture
+    /// around `at`, cut at `at`, its leading namespace separator dropped.
+    /// A reference counts only when written absolute (led by the
+    /// separator), and an import name only when its statement names no
+    /// module or prefix of its own: then the name is a member of that
+    /// module (`from a.b import C`, `use A\B\{C}`). A relative import
+    /// (`from .m import`) names the file's own package, never a map's.
+    pub fn identity_prefix_at(&self, at: usize, pack: &LangPack) -> Option<String> {
+        let mut best: Option<(Node<'t>, IdentitySpelling)> = None;
+        self.each_match(self.root, Some(at..at + 1), |_, caps| {
+            let has = |want: ImportCap| caps.iter().any(|(_, c)| *c == Capture::Import(want));
+            if has(ImportCap::Relative) {
+                return;
+            }
+            let qualified = has(ImportCap::Module) || has(ImportCap::Prefix);
+            for (n, cap) in caps {
+                let Some(spelling) = cap.identity_spelling() else { continue };
+                if qualified && *cap == Capture::Import(ImportCap::Name) {
+                    continue;
+                }
+                if n.start_byte() > at || at > n.end_byte() {
+                    continue;
+                }
+                if best.is_none_or(|(b, _)| n.end_byte() - n.start_byte() > b.end_byte() - b.start_byte()) {
+                    best = Some((*n, spelling));
+                }
+            }
+        });
+        let (node, spelling) = best?;
+        let typed = std::str::from_utf8(self.source.get(node.start_byte()..at)?).ok()?;
+        let sep = pack.names.use_map_sep().unwrap_or_default();
+        let absolute = !sep.is_empty() && typed.starts_with(sep);
+        if spelling == IdentitySpelling::Reference && !absolute {
+            return None;
+        }
+        Some(if absolute { &typed[sep.len()..] } else { typed }.to_string())
+    }
+}

@@ -170,6 +170,12 @@ pub struct FileModule {
 }
 
 impl FileModule {
+    /// The identity it is imported by (`pkg.models`), joined with the
+    /// language's separator.
+    pub fn identity(&self, sep: &str) -> String {
+        self.segments.iter().fold(String::new(), |ns, seg| crate::model::conventions::join_qualified(&ns, seg, sep))
+    }
+
     /// The package relative imports resolve from.
     pub fn package(&self) -> &[String] {
         match self.is_package {

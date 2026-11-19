@@ -389,8 +389,8 @@ impl Drop for SweepMemoGuard {
 }
 
 impl ModuleIndex {
-    /// Insert a resolved module into the name-keyed cache slot — a thin
-    /// front over `IndexCore::insert_resolved`, the one spelling shared
+    /// Land a resolved module as a dependency — a thin front over
+    /// `IndexCore::land_providers`, the one spelling shared
     /// with the resolver thread. CLI/test copies stay whole (`persisted:
     /// false` — nothing was written here, so the strip has no license).
     pub fn insert_cache(&self, module_name: &str, cached: Option<Arc<CachedModule>>) {
@@ -401,7 +401,75 @@ impl ModuleIndex {
     /// single-copy front door above is this one with a one-element set —
     /// there is no separate one-provider path.
     pub fn insert_cache_providers(&self, module_name: &str, providers: Option<Providers>) {
-        self.core.insert_resolved(module_name, providers, false, false);
+        let door = FrontDoor::of(crate::build::language_driver::LanguageRegistry::served());
+        self.core.land_providers(
+            module_name,
+            providers,
+            false,
+            Default::default(),
+            false,
+            self.core.map_generation(),
+            super::file_records::PlacedAs::Identity,
+            door,
+        );
+    }
+
+    /// The resolver thread's landing of `module_name`
+    /// (`module_resolver::land_module`), run on the caller's thread with
+    /// copies kept whole, for a test that needs one landing and no queue.
+    #[cfg(test)]
+    pub fn land_module(
+        &self,
+        rows: Option<&rusqlite::Connection>,
+        map: &crate::build::dependency_map::DependencyMap,
+        module_name: &str,
+        parser: &mut tree_sitter::Parser,
+    ) -> (Option<Providers>, Option<Providers>) {
+        let mut parse = module_resolver::Parse::Hub(std::mem::replace(parser, tree_sitter::Parser::new()));
+        let out = module_resolver::land_module(&self.core, rows, map, self.core.map_generation(), module_name, &mut parse, &mut Default::default(), false);
+        if let module_resolver::Parse::Hub(p) = parse {
+            *parser = p;
+        }
+        out
+    }
+
+    /// `land_module` through a pack language's door.
+    #[cfg(test)]
+    pub fn land_pack_module(
+        &self,
+        map: &crate::build::dependency_map::DependencyMap,
+        module_name: &str,
+        driver: &'static dyn crate::build::language_driver::LanguageDriver,
+    ) -> (Option<Providers>, Option<Providers>) {
+        let mut parse = module_resolver::Parse::Pack(driver);
+        module_resolver::land_module(&self.core, None, map, self.core.map_generation(), module_name, &mut parse, &mut Default::default(), false)
+    }
+
+    /// `land_file` through a pack language's door.
+    #[cfg(test)]
+    pub fn land_pack_file(
+        &self,
+        map: &crate::build::dependency_map::DependencyMap,
+        path: &crate::util::canonical_path::CanonicalPath,
+        driver: &'static dyn crate::build::language_driver::LanguageDriver,
+    ) -> (Option<Providers>, Option<Providers>) {
+        let mut parse = module_resolver::Parse::Pack(driver);
+        module_resolver::land_file(&self.core, None, map, self.core.map_generation(), path, &mut parse, &mut Default::default(), false)
+    }
+
+    /// The dependency map read so far, if any.
+    pub fn dependency_map(&self) -> Option<Arc<crate::build::dependency_map::DependencyMap>> {
+        self.core.dependency_map()
+    }
+
+    /// The dependency map, read on first ask by `driver`'s reader for
+    /// `root` (`IndexCore::dependency_map_for`).
+    pub fn dependency_map_for(
+        &self,
+        driver: &dyn crate::build::language_driver::LanguageDriver,
+        root: Option<&std::path::Path>,
+    ) -> Option<Arc<crate::build::dependency_map::DependencyMap>> {
+        self.core.dependency_map_for(driver, root)
     }
 
     /// The workspace-registration reads that need the FULL analysis:
@@ -440,16 +508,19 @@ impl ModuleIndex {
         self.bump_registration_gen(&path);
         let sd = self.record_and_dirty(&path, &analysis, SurfaceWrite::Background);
         let cached = Arc::new(CachedModule::new(path, analysis.clone()));
-        // Path-keyed registry first: the relational retrieval resolves
+        let names = package_names(&analysis);
+        // The record (and its role) before the path home publishes the
+        // copy, so a concurrent sweep never sees it roleless.
+        let prev = self.core.claim_for_workspace(&cached.path, &cached.analysis, names.clone());
+        // Path-keyed registry next: the relational retrieval resolves
         // candidate paths through `cached_by_path`, and packageless files
         // (Mojolicious::Lite entrypoints) exist ONLY here.
-        self.all_files.insert(cached.path.clone(), cached.clone());
-        let names = package_names(&analysis);
+        self.core.all_files.insert(cached.path.clone(), cached.clone());
         if !names.is_empty() {
             // Whole copy: the feed inside the rebuild records the name list.
             self.core.edges.record_names(&cached.path, &analysis);
         }
-        self.adopt_workspace_candidate(cached, names);
+        self.adopt_workspace_candidate(cached, names, prev);
         sd
     }
 
@@ -457,7 +528,8 @@ impl ModuleIndex {
     /// declares (`names`, extracted from the WHOLE analysis pre-strip), then
     /// rebuild the name-keyed registrations for every affected name — the
     /// declared set plus any a previous registration of the same path
-    /// declared and this one dropped. Perl's package relation is
+    /// declared and this one dropped (`prev`, what recording `names`
+    /// replaced). Perl's package relation is
     /// name → MANY files (a package reopens anywhere), so the candidate
     /// table (`all_defs`) is the truth and the name-keyed cache slot is a
     /// derived winner — recomputed from the SET, never from arrival order.
@@ -465,10 +537,8 @@ impl ModuleIndex {
         &self,
         cached: Arc<CachedModule>,
         names: Vec<(String, bool)>,
+        prev: Option<Vec<(String, bool)>>,
     ) {
-        let prev = self
-            .registered_names
-            .insert(cached.path.clone(), names.clone());
         let mut affected: Vec<String> = names.iter().map(|(n, _)| n.clone()).collect();
         for (n, _) in prev.into_iter().flatten() {
             if !affected.contains(&n) {
@@ -520,25 +590,9 @@ impl ModuleIndex {
             return;
         }
         self.workspace_modules.insert(name.to_string(), ());
-        // The relation is shared with the @INC tier, but the winner is not:
-        // project code shadows an installed copy of the same name, and
-        // `best_candidate`'s path tie-break has no opinion about which tier
-        // a file came from. `registered_names` holds exactly the paths a
-        // workspace/pack front door registered, so it IS the tier test —
-        // no second marker to keep in sync.
-        let refs: Vec<&Arc<CachedModule>> = cands
-            .iter()
-            .filter(|c| self.registered_names.contains_key(&c.path))
-            .collect();
-        if refs.is_empty() {
-            // Only @INC providers left: leave their slot alone.
-            return;
-        }
-        if let Some(best) =
-            best_candidate(&refs, name, &|m, n| self.module_defines_class(m, n))
-        {
-            self.core.set_slot(name, Some(best));
-        }
+        // The relation is shared with the @INC tier; the winner is ranked by
+        // each candidate's role, then by the map.
+        self.core.derive_slot(name);
     }
 
     /// The freshness gate, single-sourced: record `fa`'s span-free surface
@@ -607,47 +661,13 @@ impl ModuleIndex {
         self.record_surface_write(&canon, surface, SurfaceWrite::Background)
     }
 
-    /// The ONE freshness write (`canon` pre-canonicalized): applies the
-    /// `SurfaceWrite` provenance rule — a `Background` write is suppressed on
-    /// a path the OPEN-DOC lane has already recorded, because consumers read
-    /// that buffer and what they read didn't move.
-    ///
-    /// Keyed on "an open-doc write has landed", NOT on "a doc is open here".
-    /// The protection only means something once there is an open-doc baseline
-    /// to protect; before one exists the disk state is the only truth anyone
-    /// holds, and the old predicate yielded to a writer that did not exist.
-    /// An open file then had NO record at all between `didOpen` and the first
-    /// debounced refresh — so it declared no dependencies, no consumer edge
-    /// existed, and a watcher-driven wave over its provider marked nobody.
-    /// Suppression resumes the instant the first open-doc record lands, so
-    /// the case the rule exists for is untouched.
     fn record_surface_write(
         &self,
         canon: &std::path::Path,
         surface: crate::model::surface::Surface,
         write: SurfaceWrite,
     ) -> crate::model::surface::SurfaceVerdict {
-        if write == SurfaceWrite::Background
-            && self.open_doc_paths.get(canon).is_some_and(|r| *r)
-        {
-            return crate::model::surface::SurfaceVerdict::Unchanged;
-        }
-        if write == SurfaceWrite::OpenDoc {
-            if let Some(mut e) = self.open_doc_paths.get_mut(canon) {
-                *e = true;
-            }
-        }
-        let verdict = self.freshness.record(canon, surface);
-        match verdict {
-            crate::model::surface::SurfaceVerdict::FirstSeen => {
-                crate::util::ghost_stats::count("epoch.freshness.record_first_seen")
-            }
-            crate::model::surface::SurfaceVerdict::Changed => {
-                crate::util::ghost_stats::count("epoch.freshness.record_changed")
-            }
-            crate::model::surface::SurfaceVerdict::Unchanged => {}
-        }
-        verdict
+        self.core.record_surface_write(canon, surface, write)
     }
 
     /// didOpen: the open-doc path owns `path`'s surface record until
@@ -657,7 +677,7 @@ impl ModuleIndex {
         // `false`: open, but the open-doc lane has recorded nothing yet, so a
         // Background write still lands. A re-open legitimately resets this —
         // `did_close` re-recorded the disk state on the way out.
-        self.open_doc_paths.insert(canon, false);
+        self.core.open_doc_paths.insert(canon, false);
     }
 
     /// didClose: release the record to background writers and reconcile —
@@ -669,8 +689,12 @@ impl ModuleIndex {
     /// corrects it.
     pub fn mark_doc_closed(&self, path: &std::path::Path) -> Option<SurfaceDirty> {
         let canon = crate::util::canonical_path::CanonicalPath::resolve(path);
-        self.open_doc_paths.remove(canon.as_path());
-        let cm = self.all_files.get(&canon).map(|e| e.value().clone())?;
+        self.core.open_doc_paths.remove(canon.as_path());
+        // Either tier's copy: a landed dependency is recorded like a project
+        // file, so an installed module opened and closed hands its record
+        // back to the disk state its row and conclusions describe.
+        self.core.records.role_of(&canon)?;
+        let cm = self.core.all_files.get(&canon).map(|e| e.value().clone())?;
         let whole = crate::model::file_analysis::CrossFileLookup::whole_present(self, &cm);
         Some(self.record_and_dirty(&canon, &whole, SurfaceWrite::Background))
     }
@@ -683,27 +707,25 @@ impl ModuleIndex {
         self.core.mint_registration_gen(path);
     }
 
-    /// Stamp a generation for every name-keyed cache entry that lacks one —
-    /// the warm scan loads @INC blobs straight into the cache without a
-    /// registration front door. See `IndexCore::stamp_missing_import_gens`.
-    pub(crate) fn stamp_import_generations(&self) {
-        self.core.stamp_missing_import_gens();
-    }
-
     pub(super) fn registration_gen_of(&self, path: &crate::util::canonical_path::CanonicalPath) -> u64 {
         self.core.registration_gen.get(path).map(|g| *g).unwrap_or(0)
+    }
+
+    /// The freshness index's records and heap estimate, every tier's.
+    pub fn freshness_heap_estimate(&self) -> (usize, usize) {
+        self.core.freshness.heap_estimate()
     }
 
     /// Drop `path`'s recorded surface and its dep edges (file deleted).
     pub fn remove_surface(&self, path: &std::path::Path) {
         let canon = crate::util::canonical_path::CanonicalPath::resolve(path).into_path_buf();
         crate::util::ghost_stats::count("epoch.freshness.remove");
-        self.freshness.remove(&canon);
+        self.core.freshness.remove(&canon);
         // Belt over braces: if the caller's raw spelling was the recorded
         // key (registration itself fell back), remove that too.
         if canon != path {
             crate::util::ghost_stats::count("epoch.freshness.remove");
-            self.freshness.remove(path);
+            self.core.freshness.remove(path);
         }
     }
 
@@ -936,7 +958,7 @@ impl ModuleIndex {
     pub(super) fn enrichment_epoch(&self) -> u64 {
         self.core.gen_counter.load(std::sync::atomic::Ordering::Relaxed)
             + self.core.shape_bumps.load(std::sync::atomic::Ordering::Relaxed)
-            + self.freshness.write_count()
+            + self.core.freshness.write_count()
     }
 
     /// `enrichment_key` behind the epoch memo, optimistic-read validated.
@@ -1004,27 +1026,30 @@ impl ModuleIndex {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.registration_gen_of(&cached.path).hash(&mut h);
-        self.freshness.fingerprint_of(&cached.path).unwrap_or(0).hash(&mut h);
+        self.core.freshness.fingerprint_of(&cached.path).unwrap_or(0).hash(&mut h);
         // The file's OWN packages are bridge targets too (helpers bridged to
         // a controller's class) and are not in its dep-name closure. Read
         // the REGISTRATION names (path-keyed, survives symbol eviction; a
         // bare `package Foo;` mints no PackageFacts entry, so the facts
         // table under-enumerates), falling back to the Package/Class
         // symbols for unregistered copies.
-        let mut own: Vec<String> = match self.registered_names.get(&cached.path) {
-            Some(names) => names.iter().map(|(n, _)| n.clone()).collect(),
-            None => crate::index::module_index::package_names(&cached.analysis)
-                .into_iter()
-                .map(|(n, _)| n)
-                .collect(),
-        };
+        let mut own: Vec<String> = self
+            .core
+            .records
+            .with_names(&cached.path, |names| names.iter().map(|(n, _)| n.clone()).collect())
+            .unwrap_or_else(|| {
+                crate::index::module_index::package_names(&cached.analysis)
+                    .into_iter()
+                    .map(|(n, _)| n)
+                    .collect()
+            });
         own.sort_unstable();
         own.dedup();
         for pkg in &own {
             self.hash_relations_for(pkg, &mut h);
         }
         let mut seen: std::collections::HashSet<String> = Default::default();
-        let mut frontier: Vec<String> = self.freshness.deps_of_names(&cached.path);
+        let mut frontier: Vec<String> = self.core.freshness.deps_of_names(&cached.path);
         frontier.sort_unstable();
         frontier.dedup();
         // Same bound as `resolve_method_in_ancestors` — enrichment's own
@@ -1054,20 +1079,19 @@ impl ModuleIndex {
                     // fingerprint deliberately ignores, so a provider
                     // re-registration must move every consumer's key.
                     self.registration_gen_of(&cm.path).hash(&mut h);
-                    match self.freshness.fingerprint_of(&cm.path) {
+                    match self.core.freshness.fingerprint_of(&cm.path) {
                         Some(fp) => {
                             1u8.hash(&mut h);
                             fp.hash(&mut h);
-                            next.extend(self.freshness.deps_of_names(&cm.path));
+                            next.extend(self.core.freshness.deps_of_names(&cm.path));
                         }
                         None => {
                             2u8.hash(&mut h);
-                            // @INC/recordless tier: its registration
-                            // generation (minted at insert/warm by the
-                            // resolver thread + `insert_cache`) already
-                            // rode the key above — a re-resolve bumps it.
-                            // No deps_of record; its parents ride the
-                            // analysis itself.
+                            // A copy with no record (one that landed
+                            // already stripped): its registration
+                            // generation already rode the key above — a
+                            // re-landing bumps it. No deps_of record; its
+                            // parents ride the analysis itself.
                             for (_pkg, parents) in cm.analysis.package_parent_edges() {
                                 next.extend(parents.iter().cloned());
                             }
@@ -1106,7 +1130,7 @@ impl ModuleIndex {
         path: &std::path::Path,
     ) -> std::collections::HashSet<std::path::PathBuf> {
         let canon = crate::util::canonical_path::CanonicalPath::resolve(path).into_path_buf();
-        self.freshness.dirty_consumers(&canon)
+        self.core.freshness.dirty_consumers(&canon)
     }
 
     /// The pre-strip half of workspace registration: extract every declared
@@ -1146,8 +1170,9 @@ impl ModuleIndex {
         let path = crate::util::canonical_path::CanonicalPath::resolve(path);
         self.bump_registration_gen(&path);
         let cached = Arc::new(CachedModule::new(path, arc));
-        self.all_files.insert(cached.path.clone(), cached.clone());
-        self.adopt_workspace_candidate(cached, names);
+        let prev = self.core.claim_for_workspace(&cached.path, &cached.analysis, names.clone());
+        self.core.all_files.insert(cached.path.clone(), cached.clone());
+        self.adopt_workspace_candidate(cached, names, prev);
     }
 
     /// Registration-owned strip: feed the name/edge registrations from the
@@ -1193,7 +1218,10 @@ impl ModuleIndex {
         self.core.note_shape_change();
         self.remove_surface(path);
         let canon = crate::util::canonical_path::CanonicalPath::resolve(path);
-        self.all_files.remove(&canon);
+        // A dependency at this path (a vendored tree under the root) leaves
+        // through the tier's inverse, which owns its names.
+        self.core.retire_dependency(&canon);
+        self.core.all_files.remove(&canon);
         self.core.edges.remove_path_record(canon.as_path());
         // The inverse of `record_workspace_projections`' shape half. Its own
         // retraction only fires when the SAME file re-registers, so a deleted
@@ -1205,31 +1233,18 @@ impl ModuleIndex {
         // one module, so dropping on one file's deletion would wrongly
         // un-suppress the entrypoint lint. Its reader is biased honest-quiet,
         // so never-remove is the safe direction there.
-        if let Some((_, names)) = self.registered_names.remove(&canon) {
-            for (name, _) in &names {
-                if let Some(mut v) = self.core.all_defs.get_mut(name) {
-                    v.remove_path(&canon);
-                }
-                self.core.all_defs.remove_if(name, |_, v| v.is_empty());
-                // Survivors keep their edges and re-pick the winner; the
-                // last candidate's departure empties the slot.
-                self.rebuild_name_registration(name);
-            }
+        let Some(names) = self.core.records.forget_workspace(&canon) else {
             return;
-        }
-        // No record (registered through a legacy/test door): fall back to
-        // the cache scan.
-        let name = self.core.cache.iter().find_map(|entry| {
-            entry
-                .value()
-                .as_ref()
-                .filter(|cm| cm.path == canon)
-                .map(|_| entry.key().clone())
-        });
-        if let Some(name) = name {
-            self.core.edges.purge_module(&name);
-            self.core.clear_slot(&name);
-            self.workspace_modules.remove(&name);
+        };
+        self.core.forget_project_answers(&names);
+        for (name, _) in &names {
+            if let Some(mut v) = self.core.all_defs.get_mut(name) {
+                v.remove_path(&canon);
+            }
+            self.core.all_defs.remove_if(name, |_, v| v.is_empty());
+            // Survivors keep their edges and re-pick the winner; the
+            // last candidate's departure empties the slot.
+            self.rebuild_name_registration(name);
         }
     }
 
@@ -1580,13 +1595,7 @@ impl ModuleIndex {
     /// evicted — and falls back to the symbol scan for copies registered
     /// whole (recovery paths, tests).
     pub(super) fn module_defines_class(&self, m: &CachedModule, name: &str) -> bool {
-        if let Some(rec) = self.registered_names.get(&m.path) {
-            return rec.iter().any(|(n, is_class)| n == name && *is_class);
-        }
-        m.analysis
-            .symbols()
-            .iter()
-            .any(|s| matches!(s.kind, SymKind::Class) && s.name == name)
+        self.core.defines_class(m, name)
     }
 
     /// Run `f` against this index's retained read connection to the
@@ -1734,10 +1743,10 @@ impl ModuleIndex {
         // registration's tie-break consults the record via
         // `module_defines_class`, and the fallback symbol scan on a
         // stripped copy misjudges every Class as a value.
-        self.registered_names.insert(cached.path.clone(), feed.to_vec());
+        self.core.claim_for_workspace(&cached.path, &analysis, feed.to_vec());
         // Unconditional: even a file declaring nothing registrable (an
         // include-only shim) must be reachable by whole-project sweeps.
-        self.all_files.insert(cached.path.clone(), cached.clone());
+        self.core.all_files.insert(cached.path.clone(), cached.clone());
         for (name, is_class) in feed {
             let sym_name = name;
             let incoming_is_class = *is_class;
@@ -1781,38 +1790,10 @@ impl ModuleIndex {
             let mut v = self.core.leaf_defs.entry(leaf).or_default();
             v.upsert(cached.clone());
         }
-        // Specialization family edges: primary → spec NAMES. A spec's Class
-        // symbol registered above makes `get_cached(spec_name)` resolve, so
-        // the reverse map's values are the same by-name keys the rest of the
-        // pack index uses. A stale entry (edited file dropped a spec)
-        // self-heals at read: `direct_specializations_of` re-checks the pair
-        // against the CURRENT analysis.
-        for (spec, primary) in specializes {
-            self.core.edges.publish_spec(primary, spec);
-        }
-        // Inverse inheritance edges: parent → child NAMES, so
-        // `direct_children_of` (the INHERITS_INV cross-file leg the
-        // implementations verb walks) can find the subclasses of a base. The
-        // Perl `feed()` path populates `children` via `parent_classes`; the
-        // pack path builds it here (it bypasses `feed`). Symmetric with the
-        // spec map above: the child NAME is a by-name key `get_cached`
-        // resolves, and `direct_children_of` re-checks each candidate's CURRENT
-        // `package_parents`, so a stale entry (an edit dropped a base)
-        // self-heals at read. `package_parents` survives every strip
-        // (`evict_to` leaves it) and rides the warm-stub skeleton, so the arc
-        // carries it on the fresh, warm, and whole paths alike.
-        for (child, parents) in analysis.package_parent_edges() {
-            for parent in parents {
-                self.core.edges.publish_child(parent, child);
-            }
-        }
-        // Include edges: header → this file. The directives ride every
-        // strip and the warm-stub skeleton (pack lane), so fresh, warm and
-        // whole registrations all publish them.
-        let includer = cached.path.to_string_lossy();
-        for target in analysis.pack.include_directives.iter().filter_map(|d| d.target.as_deref()) {
-            self.core.edges.publish_includer(target, &includer);
-        }
+        // Specialization, inverse-inheritance and include edges. They ride
+        // every strip and the warm-stub skeleton, so fresh, warm and whole
+        // registrations all publish them.
+        self.core.publish_pack_edges(&cached.path, &analysis, specializes);
     }
 
     /// Remove a pack file's registrations: its `all_files` entry, its
@@ -1828,18 +1809,15 @@ impl ModuleIndex {
         crate::util::ghost_stats::count("epoch.shape.unregister_file");
         self.core.note_shape_change();
         let canon = crate::util::canonical_path::CanonicalPath::resolve(path);
-        let Some((_, old)) = self.all_files.remove(&canon) else {
+        let Some((_, old)) = self.core.all_files.remove(&canon) else {
             return;
         };
         // Symbols may be evicted on the resident copy, and rehydration
         // would fetch the WRONG generation after an edit persists — so the
         // inverse runs on the name list registration recorded, not on
         // `old.analysis.symbols`.
-        let names = self
-            .registered_names
-            .remove(&canon)
-            .map(|(_, v)| v)
-            .unwrap_or_default();
+        let names = self.core.records.forget_workspace(&canon).unwrap_or_default();
+        self.core.forget_project_answers(&names);
         for leaf in super::widening_leaves(old.analysis.names(), &names) {
             if let Some(mut v) = self.core.leaf_defs.get_mut(&leaf) {
                 v.remove_path(&canon);
@@ -1886,8 +1864,8 @@ impl ModuleIndex {
     /// whose `include_closure` contains it).
     /// The residency tripwire's observable: fully-resident registered
     /// copies. After a bulk index with eviction on, every one of these must
-    /// be accounted for by a deliberate whole-copy site (writer fallback,
-    /// degraded/unpersisted analysis) — an unexplained count means a
+    /// be accounted for by a deliberate whole-copy site (a degraded or
+    /// unpersisted analysis) — an unexplained count means a
     /// registration path is silently pinning whole analyses (the RAM
     /// regression no functional test can see).
     pub fn count_fully_resident(&self) -> usize {
@@ -1900,36 +1878,22 @@ impl ModuleIndex {
         n
     }
 
-    /// Every front-door registration — the project's own files, the one
-    /// home they have.
+    /// Every WORKSPACE-role registration — the project's own files. The one
+    /// iterator the project-wide sweeps (diagnostics, heatmap, symbol rows,
+    /// the include-closure consumer scan) share, so a file of another role
+    /// in the path home is left out in one place.
     pub fn for_each_registered_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) {
-        for entry in self.all_files.iter() {
-            f(entry.value());
+        for entry in self.core.all_files.iter() {
+            if self.core.records.role_of(entry.key()) == Some(crate::model::file_analysis::FileRole::Workspace) {
+                f(entry.value());
+            }
         }
     }
 
     pub fn registered_file_count(&self) -> usize {
-        self.all_files.len()
-    }
-
-    /// Rebuild the reverse index (`func → modules`) from the current cache.
-    /// `warm_cache` writes straight into `cache_raw()` and never touches the
-    /// reverse index, so a CLI/full-startup warm path that skips this leaves
-    /// `find_exporters` blind to cached modules — the warm run then degrades
-    /// "exported by X (not yet imported)" hints to a bare "not defined"
-    /// (the B6 cold/warm attribution regression). The resolver thread already
-    /// calls the equivalent rebuild after its own warm.
-    pub fn rebuild_reverse_index_from_cache(&self) {
-        self.core.rebuild_reverse_index();
-        // The cache holds one WINNER per name; a same-name sibling file's
-        // edges live only through the candidate table — re-feed every
-        // candidate (idempotent) so a rebuild never blinds
-        // `modules_with_symbol` to a reopened package's other files.
-        for entry in self.core.all_defs.iter() {
-            for c in entry.value().iter() {
-                self.core.edges.feed(entry.key(), &c.path, &c.analysis);
-            }
-        }
+        let mut n = 0usize;
+        self.for_each_registered_file(&mut |_| n += 1);
+        n
     }
 }
 

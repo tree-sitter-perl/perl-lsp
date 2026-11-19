@@ -679,6 +679,26 @@ impl FreshnessIndex {
         self.deps_of.get(path).map(|v| v.clone()).unwrap_or_default()
     }
 
+    /// Records held and a heap estimate in bytes: the path, name and
+    /// collection bytes the three maps own, not allocator slack. A
+    /// diagnostic for how much every tier's records cost resident.
+    pub fn heap_estimate(&self) -> (usize, usize) {
+        use std::mem::size_of;
+        let path = |p: &std::path::Path| p.as_os_str().len() + size_of::<std::path::PathBuf>();
+        let names = |v: &[String]| v.iter().map(|n| n.len() + size_of::<String>()).sum::<usize>();
+        let mut bytes = 0;
+        for r in self.surfaces.iter() {
+            bytes += path(r.key()) + size_of::<SurfaceRecord>() + names(&r.provided) + names(&r.stale_provided);
+        }
+        for d in self.deps_of.iter() {
+            bytes += path(d.key()) + size_of::<Vec<String>>() + names(d.value());
+        }
+        for c in self.consumers.iter() {
+            bytes += c.key().len() + size_of::<String>() + c.value().iter().map(|p| path(p)).sum::<usize>();
+        }
+        (self.surfaces.len(), bytes)
+    }
+
     /// The mutating-write count — see the `writes` field.
     pub fn write_count(&self) -> u64 {
         self.writes.load(std::sync::atomic::Ordering::Relaxed)

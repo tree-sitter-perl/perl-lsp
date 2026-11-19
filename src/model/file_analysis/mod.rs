@@ -141,6 +141,13 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub lib_roots: Vec<String>,
 
+    /// Every class or package identity this file's references name that it
+    /// does not declare itself, sorted. Minted once in `new` from the refs:
+    /// the refs are an evicted axis, and the dependency tier's demand
+    /// (`used_identities`) is read off stripped copies and warm stubs.
+    #[serde(default)]
+    pub referenced_identities: Vec<String>,
+
     /// Per-symbol provenance for return types. Populated for plugin
     /// `overrides()` and for reducer-driven folds over the witness bag.
     /// Missing entry == `TypeProvenance::Inferred`.
@@ -456,6 +463,38 @@ impl FileAnalysis {
     /// dependency sweeps.
     pub fn package_parent_edges(&self) -> impl Iterator<Item = (&String, &[String])> {
         self.packages.iter().map(|(pkg, f)| (pkg, f.parents.as_slice()))
+    }
+
+    /// Every identity this file names across files, first-named first: what
+    /// it imports, the parents it declares, and the classes and packages its
+    /// references name (`referenced_identities`). What a file asks the
+    /// dependency tier for; every lane it reads survives a strip.
+    pub fn used_identities(&self) -> Vec<String> {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let imports = self.imports.iter().map(|i| i.module_name.as_str());
+        let parents = self.package_parent_edges().flat_map(|(_, ps)| ps.iter().map(String::as_str));
+        let referenced = self.referenced_identities.iter().map(String::as_str);
+        imports
+            .chain(parents)
+            .chain(referenced)
+            .filter(|n| !n.is_empty() && seen.insert(n))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// `referenced_identities` from the refs: each class reference's
+    /// identity as the file spells it, less what the file declares.
+    fn mint_referenced_identities(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .refs()
+            .iter()
+            .filter(|r| matches!(r.kind, RefKind::PackageRef))
+            .map(|r| self.spelled_identity(r))
+            .filter(|id| !id.is_empty() && !self.packages.contains_key(id) && self.find_type_decl(id).is_none())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// Modules `use`-d inside `pkg`.

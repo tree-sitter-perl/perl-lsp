@@ -22,7 +22,7 @@ impl ModuleIndex {
     /// The registered copy at `path`.
     pub(crate) fn workspace_file_for_test(&self, path: &std::path::Path) -> Option<Arc<FileAnalysis>> {
         let path = crate::util::canonical_path::CanonicalPath::resolve(path);
-        self.all_files.get(&path).map(|e| Arc::clone(&e.value().analysis))
+        self.core.all_files.get(&path).map(|e| Arc::clone(&e.value().analysis))
     }
 }
 
@@ -244,7 +244,7 @@ fn test_resolver_thread_flow() {
     if idx.inc_paths().is_empty() {
         return;
     }
-    idx.request_resolve("Carp");
+    idx.request(crate::build::dependency_map::Ask::Name("Carp".to_string()));
     assert!(
         idx.wait_resolved("Carp", std::time::Duration::from_secs(10)),
         "Carp should be resolved via thread"
@@ -293,29 +293,6 @@ fn test_find_exporters_uses_reverse_index() {
     assert!(!idx.modules_with_symbol("bar").is_empty());
     assert_eq!(idx.find_exporters("foo"), vec!["My::Mod"]);
     assert_eq!(idx.find_exporters("bar"), vec!["My::Mod"]);
-}
-
-#[test]
-fn test_rebuild_reverse_index_recovers_warm_path_exporters() {
-    // The warm path (`warm_cache`) writes straight into `cache_raw()` and
-    // never touches the reverse index, so `find_exporters` is blind until a
-    // rebuild. The export-only name (`weaken`-style XS export with no Perl
-    // body, hence no `symbols` entry) is the case `indexable_symbol_names`
-    // alone misses — the B6 cold/warm attribution regression.
-    let idx = ModuleIndex::new_for_test();
-    let src = "package Scalar::Util;\nour @EXPORT_OK = qw(weaken blessed);\n1;";
-    let cached = parse_source_to_cached(src, "Scalar::Util");
-
-    // Simulate warm_cache: direct insert, no reverse-index update.
-    idx.cache_raw().insert("Scalar::Util".to_string(), Some(cached));
-    assert!(
-        idx.find_exporters("weaken").is_empty(),
-        "warm insert must not populate the reverse index on its own"
-    );
-
-    idx.rebuild_reverse_index_from_cache();
-    assert_eq!(idx.find_exporters("weaken"), vec!["Scalar::Util"]);
-    assert_eq!(idx.find_exporters("blessed"), vec!["Scalar::Util"]);
 }
 
 #[test]
@@ -455,18 +432,12 @@ fn test_children_index_direct_and_transitive() {
 }
 
 #[test]
-fn test_children_index_survives_warm_rebuild_and_purge() {
-    // B6: the children edge must be fed by the warm rebuild path, not
-    // just the insert path — and purged on re-registration.
+fn test_children_index_is_purged_when_the_project_claims_a_landed_file() {
+    // The children edge a dependency landing fed must go when a front door
+    // registers the same file as the project's without the parent.
     let idx = ModuleIndex::new_for_test();
     let child = "package Kid;\nuse parent 'Base::Class';\n1;";
-    let cached = parse_source_to_cached(child, "Kid");
-
-    // Simulate warm_cache: direct insert, indexes untouched.
-    idx.cache_raw().insert("Kid".to_string(), Some(cached));
-    assert!(idx.modules_with_parent("Base::Class").is_empty());
-
-    idx.rebuild_reverse_index_from_cache();
+    idx.insert_cache("Kid", Some(parse_source_to_cached(child, "Kid")));
     assert_eq!(idx.modules_with_parent("Base::Class"), vec!["Kid"]);
 
     // Re-registration with the parent edge gone must drop the stale edge.
@@ -478,6 +449,11 @@ fn test_children_index_survives_warm_rebuild_and_purge() {
     assert!(
         idx.modules_with_parent("Base::Class").is_empty(),
         "purge on re-registration must drop the stale parent edge",
+    );
+    assert_eq!(
+        idx.file_role(&crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/fake/Kid.pm"))),
+        Some(crate::model::file_analysis::FileRole::Workspace),
+        "the project's registration replaces the landing",
     );
 }
 
@@ -1291,7 +1267,7 @@ fn thread_path_resolution_feeds_loader_config_shapes() {
     // file:// spelling — the thread's project-lib discovery strips the
     // scheme to find `lib/`.
     idx.set_workspace_root(Some(&format!("file://{}", dir.display())));
-    idx.request_resolve("My::App");
+    idx.request(crate::build::dependency_map::Ask::Name("My::App".to_string()));
     assert!(
         idx.wait_resolved("My::App", std::time::Duration::from_secs(30)),
         "resolver thread should resolve the project-lib module",
@@ -1446,7 +1422,7 @@ async fn resolver_fires_refresh_after_every_drained_batch() {
 
     for name in ["Batch::A", "Batch::B", "Batch::C"] {
         let before = fires.load(std::sync::atomic::Ordering::SeqCst);
-        idx.request_resolve(name);
+        idx.request(crate::build::dependency_map::Ask::Name(name.to_string()));
         assert!(
             idx.wait_resolved(name, std::time::Duration::from_secs(30)),
             "{name} should resolve from the project lib"
@@ -2870,4 +2846,358 @@ fn def_candidates_hold_path_order_under_any_insert_order() {
 
     bucket.remove_path(&a.path);
     assert_eq!(paths(&bucket), vec![b.path.clone(), c.path.clone()]);
+}
+
+/// A held file's role is on its record: a landing from the `@INC` tier is a
+/// dependency, a front-door registration of the same path makes it the
+/// project's and keeps it so against a later landing, and unregistering the
+/// project's file takes its workspace role away — while the workspace sweep
+/// sees exactly the workspace-role files.
+#[test]
+fn a_held_file_reads_its_role_from_its_record() {
+    use crate::model::file_analysis::FileRole;
+    let idx = ModuleIndex::new_for_test();
+    let dep = parse_source_to_cached("package Ext::Lib;\nsub f { 1 }\n1;", "Ext::Lib");
+    let mine = parse_source_to_cached("package My::App;\nsub g { 1 }\n1;", "My::App");
+    let swept = |idx: &ModuleIndex| {
+        let mut v = Vec::new();
+        idx.for_each_registered_file(&mut |cm| v.push(cm.path.clone()));
+        v
+    };
+
+    idx.insert_cache("Ext::Lib", Some(Arc::clone(&dep)));
+    assert_eq!(idx.file_role(&dep.path), Some(FileRole::Dependency));
+    assert_eq!(idx.file_role(&mine.path), None, "nothing held there yet");
+
+    idx.register_workspace_module(mine.path.to_path_buf(), Arc::clone(&mine.analysis));
+    assert_eq!(idx.file_role(&mine.path), Some(FileRole::Workspace));
+    assert_eq!(swept(&idx), vec![mine.path.clone()], "the sweep sees the project's file only");
+
+    // The tier finding the project's own file does not demote it.
+    idx.insert_cache("My::App", Some(Arc::clone(&mine)));
+    assert_eq!(idx.file_role(&mine.path), Some(FileRole::Workspace));
+
+    idx.unregister_workspace_path(&mine.path);
+    assert_ne!(idx.file_role(&mine.path), Some(FileRole::Workspace));
+    assert!(swept(&idx).is_empty());
+    assert_eq!(idx.file_role(&dep.path), Some(FileRole::Dependency), "the tier's record stays");
+}
+
+/// A landed dependency is held by path like every other file: its record,
+/// its path home (`cached_by_path` is one lookup) and the all-roles sweep —
+/// never the project's sweep.
+#[test]
+fn a_landed_dependency_has_a_path_home() {
+    use crate::model::file_analysis::{CrossFileLookup, FileRole};
+    let idx = ModuleIndex::new_for_test();
+    let dep = parse_source_to_cached("package Ext::Home;\nsub f { 1 }\n1;", "Ext::Home");
+    idx.insert_cache("Ext::Home", Some(Arc::clone(&dep)));
+
+    assert_eq!(idx.file_role(&dep.path), Some(FileRole::Dependency));
+    let held = idx.cached_by_path(&dep.path).expect("the path home holds the landing");
+    assert!(Arc::ptr_eq(&held, &idx.get_cached("Ext::Home").unwrap()), "one copy serves the slot and the path");
+    let mut all = Vec::new();
+    idx.for_each_cached_file(&mut |cm| all.push(cm.path.clone()));
+    assert_eq!(all, vec![dep.path.clone()]);
+    let mut mine = Vec::new();
+    idx.for_each_registered_file(&mut |cm| mine.push(cm.path.clone()));
+    assert!(mine.is_empty(), "a dependency is not the project's");
+}
+
+/// The map's order picks the slot — what `require` would load — not the
+/// path order the candidate table keeps, and a re-derivation (the winner
+/// leaving) falls back to the map's next file.
+#[test]
+fn a_dependency_slot_follows_the_map_order() {
+    use crate::model::file_analysis::CrossFileLookup;
+    let idx = ModuleIndex::new_for_test();
+    let src = "package Twin::Order;\nsub f { 1 }\n1;";
+    let mk = |dir: &str| {
+        let a = parse_source_to_cached(src, "Twin::Order");
+        Arc::new(CachedModule::new(
+            crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from(format!("/{dir}/Twin/Order.pm"))),
+            Arc::clone(&a.analysis),
+        ))
+    };
+    let (first, second) = (mk("zz"), mk("aa"));
+    idx.insert_cache_providers("Twin::Order", Some(vec![Arc::clone(&first), Arc::clone(&second)]));
+    assert_eq!(idx.get_cached("Twin::Order").unwrap().path, first.path, "the map's first file wins");
+    assert_eq!(idx.def_candidates("Twin::Order").len(), 2);
+
+    // The winner's path turns out to be the project's: it leaves the tier,
+    // and the slot re-derives to the map's next file.
+    let mine = Arc::clone(&first.analysis);
+    idx.register_workspace_module(first.path.to_path_buf(), mine);
+    idx.unregister_workspace_path(&first.path);
+    assert_eq!(idx.get_cached("Twin::Order").unwrap().path, second.path);
+}
+
+/// A dependency record lives exactly as long as its candidacy: the inverse
+/// that removes it from the name's candidates and slot takes its record and
+/// path home with it.
+#[test]
+fn a_dependency_record_does_not_outlive_its_slot() {
+    use crate::model::file_analysis::CrossFileLookup;
+    let idx = ModuleIndex::new_for_test();
+    let dep = parse_source_to_cached("package Ext::Gone;\nsub f { 1 }\n1;", "Ext::Gone");
+    idx.insert_cache("Ext::Gone", Some(Arc::clone(&dep)));
+    assert_eq!(idx.modules_with_symbol("f"), vec!["Ext::Gone"]);
+
+    idx.unregister_workspace_path(&dep.path);
+    assert_eq!(idx.file_role(&dep.path), None, "the record went with the landing");
+    assert!(idx.cached_by_path(&dep.path).is_none(), "and the path home");
+    assert!(idx.get_cached("Ext::Gone").is_none(), "and the slot");
+    assert!(idx.def_candidates("Ext::Gone").is_empty(), "and the candidacy");
+    assert!(idx.modules_with_symbol("f").is_empty(), "and the edge feed");
+}
+
+/// A map move mid-session is a generation bump, not a retire: every ask is
+/// asked again against the new map, which carries over a file it still
+/// places, held and unchanged, without parsing it again; lands what it newly
+/// places (a miss under the old map, a root that now shadows another); and
+/// once the re-asks drain, the idle sweep takes back what it no longer
+/// places, from the slot, the candidates and the records alike.
+#[test]
+fn a_map_move_restamps_what_it_still_places_and_sweeps_the_rest() {
+    use crate::build::dependency_map::Ask;
+    use crate::model::file_analysis::CrossFileLookup;
+    use crate::util::canonical_path::CanonicalPath;
+    let base = std::env::temp_dir().join(format!(
+        "d5-map-move-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    for d in ["r1", "r2", "r3", "proj"] {
+        std::fs::create_dir_all(base.join(d)).unwrap();
+    }
+    let base = CanonicalPath::resolve(base).into_path_buf();
+    let (r1, r2, r3) = (base.join("r1"), base.join("r2"), base.join("r3"));
+    std::fs::write(r1.join("Kept.pm"), "package Kept;\nsub k { 1 }\n1;\n").unwrap();
+    std::fs::write(r1.join("Shadowed.pm"), "package Shadowed;\nsub old { 1 }\n1;\n").unwrap();
+    std::fs::write(r2.join("Gone.pm"), "package Gone;\nsub g { 1 }\n1;\n").unwrap();
+    std::fs::write(r3.join("Shadowed.pm"), "package Shadowed;\nsub fresh { 1 }\n1;\n").unwrap();
+    std::fs::write(r3.join("Late.pm"), "package Late;\nsub l { 1 }\n1;\n").unwrap();
+    let at = |p: std::path::PathBuf| CanonicalPath::resolve(p);
+
+    let idx = ModuleIndex::new_for_test();
+    idx.set_search_roots_for_test(&[r1.clone(), r2.clone()]);
+    idx.set_workspace_root(Some(&format!("file://{}", base.join("proj").display())));
+    for n in ["Kept", "Shadowed", "Gone", "Late"] {
+        idx.request(Ask::Name(n.to_string()));
+    }
+    idx.wait_idle();
+    let gen1 = idx.core.map_generation();
+    let kept = idx.get_cached("Kept").expect("Kept lands from r1");
+    assert_eq!(idx.get_cached("Shadowed").unwrap().path, at(r1.join("Shadowed.pm")));
+    assert!(idx.get_cached("Gone").is_some(), "Gone lands from r2");
+    assert!(idx.get_cached("Late").is_none(), "nothing under the first map places Late");
+    assert_eq!(idx.core.asked.get(&Ask::Name("Late".into())).map(|e| *e), Some((gen1, Outcome::Miss)));
+
+    // The map moves: r2 leaves, r3 comes in ahead of r1.
+    idx.set_search_roots_for_test(&[r3.clone(), r1.clone()]);
+    idx.wait_idle();
+    let gen2 = idx.core.map_generation();
+    assert_eq!(gen2, gen1 + 1, "a move is one generation");
+
+    let kept_after = idx.get_cached("Kept").expect("the new map still places Kept");
+    assert!(Arc::ptr_eq(&kept, &kept_after), "a held, unchanged file is restamped, never parsed again");
+
+    let shadowed = idx.def_candidates("Shadowed");
+    assert_eq!(idx.get_cached("Shadowed").unwrap().path, at(r3.join("Shadowed.pm")), "the new first root wins");
+    assert_eq!(shadowed.len(), 2, "the shadowed copy stays a candidate");
+
+    assert!(idx.get_cached("Late").is_some(), "a miss is asked again, and lands under the new map");
+
+    let gone = at(r2.join("Gone.pm"));
+    assert!(idx.get_cached("Gone").is_none(), "the sweep clears the slot");
+    assert!(idx.def_candidates("Gone").is_empty(), "the sweep drops the candidate");
+    assert_eq!(idx.file_role(&gone), None, "the sweep retires the record");
+    assert_eq!(idx.core.asked.get(&Ask::Name("Gone".into())).map(|e| *e), Some((gen2, Outcome::Miss)));
+    assert!(
+        idx.core.asked.iter().all(|e| e.value().0 == gen2),
+        "the sweep forgets the older generation's asks"
+    );
+    assert!(!idx.core.map_moving.load(std::sync::atomic::Ordering::Acquire));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A moved map wipes no row and still answers from the new map: a
+/// dependency row holds its file as written, and what an inherited `import`
+/// lends is read at query time through whatever the map now places. `Child`
+/// exports nothing and inherits `Parent`'s own `import`; the map first
+/// places a `Parent` exporting `one`, then one exporting `two`.
+#[test]
+fn a_map_move_keeps_the_rows_and_answers_from_the_new_map() {
+    use crate::index::module_cache;
+    use crate::util::canonical_path::CanonicalPath;
+    let base = std::env::temp_dir().join(format!(
+        "d6-map-move-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    for d in ["ra", "r1", "r2", "proj"] {
+        std::fs::create_dir_all(base.join(d)).unwrap();
+    }
+    let base = CanonicalPath::resolve(base).into_path_buf();
+    let (ra, r1, r2) = (base.join("ra"), base.join("r1"), base.join("r2"));
+    std::fs::write(ra.join("Child.pm"), "package Child;\nour @ISA = ('Parent');\n1;\n").unwrap();
+    std::fs::write(r1.join("Parent.pm"), "package Parent;\nsub import { }\nour @EXPORT = qw(one);\nsub one { 1 }\n1;\n")
+        .unwrap();
+    std::fs::write(r2.join("Parent.pm"), "package Parent;\nsub import { }\nour @EXPORT = qw(two);\nsub two { 2 }\n1;\n")
+        .unwrap();
+    let child = CanonicalPath::resolve(ra.join("Child.pm"));
+    let old_parent = CanonicalPath::resolve(r1.join("Parent.pm"));
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    module_cache::init_schema(&conn).unwrap();
+    let rows = |conn: &rusqlite::Connection| -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM modules", [], |r| r.get(0)).unwrap()
+    };
+    let lent = |idx: &ModuleIndex| -> Vec<String> {
+        let c = idx.get_cached("Child").expect("Child is held");
+        c.analysis.export_surface_with_index("Child", idx).default_set().to_vec()
+    };
+    let land = |idx: &ModuleIndex, roots: &[std::path::PathBuf]| {
+        idx.set_search_roots_for_test(roots);
+        idx.wait_idle();
+        let map = idx.dependency_map().expect("a published map");
+        let mut parser = crate::index::module_resolver::create_parser();
+        for n in ["Child", "Parent"] {
+            assert!(idx.land_module(Some(&conn), &map, n, &mut parser).1.is_some(), "{n} lands");
+        }
+    };
+
+    // Each map is published before the workspace root wakes the resolver
+    // thread, which would otherwise read the real `@INC` over it.
+    let idx = ModuleIndex::new_for_test();
+    idx.set_search_roots_for_test(&[ra.clone(), r1.clone()]);
+    idx.set_workspace_root(Some(&format!("file://{}", base.join("proj").display())));
+    land(&idx, &[ra.clone(), r1.clone()]);
+    assert_eq!(lent(&idx), ["one"]);
+    let stored = module_cache::load_dependency_row(&conn, &child).expect("Child's row");
+    assert!(stored.export.is_empty(), "the row holds Child as written, nothing borrowed");
+    assert_eq!(rows(&conn), 2);
+
+    // The map moves: r1's Parent leaves, r2's comes in.
+    land(&idx, &[ra.clone(), r2.clone()]);
+    assert_eq!(lent(&idx), ["two"], "the inherited import answers through the new map");
+    assert!(module_cache::load_dependency_row(&conn, &old_parent).is_some(), "the move wipes no row");
+    assert_eq!(rows(&conn), 3);
+
+    // The next session opens the same store under the new map: Child comes
+    // back from its row, and still lends what the new map places.
+    let next = ModuleIndex::new_for_test();
+    next.set_search_roots_for_test(&[ra.clone(), r2.clone()]);
+    next.set_workspace_root(Some(&format!("file://{}", base.join("proj").display())));
+    land(&next, &[ra.clone(), r2.clone()]);
+    assert_eq!(lent(&next), ["two"]);
+    assert_eq!(rows(&conn), 3, "one row per file, whichever map wrote it");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A landed dependency is recorded like every other tier's file, with the
+/// surface its row was persisted with, so the row's conclusions are vouched
+/// for: cold, from the row in the next session, and with no store at all.
+/// Opening and closing it hands the record back to the disk state, and a
+/// retired landing takes its record with it.
+#[test]
+fn a_landed_dependency_records_the_surface_its_row_describes() {
+    use crate::index::module_cache;
+    use crate::index::module_index::SurfaceWrite;
+    use crate::model::surface::{surface_fingerprint, Surface};
+    use crate::util::canonical_path::CanonicalPath;
+    let base = std::env::temp_dir().join(format!(
+        "d10b-dep-surface-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    for d in ["inc", "proj"] {
+        std::fs::create_dir_all(base.join(d)).unwrap();
+    }
+    let base = CanonicalPath::resolve(base).into_path_buf();
+    let inc = base.join("inc");
+    std::fs::write(inc.join("Dep.pm"), "package Dep;\nsub new { my $c = shift; return bless {}, $c }\nsub label { return 'x' }\n1;\n")
+        .unwrap();
+    let path = CanonicalPath::resolve(inc.join("Dep.pm"));
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    module_cache::init_schema(&conn).unwrap();
+    let land = |rows: Option<&rusqlite::Connection>| -> ModuleIndex {
+        let idx = ModuleIndex::new_for_test();
+        idx.set_search_roots_for_test(&[inc.clone()]);
+        idx.set_workspace_root(Some(&format!("file://{}", base.join("proj").display())));
+        idx.wait_idle();
+        let map = idx.dependency_map().expect("a published map");
+        let mut parser = crate::index::module_resolver::create_parser();
+        assert!(idx.land_module(rows, &map, "Dep", &mut parser).1.is_some(), "Dep lands");
+        idx
+    };
+    let recorded = |idx: &ModuleIndex| idx.core.freshness.fingerprint_of(path.as_path());
+
+    let cold = land(Some(&conn));
+    let fp = recorded(&cold).expect("a landed dependency is recorded");
+    let persisted = module_cache::load_surface(&conn, &path.to_string_lossy()).expect("the row's surface");
+    assert_eq!(fp, surface_fingerprint(&persisted), "the record is the row's projection");
+    let (_, stamp) = module_cache::load_conclusions_stamped(
+        &conn,
+        &path.to_string_lossy(),
+        module_cache::current_generation(&conn),
+    )
+    .expect("the landing baked conclusions");
+    assert_eq!(stamp.source_fingerprint, fp, "the record vouches for the row's conclusions");
+
+    assert_eq!(recorded(&land(Some(&conn))), Some(fp), "a landing from the row records what the row holds");
+    assert_eq!(recorded(&land(None)), Some(fp), "a landing with no store projects the same surface");
+
+    cold.mark_doc_open(path.as_path());
+    cold.record_and_dirty_value(path.as_path(), Surface::default(), SurfaceWrite::OpenDoc);
+    assert_ne!(recorded(&cold), Some(fp), "the open buffer owns the record");
+    assert!(cold.mark_doc_closed(path.as_path()).is_some(), "closing reconciles a dependency too");
+    assert_eq!(recorded(&cold), Some(fp), "and hands the record back to the disk state");
+
+    cold.core.retire_dependency(&path);
+    assert_eq!(recorded(&cold), None, "a retired landing leaves no record");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A name a project file holds is the project's answer: the tier neither
+/// locates nor parses the installed twin the slot would never pick. When the
+/// project file goes, the ask reopens and the installed copy lands.
+#[test]
+fn a_name_the_project_holds_is_answered_without_the_tier() {
+    use crate::build::dependency_map::Ask;
+    use crate::model::file_analysis::{CrossFileLookup, FileRole};
+    use crate::util::canonical_path::CanonicalPath;
+    let base = std::env::temp_dir().join(format!(
+        "d5-project-answers-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    for d in ["inc", "proj/lib"] {
+        std::fs::create_dir_all(base.join(d)).unwrap();
+    }
+    let base = CanonicalPath::resolve(base).into_path_buf();
+    let src = "package Twin;\nsub t { 1 }\n1;\n";
+    std::fs::write(base.join("inc/Twin.pm"), src).unwrap();
+    let mine = base.join("proj/lib/Twin.pm");
+    std::fs::write(&mine, src).unwrap();
+
+    let idx = ModuleIndex::new_for_test();
+    idx.set_search_roots_for_test(&[base.join("inc")]);
+    idx.set_workspace_root(Some(&format!("file://{}", base.join("proj").display())));
+    let mut parser = crate::index::module_resolver::create_parser();
+    let tree = parser.parse(src, None).unwrap();
+    idx.register_workspace_module(mine.clone(), Arc::new(crate::build::builder::build(&tree, src.as_bytes())));
+
+    idx.request(Ask::Name("Twin".into()));
+    idx.wait_idle();
+    let installed = CanonicalPath::resolve(base.join("inc/Twin.pm"));
+    assert_eq!(idx.def_candidates("Twin").len(), 1, "only the project's file answers");
+    assert_eq!(idx.file_role(&installed), None, "the installed twin is not landed");
+    assert_eq!(idx.core.asked.get(&Ask::Name("Twin".into())).map(|e| e.1), Some(Outcome::Landed));
+
+    idx.unregister_workspace_path(&mine);
+    idx.request(Ask::Name("Twin".into()));
+    idx.wait_idle();
+    assert_eq!(idx.get_cached("Twin").map(|c| c.path.clone()), Some(installed.clone()), "the reopened ask lands the installed copy");
+    assert_eq!(idx.file_role(&installed), Some(FileRole::Dependency));
+    let _ = std::fs::remove_dir_all(&base);
 }

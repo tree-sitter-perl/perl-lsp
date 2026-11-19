@@ -1022,7 +1022,7 @@ impl FileAnalysis {
         // its candidate files.
         for import in self.imports.in_scope(self.import_scope_at(call_ref.span.start)).rev() {
             for cached in idx.visible_def_candidates(&import.module_name) {
-                let surface = cached.analysis.export_surface_with_index(idx);
+                let surface = cached.analysis.export_surface_with_index(&import.module_name, idx);
                 if imported_names(import, &surface)
                     .iter()
                     .any(|(local, _)| local.as_str() == name)

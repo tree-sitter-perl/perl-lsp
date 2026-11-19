@@ -4,6 +4,9 @@
 
 pub mod builder;
 pub mod cpanfile;
+// Composer's autoload data: php's reader of the dependency map
+#[cfg(feature = "php")]
+pub mod composer;
 // config-variant macro model: guard trail + reachability + join
 pub mod cpp_macro_model;
 // Compiled unconditionally (symbols.rs consumes the macro-model surface in
@@ -17,10 +20,14 @@ pub mod cpp_reparse;
 pub mod cpp_toolchain;
 // sentinel re-parse for member-access cursor context
 pub mod cursor_sentinel;
+// the dependency tier's map: lanes as data, read per language
+pub mod dependency_map;
 // across-build whole-analysis dump (the L1 equivalence net)
 pub mod equiv_dump;
 // multi-language serving seam (LanguageDriver keystone)
 pub mod language_driver;
+// perl's reader of the dependency map (`@INC`)
+pub mod inc;
 pub mod plugin;
 pub mod pod;
 pub mod packs;
@@ -32,6 +39,11 @@ pub mod query_extract;
 // pre-extraction reparse seam (whose production form is cpp_reparse).
 #[allow(dead_code)]
 pub mod reparse;
+// the one source-file walk and guarded analyze the indexers share
+pub mod source_files;
+// python virtual environments: python's reader of the dependency map
+#[cfg(feature = "python")]
+pub mod venv;
 // package-marker directories a workspace walk saw (python's `__init__.py`);
 // only a path-named language reads them
 #[cfg_attr(not(feature = "python"), allow(dead_code))]

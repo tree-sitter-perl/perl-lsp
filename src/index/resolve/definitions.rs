@@ -851,8 +851,8 @@ impl<'a> CandidateSet<'a> {
             let named_class = matches!(r.kind, RefKind::PackageRef)
                 .then(|| analysis.spelled_identity(r))
                 .and_then(|name| match idx.visible_def_candidates_widening(&name) {
-                    (_, true) => None,
-                    (cands, false) => Some((name, cands)),
+                    (_, crate::model::file_analysis::CandidateVerdict::Widened) => None,
+                    (cands, verdict) => Some((verdict.identity(&name).to_string(), cands)),
                 });
             if let Some((name, cands)) = named_class {
                 // EVERY file declaring the package is a legitimate landing —

@@ -171,3 +171,67 @@ fn detect_slot_cpp_qualified_path_is_module_path() {
         other => panic!("expected ModulePath slot, got {:?}", other),
     }
 }
+
+/// The slot at `|` in a pack document, detected as the editor asks.
+#[cfg(any(feature = "php", feature = "python"))]
+fn pack_slot(lang: &str, src: &str) -> crate::lsp::cursor_slot::DetectedSlot {
+    let at = src.find('|').expect("a cursor");
+    let src = format!("{}{}", &src[..at], &src[at + 1..]);
+    let row = src[..at].matches('\n').count();
+    let point = Point::new(row, at - src[..at].rfind('\n').map_or(0, |n| n + 1));
+    let driver = crate::build::language_driver::LanguageRegistry::compiled().for_id(lang).unwrap();
+    let tree = driver.make_parser().parse(&src, None).unwrap();
+    let analysis = driver.analyze_with_path(&src, None);
+    detect_slot(&analysis, &tree, &src, point, lang, None, None)
+}
+
+#[cfg(any(feature = "php", feature = "python"))]
+fn module_prefix(lang: &str, src: &str) -> Option<String> {
+    let detected = pack_slot(lang, src);
+    match (detected.arm, detected.slot) {
+        (crate::lsp::cursor_slot::DetectorArm::UseModule, Slot::ModulePath { prefix }) => Some(prefix),
+        _ => None,
+    }
+}
+
+/// A pack identity spelled whole is the module-path slot, read from the
+/// pack's own captures: an import, or a class reference written absolute.
+/// A relative reference resolves against the file first, so it stays a
+/// bare identifier.
+#[cfg(feature = "php")]
+#[test]
+fn a_php_identity_spelled_whole_is_a_module_path() {
+    assert_eq!(
+        module_prefix("php", "<?php\nuse Vendor\\Pa|\nuse Other\\Thing;\n"),
+        Some("Vendor\\Pa".into()),
+        "an unterminated use the next statement closes"
+    );
+    assert_eq!(module_prefix("php", "<?php\nuse Vendor\\Pa|;\n"), Some("Vendor\\Pa".into()));
+    assert_eq!(
+        module_prefix("php", "<?php\nuse Vendor\\Pa|"),
+        Some("Vendor\\Pa".into()),
+        "a use the buffer ends in before its `;`"
+    );
+    assert_eq!(
+        module_prefix("php", "<?php\nnamespace App;\nuse Vendor\\Pa|\n\nclass X {}\n"),
+        Some("Vendor\\Pa".into()),
+        "an unterminated use the next declaration runs into"
+    );
+    assert_eq!(
+        module_prefix("php", "<?php\nnamespace App;\n$x = new \\Vend|;\n"),
+        Some("Vend".into()),
+        "an absolute reference drops its leading separator"
+    );
+    assert_eq!(module_prefix("php", "<?php\nnamespace App;\n$x = new Vend|;\n"), None, "a relative one is the file's");
+}
+
+/// Python's imports name modules; a relative import names the file's own
+/// package, and an imported member is no module of its own.
+#[cfg(feature = "python")]
+#[test]
+fn a_python_import_path_is_a_module_path() {
+    assert_eq!(module_prefix("python", "import os.pa|\n"), Some("os.pa".into()));
+    assert_eq!(module_prefix("python", "from a.b| import C\n"), Some("a.b".into()));
+    assert_eq!(module_prefix("python", "from a.b import C|\n"), None, "the member of a named module");
+    assert_eq!(module_prefix("python", "from .m| import x\n"), None, "a relative import is the package's");
+}

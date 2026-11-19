@@ -580,6 +580,10 @@ Landed follow-ups from the round's deferred list:
   per-writer-thread (per pack language / the workspace writer), not a
   single index-wide atomic — bounds total to (writers × 128 MiB), fine at
   the 1-2 pack languages the corpus has.
+  **Superseded 2026-11-19:** the drop cost answers (a one-shot `--check`
+  on a full cache disk kept 0 to 37 of curl's 92 rows). A refused persist
+  is now fatal and the fallback is gone; see
+  `docs/prompt-storage-residuals.md`.
 - **Parts-token-only inner registration** — LANDED 2026-07-12.
   `register_symbols_inner` / `register_workspace_residency` now consume a
   `PackRegistrationParts` / `WorkspaceRegistrationParts` token whose fields

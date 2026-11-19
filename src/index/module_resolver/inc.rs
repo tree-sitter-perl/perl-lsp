@@ -1,143 +1,262 @@
-//! The @INC tier: path discovery, module-file location, and the
-//! in-process parse with its parent-fallback memo.
+//! The dependency tier's landing: the files the dependency map locates for
+//! a name, parsed in process or read from their rows, registered through
+//! the served language's front door.
 
 use super::*;
+use crate::build::dependency_map::{Ask, DependencyMap};
+use crate::index::module_index::{FrontDoor, PlacedAs};
 use crate::util::canonical_path::CanonicalPath;
+
+/// How the served language parses a landed file: the Perl hub through its
+/// own parser and builder, as its workspace walk does, a pack through the
+/// guarded parse every pack file goes through.
+pub(crate) enum Parse {
+    Hub(Parser),
+    Pack(&'static dyn crate::build::language_driver::LanguageDriver),
+}
+
+impl Parse {
+    pub(crate) fn of(driver: &'static dyn crate::build::language_driver::LanguageDriver) -> Self {
+        match FrontDoor::of(driver) {
+            FrontDoor::Hub => Parse::Hub(create_parser()),
+            FrontDoor::Pack => Parse::Pack(driver),
+        }
+    }
+
+    fn door(&self) -> FrontDoor {
+        match self {
+            Parse::Hub(_) => FrontDoor::Hub,
+            Parse::Pack(_) => FrontDoor::Pack,
+        }
+    }
+
+    /// Whether a stored analysis of `path` still holds what it read about
+    /// the path besides its source: the module a path-named file is, which
+    /// moves with a package marker or the search root it is named from.
+    /// The hub's builder reads nothing but the source.
+    fn path_inputs_current(&self, path: &std::path::Path, fa: &crate::model::file_analysis::FileAnalysis) -> bool {
+        match self {
+            Parse::Hub(_) => true,
+            Parse::Pack(driver) => driver.path_inputs_current(path, fa),
+        }
+    }
+}
 
 // ---- Module parsing ----
 
-/// Run-local memo for `resolve_and_parse_with_memo`. Persists across many
-/// top-level calls within a single resolver sweep so that parent-fallback
-/// recursion (e.g. 50 children all inheriting from `Exporter`) parses each
-/// parent exactly once.
-pub type ParseMemo = HashMap<String, Option<Providers>>;
-
-/// Parse a module file directly in-process.
-/// tree-sitter-perl is stable — no subprocess isolation needed.
-pub(super) fn parse_module(
-    inc_paths: &[PathBuf],
+/// THE landing of one module name, run only by the resolver thread: locate
+/// every file the map places under the name; when each is already held
+/// there, unchanged, carry its placement over to `map_gen`
+/// (`IndexCore::restamp_placed`); otherwise take each from its current row
+/// (`rows`) or parse it, keep what the tier may hold
+/// (`IndexCore::tier_providers`), persist those path-keyed, and land them
+/// (`IndexCore::land_providers`). `strip` is the eviction switch; a copy
+/// strips only once its row is on disk. Returns the whole copies (what a
+/// descent reads — the strip drops the bag; `None` for a restamp, whose
+/// descent was asked when it first landed) and the stored ones.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn land_module(
+    core: &IndexCore,
+    rows: Option<&rusqlite::Connection>,
+    map: &DependencyMap,
+    map_gen: u64,
     module_name: &str,
-    parser: &mut Parser,
-    memo: &mut ParseMemo,
-) -> Option<Providers> {
-    resolve_and_parse_with_memo(inc_paths, module_name, parser, memo)
+    parse: &mut Parse,
+    prepared: &mut Prepared,
+    strip: bool,
+) -> (Option<Providers>, Option<Providers>) {
+    let located = located_as(map, module_name);
+    if let Some(held) = core.restamp_placed(&located, module_name, map_gen) {
+        core.place_members(map, module_name, &located, map_gen);
+        return (None, Some(held));
+    }
+    let parsed = parse_providers(module_name, located.clone(), parse, prepared, rows);
+    let whole = core.tier_providers(parsed);
+    let (persisted, surfaces) = match &whole {
+        Some(providers) => persist_providers(rows, providers),
+        None => (false, Default::default()),
+    };
+    let stored = core.land_providers(module_name, whole.clone(), persisted, surfaces, strip, map_gen, PlacedAs::Identity, parse.door());
+    core.place_members(map, module_name, &located, map_gen);
+    (whole, stored)
 }
 
-// ---- Resolution ----
-
-/// EVERY `@INC` root that provides `module_name`, in `@INC` order — the
-/// `(name, inc-root)` relation's acquisition half. A name maps to a SET of
-/// files (XS/PP twins, a project `lib/` shadowing an installed copy,
-/// `t/lib` vs `lib` per entrypoint); stopping at the first hit is what made
-/// the tier answer from whichever root happened to win.
-pub fn resolve_module_paths(inc_paths: &[PathBuf], module_name: &str) -> Vec<CanonicalPath> {
-    let rel_path = crate::model::conventions::perl_module_rel_path(module_name);
-    let mut out: Vec<CanonicalPath> = Vec::new();
-    for inc in inc_paths {
-        let full = inc.join(&rel_path);
-        if full.is_file() {
-            // Canonical, so the relation holds FILES: distinct roots can
-            // name the same file (a symlinked `lib`, a duplicated @INC
-            // entry) and must dedup to one candidate. It also lets the
-            // per-asker search-path rank prefix-match a candidate against
-            // canonical roots with no query-time `canonicalize` — that is
-            // filesystem I/O, and it would land on a request path.
-            let canon = CanonicalPath::resolve(full);
-            if !out.contains(&canon) {
-                out.push(canon);
+/// THE landing of one file the map loads by path (`Ask::File`: Composer's
+/// `files`, which no name places): parsed or read from its row, persisted,
+/// and landed under every name the map places it under and every name it
+/// declares — a function it defines is called by name with nothing asking
+/// for its file. The file loads as the map's names and as what its
+/// language's `FileIdentity` makes of its own (a class a PHP `files` entry
+/// declares); the rest are its members. A file that offers no name lands
+/// nothing.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn land_file(
+    core: &IndexCore,
+    rows: Option<&rusqlite::Connection>,
+    map: &DependencyMap,
+    map_gen: u64,
+    path: &CanonicalPath,
+    parse: &mut Parse,
+    prepared: &mut Prepared,
+    strip: bool,
+) -> (Option<Providers>, Option<Providers>) {
+    let label = path.to_string_lossy().into_owned();
+    let Some(whole) = core.tier_providers(parse_providers(&label, vec![path.clone()], parse, prepared, rows)) else {
+        return (None, None);
+    };
+    let mut names: Vec<(String, PlacedAs)> = Vec::new();
+    for name in map.locate(&Ask::File(path.clone())).into_iter().filter_map(|l| l.loads_as) {
+        if !names.iter().any(|(n, _)| *n == name) {
+            names.push((name, PlacedAs::Identity));
+        }
+    }
+    for m in &whole {
+        let declared = crate::index::module_index::collect_linkage_feed(&m.analysis);
+        let identities = m.analysis.identity_names(&declared);
+        for (name, _) in declared {
+            if !names.iter().any(|(n, _)| *n == name) {
+                let placed_as = if identities.contains(&name) { PlacedAs::Identity } else { PlacedAs::Member };
+                names.push((name, placed_as));
             }
         }
+    }
+    let Some(((first, first_as), rest)) = names.split_first() else {
+        return (None, None);
+    };
+    let (persisted, surfaces) = persist_providers(rows, &whole);
+    let stored = core.land_providers(first, Some(whole.clone()), persisted, surfaces, strip, map_gen, *first_as, parse.door());
+    for (name, placed_as) in rest {
+        core.place_name(path, name, *placed_as, 0, map_gen);
+    }
+    (Some(whole), stored)
+}
+
+/// Persist each file of a landing, keeping the surface each row describes
+/// for the landing to record. The strip licence is all-or-nothing, so the
+/// first file with nothing to persist ends the writes; a write the store
+/// refuses ends the process (`PersistFailure`).
+fn persist_providers(rows: Option<&rusqlite::Connection>, providers: &Providers) -> (bool, crate::index::module_index::Surfaces) {
+    let mut surfaces = crate::index::module_index::Surfaces::new();
+    let Some(conn) = rows else {
+        return (false, surfaces);
+    };
+    for m in providers {
+        let (on_disk, surface) = persist_dependency(conn, m).unwrap_or_else(|failure| failure.exit());
+        if let Some(s) = surface {
+            surfaces.insert(m.path.clone(), s);
+        }
+        if !on_disk {
+            return (false, surfaces);
+        }
+    }
+    (true, surfaces)
+}
+
+/// The files the map places under `module_name` that load as it, in the
+/// map's order. A file placed under a name it does not load as (an
+/// enclosing module) is not that name's provider.
+pub(super) fn located_as(map: &DependencyMap, module_name: &str) -> Vec<CanonicalPath> {
+    map.locate(&Ask::Name(module_name.to_string()))
+        .into_iter()
+        .filter(|l| l.loads_as.as_deref() == Some(module_name))
+        .map(|l| l.path)
+        .collect()
+}
+
+/// Every file the map places under `module_name`, parsed (tests and the
+/// blocking test lookup; the resolver thread lands through `land_module`).
+#[cfg(test)]
+pub fn resolve_and_parse_all(
+    map: &DependencyMap,
+    module_name: &str,
+    parser: &mut Parser,
+) -> Option<Providers> {
+    // The caller's parser, lent to the hub's parse and handed back.
+    let mut parse = Parse::Hub(std::mem::replace(parser, Parser::new()));
+    let out = parse_providers(module_name, located_as(map, module_name), &mut parse, &mut Prepared::new(), None);
+    if let Parse::Hub(p) = parse {
+        *parser = p;
     }
     out
 }
 
-/// The `@INC`-order winner among `resolve_module_paths` — what a `require`
-/// would load. The relation's other providers stay reachable as candidates.
-/// Production resolves the whole set; this spelling is the winner alone,
-/// which only the test-side `ModuleIndex::resolve_module` still asks for.
+/// `resolve_and_parse_all`'s first provider.
 #[cfg(test)]
-pub fn resolve_module_path(inc_paths: &[PathBuf], module_name: &str) -> Option<PathBuf> {
-    resolve_module_paths(inc_paths, module_name).into_iter().next().map(PathBuf::from)
-}
-
-#[allow(dead_code)]
 pub fn resolve_and_parse(
-    inc_paths: &[PathBuf],
+    map: &DependencyMap,
     module_name: &str,
     parser: &mut Parser,
 ) -> Option<Arc<CachedModule>> {
-    resolve_and_parse_all(inc_paths, module_name, parser)
-        .and_then(|p| p.into_iter().next())
+    resolve_and_parse_all(map, module_name, parser).and_then(|p| p.into_iter().next())
 }
 
-/// `resolve_and_parse` keeping the whole provider set.
-#[allow(dead_code)]
-pub fn resolve_and_parse_all(
-    inc_paths: &[PathBuf],
+/// Every provider is parsed, not just the @INC winner: a shadowed twin
+/// carries its own subs and `@ISA`, and the candidate relation is only as
+/// honest as its acquisition.
+fn parse_providers(
     module_name: &str,
-    parser: &mut Parser,
+    located: Vec<CanonicalPath>,
+    parse: &mut Parse,
+    prepared: &mut Prepared,
+    rows: Option<&rusqlite::Connection>,
 ) -> Option<Providers> {
-    let mut memo: ParseMemo = HashMap::new();
-    resolve_and_parse_with_memo(inc_paths, module_name, parser, &mut memo)
+    // Accumulated apart from `resolver.land`: what is left on the one
+    // thread once the batch's parses ran in the pool.
+    let providers: Providers = crate::util::ghost_stats::timed("resolver.parse", || {
+        located
+            .into_iter()
+            .filter_map(|path| match prepared.take(&path) {
+                Some(done) => done,
+                None => parse_one_provider(module_name, path, parse, rows),
+            })
+            .collect()
+    });
+    (!providers.is_empty()).then_some(providers)
 }
 
-/// Parse a module while sharing a memo across calls. Callers that resolve
-/// many modules in a loop (the resolver thread, CLI startup) should hoist
-/// one `ParseMemo` and reuse it so parent-fallback recursion doesn't
-/// re-parse the same ancestor for each child.
-pub fn resolve_and_parse_with_memo(
-    inc_paths: &[PathBuf],
-    module_name: &str,
-    parser: &mut Parser,
-    memo: &mut ParseMemo,
-) -> Option<Providers> {
-    let mut visiting: std::collections::HashSet<String> = std::collections::HashSet::new();
-    resolve_and_parse_inner(inc_paths, module_name, parser, &mut visiting, memo)
-}
-
-fn resolve_and_parse_inner(
-    inc_paths: &[PathBuf],
-    module_name: &str,
-    parser: &mut Parser,
-    visiting: &mut std::collections::HashSet<String>,
-    memo: &mut ParseMemo,
-) -> Option<Providers> {
-    if let Some(cached) = memo.get(module_name) {
-        return cached.clone();
+/// The module names an ask for `name` lands, as the map places it: itself,
+/// or the modules it is a member of (`pkg.models.Base` loads `pkg.models`).
+/// A name a project file answers is answered as written.
+pub(crate) fn landing_names(core: &IndexCore, map: &DependencyMap, name: &str) -> Vec<String> {
+    if core.project_answers(name) {
+        return vec![name.to_string()];
     }
-    if !visiting.insert(module_name.to_string()) {
-        // Cycle in `@ISA` parent fallback — bail rather than blow the stack.
-        return None;
-    }
-
-    // Every provider is parsed, not just the @INC winner: a shadowed twin
-    // carries its own subs and `@ISA`, and the candidate relation is only
-    // as honest as its acquisition.
-    let mut providers: Providers = Vec::new();
-    for path in resolve_module_paths(inc_paths, module_name) {
-        if let Some(cached) =
-            parse_one_provider(inc_paths, module_name, path, parser, visiting, memo)
-        {
-            providers.push(cached);
+    let mut names: Vec<String> = Vec::new();
+    for l in map.locate(&Ask::Name(name.to_string())) {
+        if let Some(m) = l.loads_as.filter(|m| !names.contains(m)) {
+            names.push(m);
         }
     }
-    if providers.is_empty() {
-        return None;
+    if names.is_empty() {
+        names.push(name.to_string());
     }
-    memo.insert(module_name.to_string(), Some(providers.clone()));
-    Some(providers)
+    names
 }
 
-/// Read + parse ONE provider file into a `CachedModule`. Every provider runs
-/// this same body — the @INC winner has no privileged path (rule #10).
-fn parse_one_provider(
-    inc_paths: &[PathBuf],
+/// Read + parse ONE provider file into a `CachedModule`, or take it from its
+/// current row. Every provider runs this same body — the @INC winner has no
+/// privileged path (rule #10).
+pub(super) fn parse_one_provider(
     module_name: &str,
     path: CanonicalPath,
-    parser: &mut Parser,
-    visiting: &mut std::collections::HashSet<String>,
-    memo: &mut ParseMemo,
+    parse: &mut Parse,
+    rows: Option<&rusqlite::Connection>,
 ) -> Option<Arc<CachedModule>> {
+    if let Some(fa) = rows
+        .and_then(|conn| module_cache::load_dependency_row(conn, &path))
+        .filter(|fa| parse.path_inputs_current(path.as_path(), fa))
+    {
+        return Some(Arc::new(CachedModule::new(path, Arc::new(fa))));
+    }
+    let parser = match parse {
+        Parse::Hub(parser) => parser,
+        Parse::Pack(driver) => {
+            let start = std::time::Instant::now();
+            let analysis = crate::build::source_files::analyze_file(*driver, &path, driver.caps().file_cap)?;
+            crate::util::timings::record_built(module_name, std::time::Duration::ZERO, start.elapsed());
+            return Some(Arc::new(CachedModule::new(path, Arc::new(analysis))));
+        }
+    };
     let bench = std::env::var_os("PERL_LSP_BENCH").is_some();
     let bench_start = if bench { Some(std::time::Instant::now()) } else { None };
 
@@ -157,30 +276,9 @@ fn parse_one_provider(
     let parse_dur = t_parse.map(|s| s.elapsed()).unwrap_or_default();
 
     let t_build = if timing { Some(std::time::Instant::now()) } else { None };
-    let mut analysis = crate::build::builder::build(&tree, source.as_bytes());
+    let analysis = crate::build::builder::build(&tree, source.as_bytes());
     let build_dur = t_build.map(|s| s.elapsed()).unwrap_or_default();
     crate::util::timings::record_built(module_name, parse_dur, build_dur);
-
-    // If this module has no exports but inherits via @ISA (e.g. DDP → Data::Printer),
-    // fall back to the first parent's exports. This only patches `export`/`export_ok`;
-    // the parent's own cached analysis is still the source of truth for its symbols.
-    if analysis.export.is_empty() && analysis.export_ok.is_empty() {
-        let parents = crate::index::module_index::primary_package_parents(&analysis, module_name);
-        for parent in &parents {
-            let parent_primary =
-                resolve_and_parse_inner(inc_paths, parent, parser, visiting, memo)
-                    .and_then(|p| p.into_iter().next());
-            if let Some(parent_cached) = parent_primary {
-                if !parent_cached.analysis.export.is_empty()
-                    || !parent_cached.analysis.export_ok.is_empty()
-                {
-                    analysis.export = parent_cached.analysis.export.clone();
-                    analysis.export_ok = parent_cached.analysis.export_ok.clone();
-                    break;
-                }
-            }
-        }
-    }
 
     let symbols = analysis.symbols().len();
     let result = Arc::new(CachedModule::new(path, Arc::new(analysis)));
@@ -190,66 +288,3 @@ fn parse_one_provider(
     Some(result)
 }
 
-// ---- @INC discovery ----
-
-pub fn discover_inc_paths() -> Vec<PathBuf> {
-    let output = std::process::Command::new("perl")
-        .args(["-e", r#"print join "\n", @INC"#])
-        .stdin(std::process::Stdio::null())
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(PathBuf::from)
-            .filter(|p| p.is_dir())
-            .collect(),
-        _ => vec![],
-    }
-}
-
-/// Add project-local lib paths (lib/, local/lib/perl5/) to the front of @INC.
-/// Called by the resolver thread, test resolver, and CLI tools.
-pub fn add_project_lib_paths(inc_paths: &mut Vec<PathBuf>, workspace_root: &std::path::Path) {
-    for local_lib in &["lib", "local/lib/perl5"] {
-        let p = workspace_root.join(local_lib);
-        if p.is_dir() {
-            log::info!("Auto-discovered project lib: {:?}", p);
-            inc_paths.insert(0, p);
-        }
-    }
-}
-
-/// Scan @INC directories for .pm files, populating the available_modules map.
-/// Fast — no file reads, just directory traversal + path→module name conversion.
-pub(super) fn scan_inc_module_names(inc_paths: &[PathBuf], available: &DashMap<String, PathBuf>) {
-    for inc in inc_paths {
-        if inc.is_dir() {
-            scan_dir_recursive(inc, inc, available, 0);
-        }
-    }
-}
-
-fn scan_dir_recursive(base: &std::path::Path, dir: &std::path::Path, available: &DashMap<String, PathBuf>, depth: u32) {
-    if depth > 15 { return; } // prevent symlink loops
-    let entries = match std::fs::read_dir(dir) {
-        Ok(rd) => rd,
-        Err(_) => return,
-    };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.is_dir() {
-            scan_dir_recursive(base, &path, available, depth + 1);
-        } else if path.extension().map(|e| e == "pm").unwrap_or(false) {
-            if let Ok(rel) = path.strip_prefix(base) {
-                let module_name = crate::model::conventions::perl_module_from_rel_path(rel);
-                // Roots are walked in @INC order, so the FIRST one to claim a
-                // name is the one `require` would load. Overwriting here made
-                // the availability map name the LAST root — disagreeing with
-                // `resolve_module_paths` about which file a name means.
-                available.entry(module_name).or_insert_with(|| path.clone());
-            }
-        }
-    }
-}
