@@ -617,7 +617,7 @@ pub fn extract_in(
     };
     // A module named by its path is one section, the whole file.
     if let (Some(m), Some(sep)) = (file_module, pack.names.use_map_sep()) {
-        let ns = m.segments.iter().fold(String::new(), |ns, seg| crate::model::conventions::join_qualified(&ns, seg, sep));
+        let ns = m.identity(sep);
         let file = st.out.scopes[0].span;
         scopes::open_section(&mut st, &ns, file, crate::model::file_analysis::SectionKind::Statement);
     }

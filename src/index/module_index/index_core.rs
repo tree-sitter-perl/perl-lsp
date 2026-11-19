@@ -525,7 +525,7 @@ impl IndexCore {
     /// memo value).
     ///
     /// Each placement is stamped with `map_gen`, the generation that located
-    /// it. A miss touches nothing: it is the memo's (`IndexCore::asked`),
+    /// it, and `placed_as`, what `module_name` is to the files. A miss touches nothing: it is the memo's (`IndexCore::asked`),
     /// never the slot's. `door` is the served language's front door, whose
     /// projections a landed file gets, as a project file of that language
     /// does.
@@ -538,6 +538,7 @@ impl IndexCore {
         mut surfaces: Surfaces,
         strip: bool,
         map_gen: u64,
+        placed_as: file_records::PlacedAs,
         door: FrontDoor,
     ) -> Option<Providers> {
         let providers = self.tier_providers(result)?;
@@ -574,7 +575,7 @@ impl IndexCore {
             self.records.land_dependency(
                 &m.path,
                 package_names(&whole.analysis),
-                file_records::Placement { name: module_name.to_string(), precedence, map_gen },
+                file_records::Placement { name: module_name.to_string(), placed_as, precedence, map_gen },
                 crate::index::module_cache::file_stamp(&m.path),
             );
             self.all_files.insert(m.path.clone(), m.clone());
@@ -851,7 +852,7 @@ impl IndexCore {
                 if !here {
                     continue;
                 }
-                self.place_held(path, &held, &name, precedence, map_gen);
+                self.place_held(path, &held, &name, file_records::PlacedAs::Member, precedence, map_gen);
             }
         }
     }
@@ -862,11 +863,12 @@ impl IndexCore {
         &self,
         path: &crate::util::canonical_path::CanonicalPath,
         name: &str,
+        placed_as: file_records::PlacedAs,
         precedence: usize,
         map_gen: u64,
     ) {
         if let Some(held) = self.all_files.get(path).map(|e| e.clone()) {
-            self.place_held(path, &held, name, precedence, map_gen);
+            self.place_held(path, &held, name, placed_as, precedence, map_gen);
         }
     }
 
@@ -875,10 +877,11 @@ impl IndexCore {
         path: &crate::util::canonical_path::CanonicalPath,
         held: &Arc<CachedModule>,
         name: &str,
+        placed_as: file_records::PlacedAs,
         precedence: usize,
         map_gen: u64,
     ) {
-        if self.records.place(path, file_records::Placement { name: name.to_string(), precedence, map_gen }) {
+        if self.records.place(path, file_records::Placement { name: name.to_string(), placed_as, precedence, map_gen }) {
             self.all_defs.entry(name.to_string()).or_default().upsert(held.clone());
             self.derive_slot(name);
         }
@@ -916,13 +919,17 @@ impl IndexCore {
     /// A front door is about to register `path` as the project's: a
     /// dependency landing at the same path (the resolver got there first)
     /// retires, so its names re-derive and the project copy replaces it.
+    /// The record mints the file's identities from `names` here, the one
+    /// place every front door passes through.
     pub(crate) fn claim_for_workspace(
         &self,
         path: &crate::util::canonical_path::CanonicalPath,
+        analysis: &FileAnalysis,
         names: Vec<(String, bool)>,
     ) -> Option<Vec<(String, bool)>> {
         self.retire_dependency(path);
-        self.records.register_workspace(path, names)
+        let identities = analysis.identity_names(&names);
+        self.records.register_workspace(path, names, identities)
     }
 
     /// Does `m` declare a `Class`/type named `name`? Rank source for the

@@ -216,7 +216,7 @@ pub(crate) use index_core::{load_kept_map, read_and_keep};
 pub(crate) use index_core::strip_import_copy_one;
 
 mod file_records;
-pub(crate) use file_records::FileRecords;
+pub(crate) use file_records::{FileRecords, PlacedAs};
 mod gated_views;
 mod lookup;
 mod queries;

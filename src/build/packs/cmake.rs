@@ -12,6 +12,7 @@ pub fn cmake_pack() -> LangPack {
         construction: crate::model::file_analysis::ConstructionKey::Constructor,
         member_spaces: crate::model::file_analysis::MemberSpaces::PER_FAMILY,
         family_reach: crate::model::file_analysis::FamilyReach::Descendants,
+        file_identity: FileIdentity::Classes,
         lattice: crate::model::file_analysis::LatticeRules::new(&[]),
         type_display: |_| None,
         shape_name: |raw| raw.to_string(),

@@ -26,6 +26,9 @@ pub fn cpp_pack() -> LangPack {
         // A derived class reaches its bases' protected members, a base
         // never a derived class's.
         family_reach: crate::model::file_analysis::FamilyReach::Descendants,
+        // A translation unit is reached by `#include`, never by a module
+        // path; its classes are what a name finds.
+        file_identity: FileIdentity::Classes,
         // `bool` promotes to `int`.
         lattice: crate::model::file_analysis::LatticeRules::new(&[crate::model::file_analysis::Subsumption::BoolIntoNumeric]),
         type_display: |tag| (tag == "Undef").then_some("std::nullptr_t"),

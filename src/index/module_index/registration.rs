@@ -402,7 +402,16 @@ impl ModuleIndex {
     /// there is no separate one-provider path.
     pub fn insert_cache_providers(&self, module_name: &str, providers: Option<Providers>) {
         let door = FrontDoor::of(crate::build::language_driver::LanguageRegistry::served());
-        self.core.land_providers(module_name, providers, false, Default::default(), false, self.core.map_generation(), door);
+        self.core.land_providers(
+            module_name,
+            providers,
+            false,
+            Default::default(),
+            false,
+            self.core.map_generation(),
+            super::file_records::PlacedAs::Identity,
+            door,
+        );
     }
 
     /// The resolver thread's landing of `module_name`
@@ -502,7 +511,7 @@ impl ModuleIndex {
         let names = package_names(&analysis);
         // The record (and its role) before the path home publishes the
         // copy, so a concurrent sweep never sees it roleless.
-        let prev = self.core.claim_for_workspace(&cached.path, names.clone());
+        let prev = self.core.claim_for_workspace(&cached.path, &cached.analysis, names.clone());
         // Path-keyed registry next: the relational retrieval resolves
         // candidate paths through `cached_by_path`, and packageless files
         // (Mojolicious::Lite entrypoints) exist ONLY here.
@@ -1161,7 +1170,7 @@ impl ModuleIndex {
         let path = crate::util::canonical_path::CanonicalPath::resolve(path);
         self.bump_registration_gen(&path);
         let cached = Arc::new(CachedModule::new(path, arc));
-        let prev = self.core.claim_for_workspace(&cached.path, names.clone());
+        let prev = self.core.claim_for_workspace(&cached.path, &cached.analysis, names.clone());
         self.core.all_files.insert(cached.path.clone(), cached.clone());
         self.adopt_workspace_candidate(cached, names, prev);
     }
@@ -1734,7 +1743,7 @@ impl ModuleIndex {
         // registration's tie-break consults the record via
         // `module_defines_class`, and the fallback symbol scan on a
         // stripped copy misjudges every Class as a value.
-        self.core.claim_for_workspace(&cached.path, feed.to_vec());
+        self.core.claim_for_workspace(&cached.path, &analysis, feed.to_vec());
         // Unconditional: even a file declaring nothing registrable (an
         // include-only shim) must be reachable by whole-project sweeps.
         self.core.all_files.insert(cached.path.clone(), cached.clone());

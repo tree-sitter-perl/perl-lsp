@@ -19,6 +19,10 @@ pub(crate) struct FileRecord {
     /// hand; the name slot and the dependency inverse read it. Empty for a
     /// workspace file.
     pub(crate) loads_as: Vec<Placement>,
+    /// A workspace file's identities: the names its language loads it as
+    /// (`FileAnalysis::identity_names`), minted where the front door
+    /// registers it. A dependency's are its identity placements.
+    pub(crate) identities: Vec<String>,
     /// A dependency's source stamp when it landed: a later ask restamps the
     /// held copy only while the file on disk is still the one parsed.
     pub(crate) stamp: Option<(i64, i64)>,
@@ -28,11 +32,23 @@ pub(crate) struct FileRecord {
 /// One module name a map placed a dependency under.
 pub(crate) struct Placement {
     pub(crate) name: String,
+    /// Whether the file loads as this name or only declares it.
+    pub(crate) placed_as: PlacedAs,
     /// Its rank among that name's files (0 is what `require` loads).
     pub(crate) precedence: usize,
     /// The map generation that last placed it. A placement of an older
     /// generation is not current, and the idle sweep takes it back.
     pub(crate) map_gen: u64,
+}
+
+/// What a placement's name is to the file placed under it, minted by the
+/// landing that places it: the map located the file as that module, or the
+/// file declares it inside one it loads as (python's `pkg.models.Base` in
+/// `pkg/models.py`, a function in a Composer `files` entry).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlacedAs {
+    Identity,
+    Member,
 }
 
 /// `FileRecords::placement_of`'s answer.
@@ -51,9 +67,14 @@ impl FileRecords {
     /// a previous workspace registration of `path` recorded, for the
     /// caller's re-registration inverse. A dependency landing at the same
     /// path is retired by the caller first (`IndexCore::claim_for_workspace`).
-    pub(crate) fn register_workspace(&self, path: &CanonicalPath, names: Vec<(String, bool)>) -> Option<Vec<(String, bool)>> {
+    pub(crate) fn register_workspace(
+        &self,
+        path: &CanonicalPath,
+        names: Vec<(String, bool)>,
+        identities: Vec<String>,
+    ) -> Option<Vec<(String, bool)>> {
         self.0
-            .insert(path.clone(), FileRecord { names, loads_as: Vec::new(), stamp: None, role: FileRole::Workspace })
+            .insert(path.clone(), FileRecord { names, loads_as: Vec::new(), identities, stamp: None, role: FileRole::Workspace })
             .filter(|old| old.role == FileRole::Workspace)
             .map(|old| old.names)
     }
@@ -84,7 +105,7 @@ impl FileRecords {
                 true
             }
             Entry::Vacant(v) => {
-                v.insert(FileRecord { names, loads_as: vec![placement], stamp, role: FileRole::Dependency });
+                v.insert(FileRecord { names, loads_as: vec![placement], identities: Vec::new(), stamp, role: FileRole::Dependency });
                 true
             }
         }
@@ -215,6 +236,22 @@ impl FileRecords {
     /// The names `path` was recorded under, read without copying.
     pub(crate) fn with_names<R>(&self, path: &CanonicalPath, f: impl FnOnce(&[(String, bool)]) -> R) -> Option<R> {
         self.0.get(path).map(|r| f(&r.names))
+    }
+
+    /// Every name a held file loads as: a workspace file's identities and a
+    /// dependency's identity placements, never a member either declares.
+    /// A name two files load as is given once per file.
+    pub(crate) fn for_each_identity(&self, mut f: impl FnMut(&str)) {
+        for r in self.0.iter() {
+            match r.role {
+                FileRole::Dependency => {
+                    for p in r.loads_as.iter().filter(|p| p.placed_as == PlacedAs::Identity) {
+                        f(&p.name);
+                    }
+                }
+                FileRole::Workspace => r.identities.iter().for_each(|n| f(n)),
+            }
+        }
     }
 
     /// `path`'s precedence among the files the map placed under `name`;

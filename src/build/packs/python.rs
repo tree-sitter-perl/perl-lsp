@@ -44,6 +44,8 @@ pub fn python_pack() -> LangPack {
         // One member namespace (see `names`).
         member_spaces: MemberSpaces::SHARED,
         family_reach: crate::model::file_analysis::FamilyReach::Descendants,
+        // `import pkg.models` names the file, wherever its classes live.
+        file_identity: FileIdentity::FileModule,
         // `bool` is a subclass of `int`.
         lattice: PYTHON_LATTICE,
         type_display: |tag| (tag == "Undef").then_some("None"),

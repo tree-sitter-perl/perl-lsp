@@ -408,15 +408,14 @@ impl ModuleIndex {
         let mut seen = std::collections::HashSet::new();
         let mut results = Vec::new();
 
-        // Tier 1: resolved modules (have full analysis)
-        for entry in self.core.cache.iter() {
-            if entry.value().is_some() {
-                let name = entry.key();
-                if name.to_lowercase().starts_with(&prefix_lower) && seen.insert(name.clone()) {
-                    results.push((name.clone(), true));
-                }
+        // Tier 1: what a held file loads as — never a member it declares,
+        // which an import path does not name.
+        self.core.records.for_each_identity(|name| {
+            if name.to_lowercase().starts_with(&prefix_lower) && !seen.contains(name) {
+                seen.insert(name.to_string());
+                results.push((name.to_string(), true));
             }
-        }
+        });
 
         // Tier 2: what the map lists (name only, no analysis yet)
         for name in self.core.available_names().iter() {

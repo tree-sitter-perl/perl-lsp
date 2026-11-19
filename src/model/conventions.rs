@@ -69,6 +69,25 @@ pub struct LanguageConventions {
     pub free_names: FreeNameLookup,
     /// Which classes a protected member reaches beyond its own.
     pub family_reach: FamilyReach,
+    /// What a file is loaded as: the names an import path completes to.
+    pub file_identity: FileIdentity,
+}
+
+/// What one of a language's files is loaded as — its identities, the names
+/// an import path or `use` line names it by — as opposed to the members it
+/// declares, which are reached through it. Each variant names the fact the
+/// identity is already minted as, so registration reads that fact and the
+/// dependency map spells the same names for an installed file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileIdentity {
+    /// Every package or class it declares: `require` loads a file by the
+    /// package it is named for, and one file may declare several.
+    Packages,
+    /// Every class it declares: an autoloader loads a file for a class, and
+    /// a namespace or a function only lives inside one.
+    Classes,
+    /// The module its place on disk names (`PackFacts::file_module`).
+    FileModule,
 }
 
 /// Where a bare free name — a function or a constant spelling — no import
@@ -102,6 +121,7 @@ impl LanguageConventions {
         member_spaces: crate::model::file_analysis::MemberSpaces,
         free_names: FreeNameLookup,
         family_reach: FamilyReach,
+        file_identity: FileIdentity,
     ) -> Self {
         LanguageConventions {
             lattice,
@@ -111,6 +131,7 @@ impl LanguageConventions {
             member_spaces,
             free_names,
             family_reach,
+            file_identity,
         }
     }
 
@@ -150,6 +171,7 @@ pub static PERL_CONVENTIONS: LanguageConventions = LanguageConventions {
     free_names: FreeNameLookup::Global,
     // No Perl member is protected.
     family_reach: FamilyReach::Descendants,
+    file_identity: FileIdentity::Packages,
 };
 
 /// Each pack language's conventions, by `FileAnalysis::language`. The model
@@ -191,6 +213,7 @@ static UNREGISTERED: LanguageConventions =
         member_spaces: MemberSpaces::PER_FAMILY,
         free_names: FreeNameLookup::Global,
         family_reach: FamilyReach::Descendants,
+        file_identity: FileIdentity::Classes,
     };
 
 fn registered_conventions(language: &str) -> Option<&'static LanguageConventions> {

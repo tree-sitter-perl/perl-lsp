@@ -108,9 +108,14 @@ not the slot logic. Sources now on the set: in-scope names
 lists, OPEN — the dep cache only enriches detail), imported modules'
 remaining export surfaces and the unimported auto-import firehose
 (DEPENDENCY), and loadable module names (`complete_modules`, DEPENDENCY —
-resolved cache + the dependency map's name listing behind
-`CrossFileLookup::complete_module_names`; a pack's identity slot asks the
-same source). The qualified-path drill takes
+what every held file loads as, plus the dependency map's name listing,
+behind `CrossFileLookup::complete_module_names`; a pack's identity slot asks
+the same source). "Loads as" is a fact minted where a file is held: a
+dependency's placement says whether the map located the file as that name
+or the file only declares it (`PlacedAs`), and a project file's identities
+come from its language's `FileIdentity` (Perl's packages, PHP's classes,
+Python's file module) when the front door registers it. A function or
+constant a file declares is never a path an import names. The qualified-path drill takes
 both of its sub-package sources from the set.
 
 Deliberately NOT on the set (the seam's edge, kept honest):
@@ -132,8 +137,9 @@ Deliberately NOT on the set (the seam's edge, kept honest):
   (`additional_edits`), placement is the adapter's.
 - **Plugin query hooks** — cursor-time, imperative, plugin-owned.
 - **Tiers with no source**: WORKSPACE contributes no completion names
-  (true before the seam too — workspace-package names and workspace
-  exporter surfaces were never gathered); when it grows a source it plugs
+  of its own (true before the seam too — workspace exporter surfaces were
+  never gathered; a project file's identities reach the module half
+  through the index, above); when it grows a source it plugs
   into the same mask — that's the point of the seam. BUILTIN has one: the
   Perl builtin surface (`model/builtins.rs`, the single table diagnostics
   suppression and builtin hover also ask) supplies its `Function` rows as

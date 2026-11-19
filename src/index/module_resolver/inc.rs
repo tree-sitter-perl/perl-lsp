@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::build::dependency_map::{Ask, DependencyMap};
-use crate::index::module_index::FrontDoor;
+use crate::index::module_index::{FrontDoor, PlacedAs};
 use crate::util::canonical_path::CanonicalPath;
 
 /// How the served language parses a landed file: the Perl hub through its
@@ -76,16 +76,17 @@ pub(crate) fn land_module(
         Some(providers) => persist_providers(rows, providers),
         None => (false, Default::default()),
     };
-    let stored = core.land_providers(module_name, whole.clone(), persisted, surfaces, strip, map_gen, parse.door());
+    let stored = core.land_providers(module_name, whole.clone(), persisted, surfaces, strip, map_gen, PlacedAs::Identity, parse.door());
     core.place_members(map, module_name, &located, map_gen);
     (whole, stored)
 }
 
 /// THE landing of one file the map loads by path (`Ask::File`: Composer's
 /// `files`, which no name places): parsed or read from its row, persisted,
-/// and landed under every name the map places it under and every name it
-/// declares — a function it defines is called by name with nothing asking
-/// for its file. A file that offers no name lands nothing.
+/// and landed under every name the map places it under (the file loads as
+/// those) and every name it declares (its members) — a function it defines
+/// is called by name with nothing asking for its file. A file that offers
+/// no name lands nothing.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn land_file(
     core: &IndexCore,
@@ -101,21 +102,26 @@ pub(crate) fn land_file(
     let Some(whole) = core.tier_providers(parse_providers(&label, vec![path.clone()], parse, prepared, rows)) else {
         return (None, None);
     };
-    let mut names: Vec<String> = map.locate(&Ask::File(path.clone())).into_iter().filter_map(|l| l.loads_as).collect();
+    let mut names: Vec<(String, PlacedAs)> = Vec::new();
+    for name in map.locate(&Ask::File(path.clone())).into_iter().filter_map(|l| l.loads_as) {
+        if !names.iter().any(|(n, _)| *n == name) {
+            names.push((name, PlacedAs::Identity));
+        }
+    }
     for m in &whole {
         for (name, _) in crate::index::module_index::collect_linkage_feed(&m.analysis) {
-            if !names.contains(&name) {
-                names.push(name);
+            if !names.iter().any(|(n, _)| *n == name) {
+                names.push((name, PlacedAs::Member));
             }
         }
     }
-    let Some((first, rest)) = names.split_first() else {
+    let Some(((first, first_as), rest)) = names.split_first() else {
         return (None, None);
     };
     let (persisted, surfaces) = persist_providers(rows, &whole);
-    let stored = core.land_providers(first, Some(whole.clone()), persisted, surfaces, strip, map_gen, parse.door());
-    for name in rest {
-        core.place_name(path, name, 0, map_gen);
+    let stored = core.land_providers(first, Some(whole.clone()), persisted, surfaces, strip, map_gen, *first_as, parse.door());
+    for (name, placed_as) in rest {
+        core.place_name(path, name, *placed_as, 0, map_gen);
     }
     (Some(whole), stored)
 }

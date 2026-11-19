@@ -87,11 +87,11 @@ sub new {
     let cached = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/x/Demo/Has/Event.pm")), analysis));
 
     // Workspace-index style insert: a resolved module.
-    core.land_providers("Demo::Has::Event", Some(vec![cached]), false, Default::default(), false, 1, FrontDoor::Hub);
+    core.land_providers("Demo::Has::Event", Some(vec![cached]), false, Default::default(), false, 1, crate::index::module_index::PlacedAs::Identity, FrontDoor::Hub);
     assert!(core.cache.get("Demo::Has::Event").as_deref().unwrap().is_some());
 
     // On-demand resolver miss: `None`. Must NOT clobber the indexed copy.
-    core.land_providers("Demo::Has::Event", None, false, Default::default(), false, 1, FrontDoor::Hub);
+    core.land_providers("Demo::Has::Event", None, false, Default::default(), false, 1, crate::index::module_index::PlacedAs::Identity, FrontDoor::Hub);
     assert!(
         core.cache.get("Demo::Has::Event").as_deref().unwrap().is_some(),
         "a None on-demand miss clobbered an already-indexed module",
@@ -102,7 +102,7 @@ sub new {
     let tree2 = parser.parse(source, None).unwrap();
     let analysis2 = std::sync::Arc::new(crate::build::builder::build(&tree2, source.as_bytes()));
     let cached2 = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/y/Demo/Has/Event.pm")), analysis2));
-    core.land_providers("Demo::Has::Event", Some(vec![cached2]), false, Default::default(), false, 1, FrontDoor::Hub);
+    core.land_providers("Demo::Has::Event", Some(vec![cached2]), false, Default::default(), false, 1, crate::index::module_index::PlacedAs::Identity, FrontDoor::Hub);
     assert_eq!(
         core.cache.get("Demo::Has::Event").as_deref().unwrap().as_ref().unwrap().path,
         crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/y/Demo/Has/Event.pm")),
@@ -988,6 +988,85 @@ fn a_composer_files_entry_lands_under_every_name_it_declares() {
             "{name} answers from the files entry"
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The indexed names an import path completes to are what each held file
+/// loads as: a landed class and a project class, never a function, a
+/// constant or a namespace either file declares, nor a Composer `files`
+/// entry outside the autoload roots, which no class name spells.
+#[cfg(feature = "php")]
+#[test]
+fn a_php_import_path_completes_to_classes_not_what_they_declare() {
+    use crate::model::file_analysis::CrossFileLookup;
+    let php = crate::build::language_driver::LanguageRegistry::compiled().for_id("php").expect("php driver");
+    let dir = std::env::temp_dir().join(format!("d11b_php_ident_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let files = [
+        ("composer.json", r#"{"autoload": {"psr-4": {"App\\": "src/"}}}"#),
+        (
+            "vendor/composer/installed.json",
+            r#"{"packages": [{"name": "acme/base", "install-path": "../acme/base",
+                "autoload": {"psr-4": {"Acme\\": "src/"}, "files": ["helpers.php"]}}]}"#,
+        ),
+        ("vendor/acme/base/src/Base.php", "<?php\nnamespace Acme;\nconst DEPTH = 2;\nclass Base {}\n"),
+        ("vendor/acme/base/helpers.php", "<?php\nnamespace Acme;\nfunction tap($v) { return $v; }\n"),
+        ("src/Config.php", "<?php\nnamespace App;\nconst LIMIT = 3;\nfunction helper() {}\nclass Config {}\n"),
+    ];
+    for (rel, body) in files {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = crate::util::canonical_path::CanonicalPath::resolve(dir).into_path_buf();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    index_pack_language(php, &dir, None, &idx, None, 0);
+    let map = idx.dependency_map().expect("the walk read php's map");
+    assert!(idx.land_pack_module(&map, "Acme\\Base", php).1.is_some(), "Acme\\Base lands");
+    let helpers = crate::util::canonical_path::CanonicalPath::resolve(dir.join("vendor/acme/base/helpers.php"));
+    assert!(idx.land_pack_file(&map, &helpers, php).1.is_some(), "the files entry lands");
+    assert!(!idx.def_candidates("Acme\\tap").is_empty(), "the function is held, by name");
+
+    let mut indexed: Vec<String> = idx.complete_module_names("").into_iter().filter(|(_, held)| *held).map(|(n, _)| n).collect();
+    indexed.sort();
+    assert_eq!(indexed, ["Acme\\Base", "App\\Config"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The indexed names a Python import path completes to are modules: a
+/// landed one by the name the map located it as, a project one by the name
+/// its place names. The classes and functions inside either are reached
+/// through the module, so they are not offered as paths.
+#[cfg(feature = "python")]
+#[test]
+fn a_python_import_path_completes_to_modules_not_their_members() {
+    use crate::model::file_analysis::CrossFileLookup;
+    let python = crate::build::language_driver::LanguageRegistry::compiled().for_id("python").expect("python driver");
+    let dir = std::env::temp_dir().join(format!("d11b_py_ident_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    const SITE: &str = ".venv/lib/python3.12/site-packages";
+    let files = [
+        (".venv/pyvenv.cfg".to_string(), "home = /usr/bin\n"),
+        (format!("{SITE}/acme/__init__.py"), ""),
+        (format!("{SITE}/acme/models.py"), "class Base:\n    pass\n\ndef make():\n    return Base()\n"),
+        ("app/__init__.py".to_string(), ""),
+        ("app/user.py".to_string(), "from acme.models import Base\n\nclass User(Base):\n    pass\n\ndef run():\n    pass\n"),
+    ];
+    for (rel, body) in &files {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = crate::util::canonical_path::CanonicalPath::resolve(dir).into_path_buf();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    index_pack_language(python, &dir, None, &idx, None, 0);
+    let map = idx.dependency_map().expect("the walk read python's map");
+    assert!(idx.land_pack_module(&map, "acme.models", python).1.is_some(), "acme.models lands");
+    assert!(!idx.def_candidates("acme.models.Base").is_empty(), "its class is placed with it");
+
+    let mut indexed: Vec<String> = idx.complete_module_names("").into_iter().filter(|(_, held)| *held).map(|(n, _)| n).collect();
+    indexed.sort();
+    assert_eq!(indexed, ["acme.models", "app", "app.user"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
