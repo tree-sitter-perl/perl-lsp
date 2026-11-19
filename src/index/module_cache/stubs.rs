@@ -58,7 +58,7 @@ pub fn encode_stub(
 }
 
 pub fn decode_stub(blob: &[u8]) -> Option<WarmStub> {
-    let bin = zstd::decode_all(blob).ok()?;
+    let bin = super::unzstd(blob)?;
     let (feed, specs, surface, mut skeleton): (
         Vec<(String, bool)>,
         Vec<(String, String)>,

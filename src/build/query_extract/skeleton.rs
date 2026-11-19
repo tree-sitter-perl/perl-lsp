@@ -2139,7 +2139,9 @@ impl SkeletonAnalysis {
         for sym in &symbols {
             let defers = SymbolFlags::INTERFACE | SymbolFlags::TRAIT | SymbolFlags::ABSTRACT;
             if sym.kind == SymKind::Class && sym.flags.intersects(defers) {
-                packages.entry(sym.name.clone()).or_default().is_role = true;
+                let facts = packages.entry(sym.name.clone()).or_default();
+                facts.is_role = true;
+                facts.flavor |= sym.flags & defers;
             }
             if sym.flags.contains(SymbolFlags::CONTRACT) {
                 if let Some(pkg) = &sym.package {
