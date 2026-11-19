@@ -456,6 +456,11 @@ struct Builder<'a> {
     /// paths produce byte-identical witnesses (same span, same
     /// `expression` source tag).
     unresolved_expr_nodes: Vec<Node<'a>>,
+    /// The calls the joins' gates name. Each needs its `Expr` witness, which
+    /// the walk gives only a call something reads; they are emitted with
+    /// the forward references, so no pass before the fold types a stored
+    /// call's value through a callee the walk had not reached.
+    gate_calls: Vec<Node<'a>>,
     /// Per-package framework fact, computed from `framework_modes` once
     /// the walk finishes. Available before `resolve_return_types` so
     /// the bag-aware return-arm fold can ask the framework-aware

@@ -1058,6 +1058,9 @@ impl<'a> Builder<'a> {
     /// negative witnesses.
     pub(super) fn resolve_forward_expr_witnesses(&mut self) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessSource};
+        for call in std::mem::take(&mut self.gate_calls) {
+            self.emit_expr_witness(call);
+        }
         let queued = std::mem::take(&mut self.unresolved_expr_nodes);
         for node in queued {
             // A later pass may have emitted the node since it queued (a gate

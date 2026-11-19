@@ -364,6 +364,7 @@ fn build_once(
         bag: crate::model::witnesses::WitnessBag::new(),
         vars_bound: false,
         unresolved_expr_nodes: Vec::new(),
+        gate_calls: Vec::new(),
         package_framework: std::collections::HashMap::new(),
         blessing_packages: std::collections::HashSet::new(),
         scope_stack: Vec::new(),

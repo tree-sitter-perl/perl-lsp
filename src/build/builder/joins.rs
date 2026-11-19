@@ -68,9 +68,7 @@ impl<'a> Builder<'a> {
         }
         let mut view = walk.finish();
         drop(local);
-        for g in gates {
-            self.emit_expr_witness(g);
-        }
+        self.gate_calls = gates;
         if !bodies.is_empty() {
             static RETURNS: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
             let kinds = RETURNS.get_or_init(|| perl_kind_ids(&["return_expression", "goto_expression"]));
