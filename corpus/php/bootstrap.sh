@@ -8,17 +8,20 @@
 # shallow. Idempotent: an existing clone is left alone (a warning names it if it
 # sits off its pin).
 #
-# laravel-app also needs php + composer: its vendor tree is fetched one package
-# at a time with a shallow git fetch, because GitHub dist zipballs 403 through
-# the cloud proxy. Without composer it stays a bare skeleton, which still
-# measures the app files.
+# An app (the last field) also needs php + composer: its vendor tree is fetched
+# one package at a time with a shallow git fetch, because GitHub dist zipballs
+# 403 through the cloud proxy. Without composer it stays a bare checkout, which
+# still measures the app files.
 set -u
 DEST="${1:-${PHP_CORPORA:-$HOME/php-corpora}}"
 ONLY="${2:-}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # A pin moves only with a re-measure: every recorded number is against it.
-#   name|url|commit|tag|why
+#   name|url|commit|tag|why|vendor
+# vendor: empty for a library; `resolve` for an app with no committed lock
+# (composer resolves one at bootstrap time); `lock` for an app whose
+# composer.lock is committed, so its vendor tree is pinned with the clone.
 REPOS=(
 "monolog|https://github.com/Seldaek/monolog|d7059e4c691d05ea1222b5124bed0f961be46e15|3.12.1|small, clean baseline: mostly the fixed per-process cost"
 "composer|https://github.com/composer/composer|472b418967419c6124edd91dc6310a3bec091dae|2.11.1|cross-package imports against absent symfony/semver; committed vendor/ fixtures"
@@ -30,12 +33,13 @@ REPOS=(
 "phpunit|https://github.com/sebastianbergmann/phpunit|4821376960d0e1e5a7b7b700955ebcab33ecd71b|13.4.6|modern 8.x: enums, readonly, namespace imports; many small files"
 "carbon|https://github.com/briannesbitt/Carbon|ce0e5636fae7d1e99856eb70cae4c719a284aa08|3.15.1|traits and mixins; locale-array files full of non-ASCII strings"
 "guzzle|https://github.com/guzzle/guzzle|7d9b1f430bb65ac664e120af227bf9a795ad6333|8.3.1|huge test files, highest RSS per source byte, curl_* builtins vs namespaced mocks"
-"laravel-app|https://github.com/laravel/laravel|06d016a364a37430eec9cbc52209adce3d7667ce|v13.11.0|a real project: skeleton app plus its 111-package vendor tree"
+"laravel-app|https://github.com/laravel/laravel|06d016a364a37430eec9cbc52209adce3d7667ce|v13.11.0|a real project: skeleton app plus its 111-package vendor tree|resolve"
+"firefly|https://github.com/firefly-iii/firefly-iii|e1a90bf8ee7499524039b331179e40431b3c84af|main 2026-11-19|a full Laravel app: 1,700 project files over a locked vendor tree|lock"
 )
 
 mkdir -p "$DEST" || exit 1
 for ENTRY in "${REPOS[@]}"; do
-  IFS='|' read -r NAME URL PIN TAG WHY <<< "$ENTRY"
+  IFS='|' read -r NAME URL PIN TAG WHY VENDOR <<< "$ENTRY"
   [ -n "$ONLY" ] && [ "$ONLY" != "$NAME" ] && continue
   echo "══ $NAME ($TAG) — $WHY"
   if [ -d "$DEST/$NAME/.git" ]; then
@@ -55,25 +59,31 @@ for ENTRY in "${REPOS[@]}"; do
     echo "   clone: ok at ${PIN:0:12}"
   fi
 
-  if [ "$NAME" = "laravel-app" ]; then
+  if [ -n "$VENDOR" ]; then
     APP="$DEST/$NAME"
     if [ -f "$APP/vendor/composer/installed.json" ]; then
       echo "   vendor: present"
     elif ! command -v composer >/dev/null || ! command -v php >/dev/null; then
-      echo "   vendor: SKIPPED (needs php + composer); the skeleton alone is still usable"
+      echo "   vendor: SKIPPED (needs php + composer); the app files alone are still usable"
     else
       # Composer state stays inside the app, never in the user's home.
       export COMPOSER_HOME="$APP/.composer-home" COMPOSER_CACHE_DIR="$APP/.composer-cache"
       ( cd "$APP" &&
-        composer update --no-install --no-scripts --no-interaction -q &&
+        { [ "$VENDOR" = lock ] || composer update --no-install --no-scripts --no-interaction -q; } &&
         mkdir -p vendor &&
         php "$HERE/lock2tsv.php" composer.lock |
           awk -F'\t' '$2 != "-" { print $1, $2, $3 }' |
           xargs -P4 -n3 "$HERE/fetch1.sh" "$APP/vendor" >/dev/null &&
         php "$HERE/installed.php" . &&
-        composer install --no-interaction -q &&
-        { [ -f .env ] || cp .env.example .env; } &&
-        php artisan key:generate -q ) &&
+        if [ "$VENDOR" = lock ]; then
+          # The packages are already in place at their locked commits, and an
+          # install would reach for a dist the proxy refuses.
+          composer dump-autoload --no-scripts --ignore-platform-reqs -q
+        else
+          composer install --no-interaction -q &&
+          { [ -f .env ] || cp .env.example .env; } &&
+          php artisan key:generate -q
+        fi ) &&
         echo "   vendor: ok ($(find "$APP/vendor" -name '*.php' | wc -l) .php files)" ||
         echo "   vendor: FAILED"
       grep -qx '/.composer-*' "$APP/.git/info/exclude" 2>/dev/null ||
