@@ -629,3 +629,23 @@ fn a_call_whose_value_a_statement_stores_gates_what_follows() {
     assert_eq!(guards("$r = fail()"), 1, "the guard's statement does not come back");
     assert_eq!(guards("$r = 2"), 0, "a statement that comes back decides nothing past it");
 }
+
+/// One "expression" witness per expression, whoever emits it: a call to a
+/// sub declared further down queues for forward resolution, and a gate names
+/// the same call before that runs. A second copy types the call twice at
+/// every read.
+#[test]
+fn a_forward_call_holds_one_expression_witness() {
+    use crate::model::witnesses::{WitnessAttachment, WitnessSource};
+    let source = "package Foo;\nsub early { my $r = later(1); later(2); return $r }\nsub later { return {} }\n";
+    let fa = build_with(source, Arc::new(PluginRegistry::new()));
+    let mut per_expr: std::collections::HashMap<&WitnessAttachment, usize> = Default::default();
+    for w in fa.witnesses.all() {
+        if matches!(w.attachment, WitnessAttachment::Expr(_)) && matches!(&w.source, WitnessSource::Builder(t) if t == "expression") {
+            *per_expr.entry(&w.attachment).or_default() += 1;
+        }
+    }
+    let doubled: Vec<_> = per_expr.iter().filter(|(_, n)| **n > 1).collect();
+    assert!(doubled.is_empty(), "{doubled:?}");
+    assert!(per_expr.len() >= 2, "both calls carry their witness");
+}

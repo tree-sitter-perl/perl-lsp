@@ -4495,16 +4495,15 @@ impl ReducerRegistry {
     /// nodes collapse onto (a C macro expansion) edges to itself.
     fn ends_walk(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState, att: &WitnessAttachment) -> EndsWalk {
         let key = (bag as *const WitnessBag as usize, att.clone());
-        // Reached again through a callee's own chase, which cuts its cycles
-        // on the callee: no evidence here.
-        if state.ends_path.contains(&key) {
-            return EndsWalk::Top;
-        }
         if state.ends_path.len() as u32 >= QUERY_REC_DEPTH_CAP {
             crate::util::ghost_stats::count("expr_ends.depth_cap");
             return EndsWalk::Top;
         }
-        state.ends_path.insert(key.clone());
+        // Reached again through a callee's own chase, which cuts its cycles
+        // on the callee: no evidence here.
+        if !state.ends_path.insert(key.clone()) {
+            return EndsWalk::Top;
+        }
         let walked = with_stack_headroom(|| self.ends_walk_body(bag, q, state, att));
         state.ends_path.remove(&key);
         walked

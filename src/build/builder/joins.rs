@@ -232,9 +232,16 @@ impl<'a> Builder<'a> {
     /// or the value an assignment stores (`my $r = f();`, `$a = $b = f();`).
     /// Control reaches what follows only if that call comes back.
     pub(super) fn statement_call(&self, node: Node<'a>) -> Option<Node<'a>> {
+        // Asked of every statement: ids, since a kind or field read by name
+        // is a string search of the grammar's table.
+        static STORE: std::sync::OnceLock<(Vec<u16>, Option<std::num::NonZeroU16>)> = std::sync::OnceLock::new();
+        let (stores, right) = STORE.get_or_init(|| {
+            let lang: tree_sitter::Language = ts_parser_perl::LANGUAGE.into();
+            (perl_kind_ids(&["assignment_expression"]), lang.field_id_for_name("right"))
+        });
         let mut node = crate::cst::peel_groups(node);
-        while node.kind() == "assignment_expression" {
-            node = crate::cst::peel_groups(node.child_by_field_name("right")?);
+        while stores.contains(&node.kind_id()) {
+            node = crate::cst::peel_groups(node.child_by_field_id((*right)?.get())?);
         }
         Some(node)
     }
