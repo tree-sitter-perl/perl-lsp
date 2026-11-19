@@ -807,6 +807,15 @@ struct PathAnswers {
     fan_outs: Vec<(FanOutKey, MemoEntry)>,
 }
 
+/// One step of `expr_ends`'s walk. `OnlyCycle` is an expression whose every
+/// witness edged back onto the walk: the bottom inside the cycle, and the top
+/// where the walk started, since an empty answer reads as "never completes".
+enum EndsWalk {
+    Ends(Ends),
+    OnlyCycle,
+    Top,
+}
+
 /// Per-top-level-`query` traversal state: the cycle guard plus a result
 /// memo. The bag forms a DAG of edges; without memoization a diamond
 /// (two paths reaching one shared sub-attachment) re-chases the shared
@@ -897,6 +906,10 @@ pub(super) struct QueryState {
     /// Effect answers memoized while a frame on the path was assumed to have
     /// no way of ending, with that frame's position (`forget_assumed`).
     assumed: Vec<(u32, VisitedKey)>,
+    /// The expressions `expr_ends` is inside, by bag. Its own cycle guard:
+    /// the effect walk follows edges `query_rec` never frames, and a span
+    /// that several nodes collapse onto (a macro expansion) edges to itself.
+    ends_path: std::collections::HashSet<(usize, WitnessAttachment), ahash::RandomState>,
 }
 
 impl QueryState {
@@ -1056,6 +1069,7 @@ impl QueryState {
             recurs_at: std::collections::HashSet::new(),
             frame_seeds: std::collections::HashMap::new(),
             assumed: Vec::new(),
+            ends_path: Default::default(),
         }
     }
 
@@ -4470,22 +4484,68 @@ impl ReducerRegistry {
         state: &mut QueryState,
         att: &WitnessAttachment,
     ) -> Option<Ends> {
+        match self.ends_walk(bag, q, state, att) {
+            EndsWalk::Ends(e) => Some(e),
+            EndsWalk::Top | EndsWalk::OnlyCycle => None,
+        }
+    }
+
+    /// One expression of `expr_ends`'s walk. The walk follows edges
+    /// `query_rec` never frames, so it carries its own guard: a span several
+    /// nodes collapse onto (a C macro expansion) edges to itself.
+    fn ends_walk(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState, att: &WitnessAttachment) -> EndsWalk {
+        let key = (bag as *const WitnessBag as usize, att.clone());
+        if state.ends_path.len() as u32 >= QUERY_REC_DEPTH_CAP {
+            crate::util::ghost_stats::count("expr_ends.depth_cap");
+            return EndsWalk::Top;
+        }
+        // Reached again through a callee's own chase, which cuts its cycles
+        // on the callee: no evidence here.
+        if !state.ends_path.insert(key.clone()) {
+            return EndsWalk::Top;
+        }
+        let walked = with_stack_headroom(|| self.ends_walk_body(bag, q, state, att));
+        state.ends_path.remove(&key);
+        walked
+    }
+
+    fn ends_walk_body(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState, att: &WitnessAttachment) -> EndsWalk {
         let mut stated: Option<Ends> = None;
         let mut join = |e: Ends| stated = Some(stated.map_or(e, |s| s | e));
+        let mut cycled = false;
         for w in bag.iter_attachment(att) {
             match &w.payload {
                 WitnessPayload::Effect(Effect::Ends(e)) => join(*e),
                 WitnessPayload::Invoke { callee, receiver, .. } => {
-                    join(self.invoke_ends(bag, q, state, w.span.start, callee, receiver.as_ref())?)
+                    match self.invoke_ends(bag, q, state, w.span.start, callee, receiver.as_ref()) {
+                        Some(e) => join(e),
+                        None => return EndsWalk::Top,
+                    }
                 }
                 // A call reached through its ref (`Expr(call) → Expression`).
-                WitnessPayload::Edge(t @ (WitnessAttachment::Expr(_) | WitnessAttachment::Expression(_))) => {
-                    join(self.expr_ends(bag, q, state, t)?)
+                // Value flow (`Expr → Expr`) is not how an expression ends:
+                // the calls a statement runs are named where it is minted
+                // (gates, guard exits). One already on the walk adds nothing
+                // a union join does not hold: the least fixed point's bottom.
+                WitnessPayload::Edge(t @ WitnessAttachment::Expression(_)) => {
+                    if state.ends_path.contains(&(bag as *const WitnessBag as usize, t.clone())) {
+                        cycled = true;
+                        continue;
+                    }
+                    match self.ends_walk(bag, q, state, t) {
+                        EndsWalk::Ends(e) => join(e),
+                        EndsWalk::OnlyCycle => cycled = true,
+                        EndsWalk::Top => return EndsWalk::Top,
+                    }
                 }
                 _ => {}
             }
         }
-        stated
+        match stated {
+            Some(e) => EndsWalk::Ends(e),
+            None if cycled => EndsWalk::OnlyCycle,
+            None => EndsWalk::Top,
+        }
     }
 
     /// How a call to `callee` ends: its definition's answer, joined over

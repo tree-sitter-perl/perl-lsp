@@ -35,8 +35,8 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn collect_vars_walk(&self, node: Node<'a>, out: &mut Vec<(String, Span)>) {
-        match node.kind() {
-            "scalar" | "array" | "hash" => {
+        match node.kind_of() {
+            Kind::Scalar | Kind::Array | Kind::Hash => {
                 if let Some(name) = self.build_var_name(node) {
                     out.push((name, node_to_span(node)));
                 }
@@ -64,10 +64,10 @@ impl<'a> Builder<'a> {
     /// Falls back to the full node text when the varname child is
     /// missing (ERROR recovery, partial parses).
     pub(super) fn build_var_name(&self, node: Node<'a>) -> Option<String> {
-        let sigil = match node.kind() {
-            "scalar" => '$',
-            "array" => '@',
-            "hash" => '%',
+        let sigil = match node.kind_of() {
+            Kind::Scalar => '$',
+            Kind::Array => '@',
+            Kind::Hash => '%',
             _ => return node.utf8_text(self.source).ok().map(|s| s.to_string()),
         };
         let varname = find_varname_child(node).and_then(|v| v.utf8_text(self.source).ok());
@@ -80,7 +80,7 @@ impl<'a> Builder<'a> {
     pub(super) fn first_var_child(&self, node: Node<'a>) -> Option<String> {
         for i in 0..node.named_child_count() {
             if let Some(child) = node.named_child(i) {
-                if matches!(child.kind(), "scalar" | "array" | "hash") {
+                if matches!(child.kind_of(), Kind::Scalar | Kind::Array | Kind::Hash) {
                     return self.build_var_name(child);
                 }
             }
@@ -97,7 +97,7 @@ impl<'a> Builder<'a> {
         if crate::cst::is_element_access_base(self.syntax, elem) {
             return false;
         }
-        if self.syntax.parent(elem).is_some_and(|p| matches!(p.kind(), "postinc_expression" | "preinc_expression")) {
+        if self.syntax.parent(elem).is_some_and(|p| matches!(p.kind_of(), Kind::PostincExpression | Kind::PreincExpression)) {
             return true;
         }
         if crate::cst::list_assignment_target_of(self.syntax, elem).is_some() {
@@ -105,7 +105,7 @@ impl<'a> Builder<'a> {
         }
         let Some(container) = crate::cst::deref_container_of(self.syntax, elem) else { return false };
         if let Some(p) = self.syntax.parent(container) {
-            if p.kind() == "assignment_expression" && p.child_by_field_name("left") == Some(container) {
+            if p.is(Kind::AssignmentExpression) && p.field(Field::Left) == Some(container) {
                 return true;
             }
         }
@@ -122,11 +122,11 @@ impl<'a> Builder<'a> {
             other => other,
         };
         let Some(call) = call else { return false };
-        let name = match call.kind() {
-            "function_call_expression" | "ambiguous_function_call_expression" => {
-                call.child_by_field_name("function").and_then(|f| f.utf8_text(self.source).ok())
+        let name = match call.kind_of() {
+            Kind::FunctionCallExpression | Kind::AmbiguousFunctionCallExpression => {
+                call.field(Field::Function).and_then(|f| f.utf8_text(self.source).ok())
             }
-            "func1op_call_expression" => call.child(0).and_then(|k| k.utf8_text(self.source).ok()),
+            Kind::Func1opCallExpression => call.child(0).and_then(|k| k.utf8_text(self.source).ok()),
             _ => None,
         };
         name.is_some_and(crate::model::builtins::modifies_its_array_argument)
@@ -167,7 +167,7 @@ impl<'a> Builder<'a> {
     pub(super) fn on_write_path(&self, elem: Node<'a>) -> bool {
         let mut top = elem;
         while let Some(p) = self.syntax.parent(top).filter(|p| {
-            matches!(p.kind(), "hash_element_expression" | "array_element_expression")
+            matches!(p.kind_of(), Kind::HashElementExpression | Kind::ArrayElementExpression)
                 && crate::cst::is_element_access_base(self.syntax, top)
         }) {
             top = p;
@@ -178,7 +178,7 @@ impl<'a> Builder<'a> {
     /// How a write targets `elem`, if one does.
     pub(super) fn element_write_kind(&self, elem: Node<'a>) -> Option<ElementWrite> {
         if let Some(p) = self.syntax.parent(elem).filter(|p| {
-            p.kind() == "assignment_expression" && p.child_by_field_name("left") == Some(elem)
+            p.is(Kind::AssignmentExpression) && p.field(Field::Left) == Some(elem)
         }) {
             // An operator `assign_op` doesn't know still writes; reading
             // first is the safe side.
@@ -215,7 +215,7 @@ impl<'a> Builder<'a> {
     /// and whoever holds it may store anything there; every other key of the
     /// container stays as it was (`GetOptions('help' => \$opt{'help'})`).
     pub(super) fn element_escaped(&self, elem: Node<'a>) -> bool {
-        self.syntax.parent(elem).is_some_and(|p| p.kind() == "refgen_expression")
+        self.syntax.parent(elem).is_some_and(|p| p.is(Kind::RefgenExpression))
     }
 
     /// Record an escaped element place for the mutation-extension pass: its
@@ -249,12 +249,12 @@ impl<'a> Builder<'a> {
         let mut outer_hops: Vec<Node<'a>> = Vec::new();
         loop {
             let Some(c) = innermost.named_child(0) else { return };
-            match c.kind() {
-                "hash_element_expression" | "array_element_expression" => {
+            match c.kind_of() {
+                Kind::HashElementExpression | Kind::ArrayElementExpression => {
                     outer_hops.push(innermost);
                     innermost = c;
                 }
-                "scalar" | "container_variable" => break,
+                Kind::Scalar | Kind::ContainerVariable => break,
                 _ => return,
             }
         }
@@ -264,14 +264,14 @@ impl<'a> Builder<'a> {
         // `$v->{k}` / `$v->[N]` writes through scalar `$v`, arrow required
         // (`$foo{k}` without one would be `%foo` mis-keyed to `$foo`).
         // `$arr[N]` stays unmodeled: there is no tuple on `@arr` to extend.
-        let var_text: String = match (innermost.kind(), container.kind()) {
-            ("hash_element_expression", "container_variable") => {
+        let var_text: String = match (innermost.kind_of(), container.kind_of()) {
+            (Kind::HashElementExpression, Kind::ContainerVariable) => {
                 match crate::cst::canonical_container_name(self.syntax, container, self.source) {
                     Some(n) => n,
                     None => return,
                 }
             }
-            (_, "container_variable") => return,
+            (_, Kind::ContainerVariable) => return,
             _ => {
                 if !crate::cst::element_arrow_deref(innermost, self.source) {
                     return;
@@ -314,15 +314,15 @@ impl<'a> Builder<'a> {
     /// computed one (`AnyKey` / `AnyIndex`); with the key node's span.
     fn write_key_of(&self, elem: Node<'a>) -> (crate::model::file_analysis::WriteKey, Span) {
         use crate::model::file_analysis::WriteKey;
-        let (field, key) = if elem.kind() == "array_element_expression" {
-            let idx = elem.child_by_field_name("index");
+        let (field, key) = if elem.is(Kind::ArrayElementExpression) {
+            let idx = elem.field(Field::Index);
             let key = idx
                 .and_then(|i| i.utf8_text(self.source).ok())
                 .and_then(|t| t.parse::<i32>().ok())
                 .map_or(WriteKey::AnyIndex, WriteKey::Index);
             (idx, key)
         } else {
-            let k = elem.child_by_field_name("key");
+            let k = elem.field(Field::Key);
             let key = k
                 .and_then(|k| self.extract_key_text(k))
                 .and_then(|(t, dynamic)| (!dynamic).then_some(t))
@@ -334,11 +334,11 @@ impl<'a> Builder<'a> {
 
     pub(super) fn determine_access(&self, node: Node<'a>) -> AccessKind {
         if let Some(parent) = self.syntax.parent(node) {
-            match parent.kind() {
-                "variable_declaration" => return AccessKind::Declaration,
-                "assignment_expression" => {
+            match parent.kind_of() {
+                Kind::VariableDeclaration => return AccessKind::Declaration,
+                Kind::AssignmentExpression => {
                     // Check if we're on the left side
-                    if let Some(left) = parent.child_by_field_name("left") {
+                    if let Some(left) = parent.field(Field::Left) {
                         if node.start_byte() >= left.start_byte()
                             && node.end_byte() <= left.end_byte()
                         {
@@ -350,8 +350,8 @@ impl<'a> Builder<'a> {
             }
             // Check grandparent for assignment
             if let Some(grandparent) = self.syntax.parent(parent) {
-                if grandparent.kind() == "assignment_expression" {
-                    if let Some(left) = grandparent.child_by_field_name("left") {
+                if grandparent.is(Kind::AssignmentExpression) {
+                    if let Some(left) = grandparent.field(Field::Left) {
                         if node.start_byte() >= left.start_byte()
                             && node.end_byte() <= left.end_byte()
                         {
@@ -399,9 +399,9 @@ impl<'a> Builder<'a> {
         // method-call path: try constant folding to recover the concrete
         // sub name; fall through to None when the variable isn't a known
         // compile-time constant.
-        match node.kind() {
-            "ambiguous_function_call_expression" if self.indirect_method_call(node).is_some() => None,
-            "function_call_expression" | "ambiguous_function_call_expression" => {
+        match node.kind_of() {
+            Kind::AmbiguousFunctionCallExpression if self.indirect_method_call(node).is_some() => None,
+            Kind::FunctionCallExpression | Kind::AmbiguousFunctionCallExpression => {
                 let name = crate::cst::extract_call_name(node, self.source)?;
                 if let Some(stripped) = name.strip_prefix('&') {
                     // `&$fn()` syntax — same deal.
@@ -434,15 +434,14 @@ impl<'a> Builder<'a> {
         // `my ($a, $b)` is a `variable_declaration` with one `variables`
         // FIELD PER scalar (not a single list node); a bare `($a, $b)` LHS is
         // a grouping container whose scalars `list_elements` splices out.
-        let mut cursor = lhs.walk();
-        let elems: Vec<Node<'a>> = match (crate::cst::literal_shape(lhs), lhs.kind()) {
-            (None, "variable_declaration") => lhs.children_by_field_name("variables", &mut cursor).collect(),
+        let elems: Vec<Node<'a>> = match (crate::cst::literal_shape(lhs), lhs.kind_of()) {
+            (None, Kind::VariableDeclaration) => lhs.fields(Field::Variables),
             (Some(LiteralShape::List), _) => crate::cst::list_elements(lhs),
             _ => Vec::new(),
         };
         elems
             .into_iter()
-            .filter(|c| c.kind() == "scalar")
+            .filter(|c| c.is(Kind::Scalar))
             .filter_map(|c| c.utf8_text(self.source).ok().map(str::to_string))
             .collect()
     }
@@ -467,8 +466,8 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn get_var_text_from_lhs(&self, lhs: Node<'a>) -> Option<String> {
-        if lhs.kind() == "variable_declaration" {
-            if let Some(var) = lhs.child_by_field_name("variable") {
+        if lhs.is(Kind::VariableDeclaration) {
+            if let Some(var) = lhs.field(Field::Variable) {
                 return var.utf8_text(self.source).ok().map(|s| s.to_string());
             }
             // A paren list (`my ($x) = ...`, the `variables` field) binds in
@@ -477,11 +476,11 @@ impl<'a> Builder<'a> {
             // RHS.
             return None;
         }
-        if matches!(lhs.kind(), "scalar" | "array" | "hash") {
+        if matches!(lhs.kind_of(), Kind::Scalar | Kind::Array | Kind::Hash) {
             return lhs.utf8_text(self.source).ok().map(|s| s.to_string());
         }
         // `local $x = …` assigns the variable it localizes.
-        if lhs.kind() == "localization_expression" {
+        if lhs.is(Kind::LocalizationExpression) {
             let mut named = crate::cst::NodeExt::named(&lhs);
             if let (Some(var), None) = (named.next(), named.next()) {
                 return self.get_var_text_from_lhs(var);
@@ -518,15 +517,14 @@ impl<'a> Builder<'a> {
         use crate::model::file_analysis::Extraction;
         // `my ($a, $b)` (variable_declaration) OR a bare `($a, $b) = …`
         // reassignment (a grouping container LHS — no `my`).
-        let elems: Vec<Node<'a>> = match (crate::cst::literal_shape(lhs), lhs.kind()) {
+        let elems: Vec<Node<'a>> = match (crate::cst::literal_shape(lhs), lhs.kind_of()) {
             // A single `my $x` uses the `variable` field; a list `my ($a, $b)`
             // uses the (repeated) `variables` field. The former is not a list.
-            (None, "variable_declaration") => {
-                if lhs.child_by_field_name("variable").is_some() {
+            (None, Kind::VariableDeclaration) => {
+                if lhs.field(Field::Variable).is_some() {
                     return None;
                 }
-                let mut cursor = lhs.walk();
-                lhs.children_by_field_name("variables", &mut cursor).collect()
+                lhs.fields(Field::Variables)
             }
             (Some(LiteralShape::List), _) => crate::cst::list_elements(lhs),
             _ => return None,
@@ -534,9 +532,9 @@ impl<'a> Builder<'a> {
         let mut out = Vec::new();
         let mut slurped = false;
         for (pos, child) in elems.into_iter().enumerate() {
-            match child.kind() {
-                "scalar" | "array" | "hash" => {
-                    let slurpy = child.kind() != "scalar";
+            match child.kind_of() {
+                Kind::Scalar | Kind::Array | Kind::Hash => {
+                    let slurpy = !child.is(Kind::Scalar);
                     let extraction =
                         if slurpy { Extraction::Slurpy(pos) } else { Extraction::Positional(pos) };
                     if let Ok(t) = child.utf8_text(self.source) {
@@ -544,12 +542,12 @@ impl<'a> Builder<'a> {
                     }
                     slurped |= slurpy;
                 }
-                "hash_element_expression" | "array_element_expression" => {
+                Kind::HashElementExpression | Kind::ArrayElementExpression => {
                     out.push(ListSlot::Element(child, (!slurped).then_some(pos)));
                 }
-                "variable_declaration" => {
-                    let inner = child.child_by_field_name("variable");
-                    slurped |= inner.is_some_and(|v| matches!(v.kind(), "array" | "hash"));
+                Kind::VariableDeclaration => {
+                    let inner = child.field(Field::Variable);
+                    slurped |= inner.is_some_and(|v| matches!(v.kind_of(), Kind::Array | Kind::Hash));
                 }
                 _ => {}
             }
@@ -573,7 +571,7 @@ impl<'a> Builder<'a> {
         // hash_element_expression: first named child is the container variable
         for i in 0..node.named_child_count() {
             if let Some(child) = node.named_child(i) {
-                if matches!(child.kind(), "container_variable" | "keyval_container_variable" | "scalar" | "hash") {
+                if matches!(child.kind_of(), Kind::ContainerVariable | Kind::KeyvalContainerVariable | Kind::Scalar | Kind::Hash) {
                     return child.utf8_text(self.source).ok().map(|s| s.to_string());
                 }
             }
@@ -582,13 +580,13 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn extract_key_text(&self, key_node: Node<'a>) -> Option<(String, bool)> {
-        match key_node.kind() {
-            "autoquoted_bareword" => {
+        match key_node.kind_of() {
+            Kind::AutoquotedBareword => {
                 key_node.utf8_text(self.source).ok().map(|s| (s.to_string(), false))
             }
-            "string_literal" | "interpolated_string_literal" => {
+            Kind::StringLiteral | Kind::InterpolatedStringLiteral => {
                 let inner = crate::cst::string_content_text(key_node, self.source).unwrap_or_default();
-                let is_dynamic = key_node.kind() == "interpolated_string_literal"
+                let is_dynamic = key_node.is(Kind::InterpolatedStringLiteral)
                     && (inner.contains('$') || inner.contains('@'));
                 Some((inner, is_dynamic))
             }
@@ -622,7 +620,7 @@ impl<'a> Builder<'a> {
                 }
             }
             // Check if this is inside a return expression of a sub
-            if ancestor.kind() == "return_expression" {
+            if ancestor.is(Kind::ReturnExpression) {
                 if let Some(name) = self.enclosing_sub_name() {
                     return Some(HashKeyOwner::Sub {
                         package: self.current_package.clone(),
@@ -631,7 +629,7 @@ impl<'a> Builder<'a> {
                 }
             }
             // Check if this is the last expression in a sub body (implicit return)
-            if ancestor.kind() == "expression_statement" {
+            if ancestor.is(Kind::ExpressionStatement) {
                 if self.is_last_statement_in_sub(ancestor) {
                     if let Some(name) = self.enclosing_sub_name() {
                         return Some(HashKeyOwner::Sub {
@@ -671,8 +669,8 @@ impl<'a> Builder<'a> {
     pub(super) fn emit_lexical_hash_literal_keys(&mut self, hash_name: &str, rhs: Node<'a>) {
         for (key_node, _value) in crate::cst::pair_nodes(rhs) {
             if !matches!(
-                key_node.kind(),
-                "bareword" | "autoquoted_bareword" | "string_literal" | "interpolated_string_literal"
+                key_node.kind_of(),
+                Kind::Bareword | Kind::AutoquotedBareword | Kind::StringLiteral | Kind::InterpolatedStringLiteral
             ) {
                 continue;
             }
@@ -680,7 +678,7 @@ impl<'a> Builder<'a> {
             if is_dynamic {
                 continue;
             }
-            let span = if matches!(key_node.kind(), "string_literal" | "interpolated_string_literal") {
+            let span = if matches!(key_node.kind_of(), Kind::StringLiteral | Kind::InterpolatedStringLiteral) {
                 crate::cst::string_content_span(key_node)
             } else {
                 node_to_span(key_node)
@@ -714,19 +712,19 @@ impl<'a> Builder<'a> {
         // `\%attrs` hash (`order_by`/`rows`/…) must never be mistaken for it
         // (picking "first hash among args" would walk it).
         if matches!(gate, Gate::ColumnKeyed(_)) {
-            let arg0 = if effective.kind() == "anonymous_hash_expression" {
+            let arg0 = if effective.is(Kind::AnonymousHashExpression) {
                 Some(effective)
             } else {
                 crate::cst::nth_element(effective, 0)
             };
             match arg0 {
                 // Hashref cond/cols (`search({…})`, `create({…})`): narrow to it.
-                Some(h) if h.kind() == "anonymous_hash_expression" => effective = h,
+                Some(h) if h.is(Kind::AnonymousHashExpression) => effective = h,
                 // Flat constructor pairs (`new(name => 1)`): arg 0 is a stringy
                 // key — walk the top-level pair list (effective unchanged).
                 Some(k) if matches!(
-                    k.kind(),
-                    "bareword" | "autoquoted_bareword" | "string_literal" | "interpolated_string_literal"
+                    k.kind_of(),
+                    Kind::Bareword | Kind::AutoquotedBareword | Kind::StringLiteral | Kind::InterpolatedStringLiteral
                 ) => {}
                 // A positional non-key first arg (`search($cond, \%attrs)`): the
                 // cond is a prebuilt ref with no inline keys, and the trailing
@@ -741,8 +739,8 @@ impl<'a> Builder<'a> {
         // every key is walked. (CLAUDE.md: don't re-derive pair-walking.)
         for (child, _value) in crate::cst::pair_nodes(effective) {
             if !matches!(
-                child.kind(),
-                "bareword" | "autoquoted_bareword" | "string_literal" | "interpolated_string_literal"
+                child.kind_of(),
+                Kind::Bareword | Kind::AutoquotedBareword | Kind::StringLiteral | Kind::InterpolatedStringLiteral
             ) {
                 continue;
             }
@@ -803,8 +801,8 @@ impl<'a> Builder<'a> {
             // whole literal — rewriting the quotes turns it into a bareword
             // (`{ fullname, 2 }`), a `strict subs` error in a plain-comma list.
             let span = if matches!(
-                child.kind(),
-                "string_literal" | "interpolated_string_literal"
+                child.kind_of(),
+                Kind::StringLiteral | Kind::InterpolatedStringLiteral
             ) {
                 crate::cst::string_content_span(child)
             } else {
@@ -850,8 +848,8 @@ impl<'a> Builder<'a> {
         let mut defs: Vec<(String, Span)> = Vec::new();
         for (k_node, _val) in crate::cst::pair_nodes(node) {
             if matches!(
-                k_node.kind(),
-                "autoquoted_bareword" | "string_literal" | "interpolated_string_literal"
+                k_node.kind_of(),
+                Kind::AutoquotedBareword | Kind::StringLiteral | Kind::InterpolatedStringLiteral
             ) {
                 if let Some((key, is_dynamic)) = self.extract_key_text(k_node) {
                     if !is_dynamic {
@@ -900,13 +898,13 @@ impl<'a> Builder<'a> {
             None => return false,
         };
         // The parent should be a block that is a sub/method body
-        if parent.kind() != "block" {
+        if !parent.is(Kind::Block) {
             return false;
         }
         if let Some(grandparent) = self.syntax.parent(parent) {
-            if !matches!(grandparent.kind(),
-                "subroutine_declaration_statement" | "method_declaration_statement"
-                | "anonymous_subroutine_expression"
+            if !matches!(grandparent.kind_of(),
+                Kind::SubroutineDeclarationStatement | Kind::MethodDeclarationStatement
+                | Kind::AnonymousSubroutineExpression
             ) {
                 return false;
             }
