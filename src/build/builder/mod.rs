@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use tree_sitter::{Node, Point, Tree};
 
+pub(super) use crate::cst::{Field, Kind, NodeExt};
 use crate::cst::{fq_tail_span, node_to_span};
 use crate::model::file_analysis::*;
 use crate::model::witnesses::TypeObservation;
@@ -135,10 +136,6 @@ struct CallSite<'a> {
 /// Every call site the walk minted, as facts on the main tree.
 type CallSites<'a> = crate::cst::NodeFacts<CallSite<'a>>;
 
-/// The Perl grammar's kind ids for `names`; callers cache them in a static.
-fn perl_kind_ids(names: &[&str]) -> Vec<u16> {
-    crate::cst::kind_ids(&ts_parser_perl::LANGUAGE.into(), names)
-}
 
 /// Which chain-typing tasks the reducer should apply on this call.
 ///

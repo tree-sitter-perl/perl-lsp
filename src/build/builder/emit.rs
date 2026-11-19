@@ -189,21 +189,21 @@ impl<'a> Builder<'a> {
                 names: None,
             }));
         }
-        match node.kind() {
+        match node.kind_of() {
             // Closed-under-syntax — bake.
-            "string_literal" | "interpolated_string_literal" => {
+            Kind::StringLiteral | Kind::InterpolatedStringLiteral => {
                 Some(WitnessPayload::InferredType(InferredType::String))
             }
-            "number" => Some(WitnessPayload::InferredType(InferredType::Numeric)),
-            "anonymous_hash_expression" => {
+            Kind::Number => Some(WitnessPayload::InferredType(InferredType::Numeric)),
+            Kind::AnonymousHashExpression => {
                 Some(WitnessPayload::InferredType(self.hash_literal_type(node)))
             }
             // Drill expressions edge to their base with a projection step,
             // so `$config->{db}` resolves at QUERY time through whatever the
             // base materializes to — including an imported literal's
             // structural type the build-time chain pass can't see.
-            "hash_element_expression" => {
-                let key_node = node.child_by_field_name("key")?;
+            Kind::HashElementExpression => {
+                let key_node = node.field(Field::Key)?;
                 let (key, is_dynamic) = self.extract_key_text(key_node)?;
                 if is_dynamic {
                     return None;
@@ -212,7 +212,7 @@ impl<'a> Builder<'a> {
                 // subject is `%h`, not scalar `$h`; project off the
                 // hash variable's own attachment (the registry scope-
                 // walks Variable bases the same as Edge(Variable)).
-                if let Some(container) = node.child_by_field_name("hash") {
+                if let Some(container) = node.field(Field::Hash) {
                     let name =
                         crate::cst::canonical_container_name(self.syntax, container, self.source)?;
                     let scope = self.scope_stack.last().copied()
@@ -231,9 +231,9 @@ impl<'a> Builder<'a> {
             }
             // Arrow-deref element only (`$x->[0]`); the container form
             // `$arr[N]` keeps its variable-keyed handling.
-            "array_element_expression" if node.child_by_field_name("array").is_none() => {
+            Kind::ArrayElementExpression if node.field(Field::Array).is_none() => {
                 let base = node.named_child(0)?;
-                let idx_node = node.child_by_field_name("index")?;
+                let idx_node = node.field(Field::Index)?;
                 let idx: i32 = idx_node.utf8_text(self.source).ok()?.parse().ok()?;
                 self.emit_expr_witness(base);
                 Some(WitnessPayload::Projected {
@@ -241,7 +241,7 @@ impl<'a> Builder<'a> {
                     step: crate::model::witnesses::ProjectionStep::ArrayIndex(idx),
                 })
             }
-            "anonymous_array_expression" => {
+            Kind::AnonymousArrayExpression => {
                 Some(WitnessPayload::InferredType(self.array_literal_type(node)))
             }
             // A paren list in value position (`return ($a, $b)`) is a
@@ -250,21 +250,21 @@ impl<'a> Builder<'a> {
             // parens are their own node, so the same tuple arrives either
             // spelling; a group around ONE non-list value is transparent
             // and carries that value's type through an edge.
-            "list_expression" => self.list_literal_type(node).map(WitnessPayload::InferredType),
-            "parenthesized_expression" => {
+            Kind::ListExpression => self.list_literal_type(node).map(WitnessPayload::InferredType),
+            Kind::ParenthesizedExpression => {
                 let named: Vec<Node<'a>> = crate::cst::NodeExt::named(&node).collect();
                 match named.as_slice() {
-                    [only] if only.kind() != "list_expression" => {
+                    [only] if !only.is(Kind::ListExpression) => {
                         self.emit_expr_witness(*only);
                         Some(WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(*only))))
                     }
                     _ => self.list_literal_type(node).map(WitnessPayload::InferredType),
                 }
             }
-            "quoted_regexp" => Some(WitnessPayload::InferredType(InferredType::Regexp)),
+            Kind::QuotedRegexp => Some(WitnessPayload::InferredType(InferredType::Regexp)),
             // `\%h` / `\@a` take a container's reference; only `\&name` is
             // code. A `\$x` or `\(...)` is a scalar ref nothing models.
-            "refgen_expression" => match crate::cst::refgen_operand(node) {
+            Kind::RefgenExpression => match crate::cst::refgen_operand(node) {
                 Some(crate::cst::RefgenOperand::Code) => {
                     let return_edge = self.coderef_return_edge_for(node);
                     Some(WitnessPayload::InferredType(InferredType::CodeRef { return_edge }))
@@ -273,7 +273,7 @@ impl<'a> Builder<'a> {
                 Some(crate::cst::RefgenOperand::Array) => Some(WitnessPayload::InferredType(InferredType::ArrayRef)),
                 _ => None,
             },
-            "anonymous_subroutine_expression" => {
+            Kind::AnonymousSubroutineExpression => {
                 // Pre-create the (anon) Symbol so
                 // `coderef_return_edge_for`'s anon-sub arm resolves
                 // to `Symbol(sym_id)` instead of falling back to
@@ -299,15 +299,15 @@ impl<'a> Builder<'a> {
                 step: crate::model::witnesses::ProjectionStep::ArrayIndex(0),
             }),
 
-            "binary_expression"
-            | "equality_expression"
-            | "relational_expression"
-            | "logical_not_expression"
-            | "unary_expression"
-            | "postinc_expression"
-            | "preinc_expression"
-            | "func0op_call_expression"
-            | "func1op_call_expression" => self
+            Kind::BinaryExpression
+            | Kind::EqualityExpression
+            | Kind::RelationalExpression
+            | Kind::LogicalNotExpression
+            | Kind::UnaryExpression
+            | Kind::PostincExpression
+            | Kind::PreincExpression
+            | Kind::Func0opCallExpression
+            | Kind::Func1opCallExpression => self
                 .infer_expression_result_type(node)
                 .map(WitnessPayload::InferredType),
 
@@ -316,7 +316,7 @@ impl<'a> Builder<'a> {
             // (scope-walking + framework-aware fold). Arrays/hashes edge the
             // same way (sigil kept), so `my ($x,$y) = @arr` can chase `@arr`
             // to its `Sequence` and `element_at`.
-            "scalar" | "array" | "hash" => {
+            Kind::Scalar | Kind::Array | Kind::Hash => {
                 let name = node.utf8_text(self.source).ok()?;
                 Some(WitnessPayload::Edge(WitnessAttachment::Variable {
                     name: name.to_string(),
@@ -334,7 +334,7 @@ impl<'a> Builder<'a> {
             // `emit_method_call_return_edges` re-emits
             // `Edge(Member{package, method})` there once
             // `invocant_class` is filled, so the chase resolves through.
-            "method_call_expression" => {
+            Kind::MethodCallExpression => {
                 if let Some(class) = self.extract_constructor_class(node) {
                     return Some(WitnessPayload::InferredType(InferredType::ClassName(class)));
                 }
@@ -348,7 +348,7 @@ impl<'a> Builder<'a> {
                 // `$obj->$cb(…)`: call whatever `$cb` holds, on `$obj`.
                 if let Some(cb) = crate::cst::dynamic_method_scalar(node) {
                     self.emit_expr_witness(cb);
-                    let receiver = node.child_by_field_name("invocant").map(|inv| {
+                    let receiver = node.field(Field::Invocant).map(|inv| {
                         self.emit_invocant_witness(inv);
                         WitnessAttachment::Expr(node_to_span(inv))
                     });
@@ -384,7 +384,7 @@ impl<'a> Builder<'a> {
             // through) when the class isn't determinable.
             // `new Foo(...)` read as `Foo->new(...)`: a constructor bakes
             // like `Foo->new`; any other method is the call's `Invoke`.
-            "ambiguous_function_call_expression" if self.indirect_method_call(node).is_some() => {
+            Kind::AmbiguousFunctionCallExpression if self.indirect_method_call(node).is_some() => {
                 let io = self.indirect_method_call(node)?;
                 let method = io.method.utf8_text(self.source).ok()?;
                 if crate::model::conventions::is_constructor_name(method) {
@@ -395,7 +395,7 @@ impl<'a> Builder<'a> {
                 Some(WitnessPayload::Edge(WitnessAttachment::Expression(RefIdx(idx as u32))))
             }
 
-            "function_call_expression" | "ambiguous_function_call_expression"
+            Kind::FunctionCallExpression | Kind::AmbiguousFunctionCallExpression
                 if self.is_bless_call(node) =>
             {
                 let args = self.extract_call_args(node);
@@ -428,10 +428,9 @@ impl<'a> Builder<'a> {
                 }
             }
 
-            "function_call_expression"
-            | "ambiguous_function_call_expression"
-            | "bareword"
-            | "scoped_identifier" => {
+            Kind::FunctionCallExpression
+            | Kind::AmbiguousFunctionCallExpression
+            | Kind::Bareword => {
                 let called = self.forward_callee_name(node)?;
                 // The constraint-name table keys on the bare name; the symbol
                 // lookup below gets the qualified spelling, which is the half
@@ -465,10 +464,10 @@ impl<'a> Builder<'a> {
             // `$_[N]` reads `@_`'s argument window as the shifts before it
             // left it. `$_[0]`'s call-site receiver rides a second witness
             // (`emit_expr_witness_inner`).
-            "array_element_expression" => {
-                let container = node.child_by_field_name("array")?;
+            Kind::ArrayElementExpression => {
+                let container = node.field(Field::Array)?;
                 let idx: i32 =
-                    node.child_by_field_name("index")?.utf8_text(self.source).ok()?.parse().ok()?;
+                    node.field(Field::Index)?.utf8_text(self.source).ok()?.parse().ok()?;
                 let name = crate::cst::canonical_container_name(self.syntax, container, self.source)?;
                 Some(WitnessPayload::Projected {
                     base: WitnessAttachment::Variable {
@@ -487,9 +486,9 @@ impl<'a> Builder<'a> {
             // is a count, and the list type is `@flow`'s business.
             // TODO(falsy-part): `&&=` is the false old value ⊔ the RHS; it
             // types as the RHS until a value's false part has a type.
-            "assignment_expression" => match crate::cst::assign_op(node)? {
+            Kind::AssignmentExpression => match crate::cst::assign_op(node)? {
                 crate::cst::AssignOp::Plain | crate::cst::AssignOp::AndThen => {
-                    let left = node.child_by_field_name("left")?;
+                    let left = node.field(Field::Left)?;
                     if self.lhs_list_targets(left).is_some()
                         || self
                             .get_var_text_from_lhs(left)
@@ -497,7 +496,7 @@ impl<'a> Builder<'a> {
                     {
                         return None;
                     }
-                    let rhs = node.child_by_field_name("right")?;
+                    let rhs = node.field(Field::Right)?;
                     self.emit_expr_witness(rhs);
                     Some(WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(rhs))))
                 }
@@ -520,8 +519,8 @@ impl<'a> Builder<'a> {
                         b.emit_expr_witness(n);
                         b.bag_query_expr_span(node_to_span(n)).is_some_and(|t| t.is_string())
                     };
-                    let left = node.child_by_field_name("left")?;
-                    let right = node.child_by_field_name("right")?;
+                    let left = node.field(Field::Left)?;
+                    let right = node.field(Field::Right)?;
                     if is_string(self, left) && is_string(self, right) {
                         None
                     } else {
@@ -532,7 +531,7 @@ impl<'a> Builder<'a> {
             },
 
             // `$cb->(…)`: call whatever the operand holds.
-            "coderef_call_expression" => {
+            Kind::CoderefCallExpression => {
                 let operand = node.named_child(0)?;
                 self.emit_expr_witness(operand);
                 let args = self.extract_call_args(node);
@@ -548,7 +547,7 @@ impl<'a> Builder<'a> {
             // Ternary — Edge to its own Expr(span). The per-arm
             // `branch_arm`-source witnesses live on that attachment;
             // the registry's edge chase + BranchArmFold agree them.
-            "conditional_expression" => Some(WitnessPayload::Edge(WitnessAttachment::Expr(
+            Kind::ConditionalExpression => Some(WitnessPayload::Edge(WitnessAttachment::Expr(
                 node_to_span(node),
             ))),
 
@@ -572,12 +571,12 @@ impl<'a> Builder<'a> {
     pub(super) fn emit_invocant_witness(&mut self, inv: Node<'a>) {
         let span = node_to_span(inv);
         let text = inv.utf8_text(self.source).unwrap_or("");
-        match inv.kind() {
-            "bareword" | "package" => {
+        match inv.kind_of() {
+            Kind::Bareword | Kind::Package => {
                 self.push_invocant_class(span, text.to_string());
                 self.emit_expr_witness(inv);
             }
-            "scalar" => {
+            Kind::Scalar => {
                 self.emit_expr_witness(inv);
                 let key = crate::cst::canonical_var_name(inv, self.source);
                 if let Some([class]) = self.resolve_constant_strings(key.as_deref().unwrap_or(text), inv).as_deref() {
@@ -756,8 +755,8 @@ impl<'a> Builder<'a> {
     /// no sub, so no `Invoke` reaches it; the table is its one home.
     pub(super) fn push_builtin_ends(&mut self, node: Node<'a>) {
         use crate::model::witnesses::{Effect, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        let name = match node.kind() {
-            "func1op_call_expression" | "func0op_call_expression" | "function" => self.builtin_call_name(node),
+        let name = match node.kind_of() {
+            Kind::Func1opCallExpression | Kind::Func0opCallExpression | Kind::Function => self.builtin_call_name(node),
             _ => self.forward_callee_name(node),
         };
         let Some(ends) = name.as_deref().and_then(crate::model::builtins::builtin_ends) else { return };
@@ -773,7 +772,7 @@ impl<'a> Builder<'a> {
     /// The builtin a bare-word call (`die;`, `exit 1`) names: its operator
     /// token, which the grammar gives no field.
     pub(super) fn builtin_call_name(&self, node: Node<'a>) -> Option<String> {
-        let token = if node.kind() == "function" { Some(node) } else { node.child(0) };
+        let token = if node.is(Kind::Function) { Some(node) } else { node.child(0) };
         token.and_then(|n| n.utf8_text(self.source).ok()).map(|t| t.trim().to_string())
     }
 
@@ -782,7 +781,7 @@ impl<'a> Builder<'a> {
         // not drills: their keys extend the shape
         // (`emit_mutation_extension_witnesses`) instead of being read out of
         // it — unless the write reads the element first (`ElementWrite`).
-        if matches!(node.kind(), "hash_element_expression" | "array_element_expression")
+        if matches!(node.kind_of(), Kind::HashElementExpression | Kind::ArrayElementExpression)
             && (self.on_write_path(node)
                 || self.element_write_kind(node).is_some_and(|w| !w.reads_element()))
         {
@@ -800,20 +799,20 @@ impl<'a> Builder<'a> {
     fn emit_expr_witness_inner(&mut self, node: Node<'a>) {
         use crate::model::witnesses::{tags, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let span = node_to_span(node);
-        if node.kind() == "conditional_expression" {
+        if node.is(Kind::ConditionalExpression) {
             let arm_att = WitnessAttachment::BranchArm(span);
             let arms = [
-                node.child_by_field_name("consequent"),
-                node.child_by_field_name("alternative"),
+                node.field(Field::Consequent),
+                node.field(Field::Alternative),
             ];
             for arm in arms.into_iter().flatten() {
                 // `undef` and the empty list `()` (a `stub_expression`,
                 // which coerces to undef in scalar context) make the ternary
                 // optional; mark either like a `return undef` arm so
                 // `BranchArmFold` lifts `{T, undef}` to `Optional<T>`.
-                let arm_undef = match arm.kind() {
-                    "undef_expression" => Some(tags::UndefArm::Scalar),
-                    "stub_expression" => Some(tags::UndefArm::EmptyList),
+                let arm_undef = match arm.kind_of() {
+                    Kind::UndefExpression => Some(tags::UndefArm::Scalar),
+                    Kind::StubExpression => Some(tags::UndefArm::EmptyList),
                     _ => None,
                 };
                 if let Some(spelling) = arm_undef {
@@ -857,15 +856,15 @@ impl<'a> Builder<'a> {
         // literal is a definedness fallback, not a type claim. Folding it to
         // the literal poisons downstream narrowed uses (`return $x if
         // $x->isa(...)`). Leave it untyped so the param stays open.
-        let fallback_operands = if node.kind() == "binary_expression"
+        let fallback_operands = if node.is(Kind::BinaryExpression)
             && matches!(self.get_operator_text(node).as_deref(), Some("||") | Some("//"))
         {
-            node.child_by_field_name("left")
+            node.field(Field::Left)
                 .filter(|lhs| !self.is_param_pull(*lhs))
-                .zip(node.child_by_field_name("right"))
+                .zip(node.field(Field::Right))
         } else if crate::cst::assign_op(node) == Some(crate::cst::AssignOp::Fallback) {
             // `LHS ||= RHS` is `LHS = LHS || RHS`: the same two arms.
-            node.child_by_field_name("left").zip(node.child_by_field_name("right"))
+            node.field(Field::Left).zip(node.field(Field::Right))
         } else {
             None
         };
@@ -1009,7 +1008,7 @@ impl<'a> Builder<'a> {
     /// exporters at query time. A qualified call (`Foo::bar()`) names its
     /// package, which no exporter lookup asks, and a builtin is not a sub.
     fn imported_call_payload(&mut self, node: Node<'a>) -> Option<crate::model::witnesses::WitnessPayload> {
-        if !matches!(node.kind(), "function_call_expression" | "ambiguous_function_call_expression")
+        if !matches!(node.kind_of(), Kind::FunctionCallExpression | Kind::AmbiguousFunctionCallExpression)
             || self.is_bless_call(node)
             || self.indirect_method_call(node).is_some()
         {
@@ -1032,11 +1031,11 @@ impl<'a> Builder<'a> {
     /// calls this for the live lookup, and `find_callee_symbol` is what
     /// decides whether the qualifier admits a local sub.
     pub(super) fn forward_callee_name(&self, node: Node<'a>) -> Option<String> {
-        let raw = match node.kind() {
-            "function_call_expression" | "ambiguous_function_call_expression" => {
-                node.child_by_field_name("function")?.utf8_text(self.source).ok()?
+        let raw = match node.kind_of() {
+            Kind::FunctionCallExpression | Kind::AmbiguousFunctionCallExpression => {
+                node.field(Field::Function)?.utf8_text(self.source).ok()?
             }
-            "bareword" | "scoped_identifier" => node.utf8_text(self.source).ok()?,
+            Kind::Bareword => node.utf8_text(self.source).ok()?,
             _ => return None,
         };
         Some(raw.to_string())
@@ -1102,9 +1101,9 @@ impl<'a> Builder<'a> {
         // `return undef`.
         let undef_arm = match body {
             None => Some(tags::UndefArm::EmptyList),
-            Some(b) => match b.kind() {
-                "undef_expression" => Some(tags::UndefArm::Scalar),
-                "stub_expression" => Some(tags::UndefArm::EmptyList),
+            Some(b) => match b.kind_of() {
+                Kind::UndefExpression => Some(tags::UndefArm::Scalar),
+                Kind::StubExpression => Some(tags::UndefArm::EmptyList),
                 _ => None,
             },
         };
@@ -1158,13 +1157,13 @@ impl<'a> Builder<'a> {
     /// into the nested anon-sub's body if the bag's CodeRef shape
     /// doesn't unwrap on its own.
     pub(super) fn infer_anonymous_sub_return_type(&mut self, node: Node<'a>) -> Option<InferredType> {
-        if node.kind() != "anonymous_subroutine_expression" {
+        if !node.is(Kind::AnonymousSubroutineExpression) {
             return None;
         }
-        let body = node.child_by_field_name("body")?;
+        let body = node.field(Field::Body)?;
         let last_stmt = crate::cst::last_element(body)?;
-        let expr = match last_stmt.kind() {
-            "expression_statement" | "return_expression" => crate::cst::nth_element(last_stmt, 0)?,
+        let expr = match last_stmt.kind_of() {
+            Kind::ExpressionStatement | Kind::ReturnExpression => crate::cst::nth_element(last_stmt, 0)?,
             _ => last_stmt,
         };
         self.emit_expr_witness(expr);
@@ -1174,7 +1173,7 @@ impl<'a> Builder<'a> {
 
     /// Push a type constraint on a variable node if it's a scalar.
     pub(super) fn push_var_type_constraint(&mut self, var_node: Node<'a>, context_node: Node<'a>, inferred_type: InferredType) {
-        if var_node.kind() == "scalar" {
+        if var_node.is(Kind::Scalar) {
             if let Ok(text) = var_node.utf8_text(self.source) {
                 self.push_type_constraint(TypeConstraint {
                     variable: text.to_string(),
@@ -1189,7 +1188,7 @@ impl<'a> Builder<'a> {
     /// The class a compile-time token operand names (`__PACKAGE__`), read
     /// off the token's own type so no consumer spells it.
     pub(super) fn token_class(&self, node: Node<'a>) -> Option<String> {
-        if node.kind() != "func0op_call_expression" {
+        if !node.is(Kind::Func0opCallExpression) {
             return None;
         }
         match self.infer_expression_result_type(node)? {
@@ -1204,15 +1203,15 @@ impl<'a> Builder<'a> {
         let Some(cur) = self.current_package.as_deref() else { return false };
         match self.token_class(node) {
             Some(c) => c == cur,
-            None => node.kind() == "package" && node.utf8_text(self.source).ok() == Some(cur),
+            None => node.is(Kind::Package) && node.utf8_text(self.source).ok() == Some(cur),
         }
     }
 
     /// Infer the result type of an expression (not its operands — those are handled elsewhere).
     /// e.g. `$a + $b` produces Numeric, `$a . $b` produces String.
     pub(super) fn infer_expression_result_type(&self, node: Node<'a>) -> Option<InferredType> {
-        match node.kind() {
-            "binary_expression" => {
+        match node.kind_of() {
+            Kind::BinaryExpression => {
                 let op = self.get_operator_text(node);
                 match op.as_deref() {
                     Some("+" | "-" | "*" | "/" | "%" | "**") => Some(InferredType::Numeric),
@@ -1224,7 +1223,7 @@ impl<'a> Builder<'a> {
             // `<=>` / `cmp` (which the grammar files under equality) — those
             // return -1/0/1, a number. `eq`/`ne` sort under equality too;
             // `lt`/`gt`/… under relational.
-            "equality_expression" | "relational_expression" => {
+            Kind::EqualityExpression | Kind::RelationalExpression => {
                 match self.get_operator_text(node).as_deref() {
                     Some("<=>" | "cmp") => Some(InferredType::Numeric),
                     Some(_) => Some(InferredType::Bool),
@@ -1234,13 +1233,13 @@ impl<'a> Builder<'a> {
             // `!$x` / `!!$x` is the boolify idiom; `not $x` its low-prec
             // spelling. `-$x` / `+$x` / `\$x` are also `unary_expression`,
             // so gate on the operator.
-            "logical_not_expression" => Some(InferredType::Bool),
-            "unary_expression" => match self.get_operator_text(node).as_deref() {
+            Kind::LogicalNotExpression => Some(InferredType::Bool),
+            Kind::UnaryExpression => match self.get_operator_text(node).as_deref() {
                 Some("!") => Some(InferredType::Bool),
                 _ => None,
             },
-            "postinc_expression" | "preinc_expression" => Some(InferredType::Numeric),
-            "func1op_call_expression" | "func0op_call_expression" => {
+            Kind::PostincExpression | Kind::PreincExpression => Some(InferredType::Numeric),
+            Kind::Func1opCallExpression | Kind::Func0opCallExpression => {
                 let name = node.child(0)?.utf8_text(self.source).ok()?;
                 use crate::model::conventions::CompileTimeToken;
                 match CompileTimeToken::parse(name) {
