@@ -205,7 +205,9 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
             }
             if let Ask::File(path) = &ask {
                 crate::util::ghost_stats::count("resolver.file_landed");
-                let (whole, stored) = land_file(&core, db.as_ref(), &map, map_gen, path, &mut parse, strip);
+                let (whole, stored) = crate::util::ghost_stats::timed("resolver.land", || {
+                    land_file(&core, db.as_ref(), &map, map_gen, path, &mut parse, strip)
+                });
                 if let Some(providers) = &whole {
                     core.ask(descent(providers, prefetch));
                 }
@@ -244,15 +246,9 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                 }
                 log::info!("Resolving module '{}'", module_name);
                 crate::util::ghost_stats::count("resolver.module_resolved");
-                let (whole, stored) = land_module(
-                    &core,
-                    db.as_ref(),
-                    &map,
-                    map_gen,
-                    &module_name,
-                    &mut parse,
-                    strip,
-                );
+                let (whole, stored) = crate::util::ghost_stats::timed("resolver.land", || {
+                    land_module(&core, db.as_ref(), &map, map_gen, &module_name, &mut parse, strip)
+                });
                 match &stored {
                     Some(providers) => log::info!(
                         "Resolved '{}': {} provider(s), {} export, {} export_ok",

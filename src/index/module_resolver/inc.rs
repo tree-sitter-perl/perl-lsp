@@ -168,8 +168,11 @@ fn parse_providers(
     parse: &mut Parse,
     rows: Option<&rusqlite::Connection>,
 ) -> Option<Providers> {
-    let providers: Providers =
-        located.into_iter().filter_map(|path| parse_one_provider(module_name, path, parse, rows)).collect();
+    // Accumulated apart from `resolver.land`: the read and parse are the
+    // share a parallel landing could take off the one thread.
+    let providers: Providers = crate::util::ghost_stats::timed("resolver.parse", || {
+        located.into_iter().filter_map(|path| parse_one_provider(module_name, path, parse, rows)).collect()
+    });
     (!providers.is_empty()).then_some(providers)
 }
 
