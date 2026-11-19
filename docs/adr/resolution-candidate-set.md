@@ -109,7 +109,8 @@ lists, OPEN — the dep cache only enriches detail), imported modules'
 remaining export surfaces and the unimported auto-import firehose
 (DEPENDENCY), and loadable module names (`complete_modules`, DEPENDENCY —
 resolved cache + the dependency map's name listing behind
-`CrossFileLookup::complete_module_names`). The qualified-path drill takes
+`CrossFileLookup::complete_module_names`; a pack's identity slot asks the
+same source). The qualified-path drill takes
 both of its sub-package sources from the set.
 
 Deliberately NOT on the set (the seam's edge, kept honest):

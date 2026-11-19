@@ -4507,6 +4507,15 @@ function produce() { yield 1; }
     assert_eq!(fa.sub_return_type_at_arity("produce", Some(0)), generator, "a function");
 }
 
+/// A `use` path no dependency map lists completes as the bare word typed,
+/// from the in-scope universe, exactly as before the slot read it.
+#[cfg(feature = "php")]
+#[test]
+fn an_unlisted_use_path_falls_back_to_the_typed_word() {
+    let got = completions("<?php\nclass Paper {}\nuse Vendor\\Pa|");
+    assert!(got.iter().any(|(l, _)| l == "Paper"), "{got:?}");
+}
+
 /// The completion items at `|` in `src`, asked as the editor asks: the file
 /// indexed, the cursor's buffer the one written.
 #[cfg(feature = "php")]

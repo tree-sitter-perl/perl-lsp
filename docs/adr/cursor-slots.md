@@ -49,6 +49,18 @@ enum Slot {
   detectors live BEHIND both (Perl's = today's `cursor_context` logic,
   pack's = today's `cursor_sentinel` logic — re-expressed outputs, NOT
   rewritten internals). Consumers switch on `Slot`, never on language.
+- **A pack identity is a `ModulePath` on the `UseModule` arm** when the
+  cursor sits in a capture that spells one (`Capture::identity_spelling`):
+  an import (`use Vendor\Pa|`, `import os.pa|`), or a class reference
+  written absolute (`new \Vend|`). A relative reference resolves against
+  the file first, an imported member (`from a.b import C|`) is no module,
+  and a relative import names the file's own package, so none of those
+  is one. The prefix comes from the sentinel reparse
+  (`cursor_sentinel::identity_prefix_incremental`), so it is read from the
+  pack's own captures, never from text. When the listing has nothing for
+  it, completion falls back to the bare word typed. A PHP `use` the
+  buffer ends in before its `;` parses as an ERROR and gives no capture,
+  so it completes as that bare word.
 - **Each Slot variant declares its candidate question**: Identifier/
   ModulePath → CandidateSet projections; Member/Key → the entity-content
   seams (`Member`/`ReceiverGated`/keys); Import → the named

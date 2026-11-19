@@ -124,7 +124,7 @@ pub enum DetectorArm {
     Member,
     HashKey,
     ImportList,
-    /// `use Foo::|` — typing a loadable module name.
+    /// `use Foo::|` / pack `use Vendor\Pa|` — typing a loadable module name.
     UseModule,
     /// `Foo::|` / pack `ns::|` — a qualified-path drill into an owner.
     QualifiedPath,
@@ -267,6 +267,14 @@ pub fn detect_slot(
             slot: Slot::ModulePath { prefix: owner.to_string() },
             arm: DetectorArm::QualifiedPath,
         };
+    }
+    // `use Vendor\Pa|` / `new \Vend|` / `import os.pa|` — an identity spelled
+    // whole (an import, or a reference written absolute) names a module the
+    // dependency map may place unparsed, so it completes from the listing.
+    if let Some(prefix) = crate::build::cursor_sentinel::identity_prefix_incremental(
+        &mut parser, &lang_pack, source, tree, cursor,
+    ) {
+        return DetectedSlot { slot: Slot::ModulePath { prefix }, arm: DetectorArm::UseModule };
     }
     // `field == |` — the equality's field operand carries an enum DOMAIN.
     // The slot hands that expected type to completion so the domain's
