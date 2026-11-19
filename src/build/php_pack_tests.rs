@@ -5630,3 +5630,28 @@ function f($c) {
     assert_eq!(at("x", 6, 54), Some(T::ClassName("A".into())), "the construction is the write's own right side");
     assert_eq!(at("y", 9, 9), two("B", "C"), "the entry value only unwinds through the finally");
 }
+
+/// A resident copy keeps its package table and drops its symbols, and a
+/// member resolution asks every candidate file of a class for its flavor:
+/// the answer has to survive the strip, or each question costs a decode.
+#[cfg(feature = "php")]
+#[test]
+fn a_stripped_copy_still_answers_its_classes_flavors() {
+    use crate::model::file_analysis::{Residency, SymbolFlags};
+    let mut fa = php(
+        "<?php\nnamespace App;\ninterface Shape {}\ntrait Draws {}\nabstract class Base {}\nclass Plain {}\n",
+    );
+    let flavors = |fa: &FileAnalysis| {
+        [
+            fa.declares_class_with("App\\Shape", SymbolFlags::INTERFACE),
+            fa.declares_class_with("App\\Draws", SymbolFlags::TRAIT),
+            fa.declares_class_with("App\\Shape", SymbolFlags::TRAIT),
+            fa.declares_class_with("App\\Base", SymbolFlags::INTERFACE),
+            fa.declares_class_with("App\\Plain", SymbolFlags::INTERFACE),
+        ]
+    };
+    assert_eq!(flavors(&fa), [true, true, false, false, false]);
+    fa.evict_to(Residency::Skeleton);
+    assert!(fa.symbols_are_evicted());
+    assert_eq!(flavors(&fa), [true, true, false, false, false]);
+}

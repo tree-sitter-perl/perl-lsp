@@ -164,9 +164,42 @@ impl EncodedAnalysis {
     /// The baked map, decoded.
     #[allow(dead_code)] // decodes the encoded map; the flush takes `bake_conclusion_map` instead
     pub fn conclusion_map(&self) -> Option<crate::model::witnesses::ConclusionMap> {
-        let bin = zstd::decode_all(self.conclusions.as_slice()).ok()?;
+        let bin = unzstd(&self.conclusions)?;
         bincode::deserialize(&bin).ok()
     }
+}
+
+/// Decompress one stored blob on this thread's decoding context. A fresh
+/// context per blob costs an allocation and a table build each time, which
+/// a sweep that rehydrates every file pays once per file.
+pub(crate) fn unzstd(blob: &[u8]) -> Option<Vec<u8>> {
+    use zstd::zstd_safe::{DCtx, InBuffer, OutBuffer, ResetDirective};
+    thread_local! {
+        static CONTEXT: std::cell::RefCell<DCtx<'static>> = std::cell::RefCell::new(DCtx::create());
+    }
+    CONTEXT.with(|context| {
+        let mut context = context.borrow_mut();
+        // A failed decode leaves the context mid-frame.
+        context.reset(ResetDirective::SessionOnly).ok()?;
+        let mut out: Vec<u8> = Vec::with_capacity(blob.len().saturating_mul(4).max(DCtx::out_size()));
+        let mut input = InBuffer::around(blob);
+        loop {
+            if out.capacity() - out.len() < DCtx::out_size() {
+                out.reserve(out.capacity().max(DCtx::out_size()));
+            }
+            let (at, read) = (out.len(), input.pos);
+            let mut output = OutBuffer::around_pos(&mut out, at);
+            let pending = context.decompress_stream(&mut output, &mut input).ok()?;
+            let moved = output.pos() > at || input.pos > read;
+            // Zero pending is a frame decoded and flushed.
+            if pending == 0 && input.pos == blob.len() {
+                return Some(out);
+            }
+            if !moved {
+                return None;
+            }
+        }
+    })
 }
 
 /// Serialize FileAnalysis via bincode then compress with zstd, splitting the
@@ -389,8 +422,7 @@ pub fn decode_analysis_parts(
     let mut fa = decode_analysis(blob)?;
     match bag {
         Some(b) => {
-            let bin = crate::util::ghost_stats::timed("decode.2_zstd_bag", || zstd::decode_all(b))
-                .ok()?;
+            let bin = crate::util::ghost_stats::timed("decode.2_zstd_bag", || unzstd(b))?;
             fa.witnesses = crate::util::ghost_stats::timed("decode.3_bincode_bag", || {
                 bincode::deserialize(&bin)
             })
@@ -420,7 +452,7 @@ pub fn decode_analysis(blob: &[u8]) -> Option<FileAnalysis> {
     // and if `after_deserialize` dominates then none of them help — the fix
     // is to stop asking for a fully-indexed analysis per lookup.
     let t = std::time::Instant::now();
-    let bin = crate::util::ghost_stats::timed("decode.2_zstd", || zstd::decode_all(blob)).ok()?;
+    let bin = crate::util::ghost_stats::timed("decode.2_zstd", || unzstd(blob))?;
     let mut fa: FileAnalysis = crate::util::ghost_stats::timed("decode.3_bincode", || {
         bincode::deserialize(&bin)
     })
@@ -832,7 +864,7 @@ pub fn load_surface(conn: &Connection, path: &str) -> Option<crate::model::surfa
             |row| row.get(0),
         )
         .ok()?;
-    let bin = zstd::decode_all(blob.as_slice()).ok()?;
+    let bin = unzstd(&blob)?;
     bincode::deserialize(&bin).ok()
 }
 

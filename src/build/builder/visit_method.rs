@@ -74,7 +74,7 @@ impl<'a> Builder<'a> {
 
     /// Extract the first argument node from a function call.
     pub(super) fn first_call_arg(&self, call_node: Node<'a>) -> Option<Node<'a>> {
-        let args = call_node.child_by_field_name("arguments")?;
+        let args = call_node.field(Field::Arguments)?;
         match crate::cst::literal_shape(args) {
             Some(LiteralShape::List) => crate::cst::nth_element(args, 0),
             _ => Some(args), // single arg (ambiguous_function_call_expression)
@@ -212,16 +212,16 @@ impl<'a> Builder<'a> {
         // (constructor chain `Sner->new->hi`, `__PACKAGE__->m`, a scalar
         // holding a const-folded class string). Everything
         // inference-dependent stays None for PostFold to fill from the bag.
-        let invocant_class = invocant_node.and_then(|n| match n.kind() {
-            "method_call_expression" => self.extract_constructor_class(n),
-            "func0op_call_expression" => {
+        let invocant_class = invocant_node.and_then(|n| match n.kind_of() {
+            Kind::MethodCallExpression => self.extract_constructor_class(n),
+            Kind::Func0opCallExpression => {
                 self.infer_expression_result_type(n).and_then(|t| t.class_name().map(str::to_string))
             }
             _ => None,
         });
 
         let args = self.extract_call_args(node);
-        let args_node = node.child_by_field_name("arguments");
+        let args_node = node.field(Field::Arguments);
         if let Some(inv) = invocant_node {
             self.emit_invocant_witness(inv);
         }
@@ -298,7 +298,7 @@ impl<'a> Builder<'a> {
                 if matches!(name.as_str(), "setup_import_methods" | "add_type")
                     && self.package_uses_moose_exporter_or_type_library()
                 {
-                    if let Some(args) = node.child_by_field_name("arguments") {
+                    if let Some(args) = node.field(Field::Arguments) {
                         self.detect_exporter_setup_call(name, args);
                     }
                 }
@@ -308,9 +308,9 @@ impl<'a> Builder<'a> {
                 // Class-level call only; the string arg is the moniker.
                 if name == "source_name" {
                     let pkg_receiver =
-                        node.child_by_field_name("invocant").is_some_and(|inv| self.names_current_package(inv));
+                        node.field(Field::Invocant).is_some_and(|inv| self.names_current_package(inv));
                     if pkg_receiver {
-                        if let Some(args) = node.child_by_field_name("arguments") {
+                        if let Some(args) = node.field(Field::Arguments) {
                             if let Some(sn) = self.first_string_literal_arg(args) {
                                 self.dbic_source_name = Some(sn);
                             }
@@ -386,7 +386,7 @@ impl<'a> Builder<'a> {
         // wins), which lets the existing FunctionCall paths (semantic
         // tokens, hover, gd) light up the bareword as the call it is.
         if let Some(inv_node) = invocant_node {
-            if matches!(inv_node.kind(), "bareword" | "package") {
+            if matches!(inv_node.kind_of(), Kind::Bareword | Kind::Package) {
                 if let Ok(bw_text) = inv_node.utf8_text(self.source) {
                     // Find the matching sub and capture its package so
                     // the FunctionCall ref's `resolved_package` points
@@ -492,7 +492,7 @@ impl<'a> Builder<'a> {
             "mk_classdata" | "mk_classaccessor" => false,
             _ => return,
         };
-        let Some(args) = node.child_by_field_name("arguments") else { return };
+        let Some(args) = node.field(Field::Arguments) else { return };
         let arg_nodes: Vec<Node> = match crate::cst::literal_shape(args) {
             Some(LiteralShape::List) => crate::cst::NodeExt::elements(&args).collect(),
             // Single bare arg, e.g. `mk_classdata('config')`.
@@ -501,13 +501,13 @@ impl<'a> Builder<'a> {
 
         let mut names: Vec<(String, Span)> = Vec::new();
         for child in arg_nodes.iter().skip(skip_first as usize) {
-            match (crate::cst::literal_shape(*child), child.kind()) {
+            match (crate::cst::literal_shape(*child), child.kind_of()) {
                 (Some(LiteralShape::Str), _) => {
                     if let Some(value) = crate::cst::string_value(*child, self.source) {
                         names.push(value);
                     }
                 }
-                (None, "bareword" | "autoquoted_bareword") => {
+                (None, Kind::Bareword | Kind::AutoquotedBareword) => {
                     if let Ok(text) = child.utf8_text(self.source) {
                         names.push((text.to_string(), node_to_span(*child)));
                     }
@@ -560,7 +560,7 @@ impl<'a> Builder<'a> {
         // grammar field `hash:`) reads `%h`, not scalar `$h` — use the
         // canonical name so the key ref, the shape witness, and the
         // KeyWrite all key the same variable.
-        let var_text = match node.child_by_field_name("hash") {
+        let var_text = match node.field(Field::Hash) {
             Some(c) => crate::cst::canonical_container_name(self.syntax, c, self.source)
                 .or_else(|| self.get_hash_var_from_element(node)),
             None => self.get_hash_var_from_element(node),
@@ -595,7 +595,7 @@ impl<'a> Builder<'a> {
         // for the variable-container shape.
         let container_is_method_call = node
             .named_child(0)
-            .map(|c| c.kind() == "method_call_expression")
+            .map(|c| c.is(Kind::MethodCallExpression))
             .unwrap_or(false);
 
         // An arrow access through a plain variable is a deref site: through
@@ -609,7 +609,7 @@ impl<'a> Builder<'a> {
         // Record the key access
         let mut key_ref = false;
         if !container_is_method_call {
-            if let Some(key_node) = node.child_by_field_name("key") {
+            if let Some(key_node) = node.field(Field::Key) {
                 if let Some((key_text, is_dynamic)) = self.extract_key_text(key_node) {
                     if !is_dynamic {
                         // Owner resolved in post-pass (`resolve_hash_key_owners`).
@@ -698,14 +698,14 @@ impl<'a> Builder<'a> {
     /// we don't claim.
     pub(super) fn extract_resultset_parametric(&self, node: Node<'a>) -> Option<InferredType> {
         use crate::model::file_analysis::ParametricType;
-        if node.kind() != "method_call_expression" {
+        if !node.is(Kind::MethodCallExpression) {
             return None;
         }
-        let method = node.child_by_field_name("method")?;
+        let method = node.field(Field::Method)?;
         let mtext = method.utf8_text(self.source).ok()?;
         // `recv->resultset('Foo')` — row class from the string arg.
         if mtext == "resultset" {
-            let args = node.child_by_field_name("arguments")?;
+            let args = node.field(Field::Arguments)?;
             let row_name = self.first_string_or_constfold_arg(args)?;
             let base = self
                 .discover_resultset_class(&row_name)
@@ -723,7 +723,7 @@ impl<'a> Builder<'a> {
                 crate::model::file_analysis::RowSource::Class(row_name)
             } else {
                 let schema = node
-                    .child_by_field_name("invocant")
+                    .field(Field::Invocant)
                     .and_then(|inv| self.invocant_type_at_node(inv))
                     .and_then(|t| t.class_name().map(str::to_string));
                 crate::model::file_analysis::RowSource::Moniker { moniker: row_name, schema }
@@ -739,9 +739,9 @@ impl<'a> Builder<'a> {
     /// `search`/`search_rs` keep a resultset a resultset; this stays generic).
     /// The verb list is the plugin's (#10/#8).
     pub(super) fn is_fluent_verb_call(&self, node: Node<'a>) -> bool {
-        node.kind() == "method_call_expression"
+        node.is(Kind::MethodCallExpression)
             && node
-                .child_by_field_name("method")
+                .field(Field::Method)
                 .and_then(|m| m.utf8_text(self.source).ok())
                 .is_some_and(|m| self.plugins.fluent_verbs().any(|v| v == m))
     }
@@ -797,12 +797,12 @@ impl<'a> Builder<'a> {
         }
         // Try the first arg as a `scalar` node with const-foldable
         // value. Same one-level unwrap rule as the literal helper.
-        let arg_node = match (crate::cst::literal_shape(args), args.kind()) {
-            (None, "scalar") => Some(args),
+        let arg_node = match (crate::cst::literal_shape(args), args.kind_of()) {
+            (None, Kind::Scalar) => Some(args),
             (Some(LiteralShape::List), _) => crate::cst::nth_element(args, 0),
             _ => None,
         }?;
-        if arg_node.kind() != "scalar" {
+        if !arg_node.is(Kind::Scalar) {
             return None;
         }
         let var_text = arg_node.utf8_text(self.source).ok()?;

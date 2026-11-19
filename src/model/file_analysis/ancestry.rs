@@ -969,8 +969,9 @@ impl FileAnalysis {
     /// (php: an interface, a trait)? Cost-shaped by the hit kind: a Local
     /// hit consults only the local symbols (for Perl that scan never
     /// matches — no class carries a flavor flag — and no cross-file work
-    /// happens); a CrossFile hit also sweeps the class's candidate files,
-    /// whose copies the resolution itself just rehydrated (LRU-warm).
+    /// happens); a CrossFile hit also asks the class's candidate files,
+    /// whose resident copies answer as they stand (`PackageFacts::flavor`
+    /// survives the strip).
     pub(crate) fn hit_class_declared(
         &self,
         cls: &str,
@@ -985,7 +986,7 @@ impl FileAnalysis {
                     || module_index.is_some_and(|i| {
                         i.visible_def_candidates(cls)
                             .iter()
-                            .any(|c| i.whole_present(c).declares_class_with(cls, flag))
+                            .any(|c| c.analysis.declares_class_with(cls, flag))
                     })
             }
         }
@@ -1000,12 +1001,9 @@ impl FileAnalysis {
     }
 
     /// Does THIS file declare `class` with the flavor `flag` (an interface,
-    /// a trait)?
+    /// a trait)? Answers on a stripped copy too.
     pub fn declares_class_with(&self, class: &str, flag: SymbolFlags) -> bool {
-        self.symbols_named(class).iter().any(|&sid| {
-            let s = self.symbol(sid);
-            matches!(s.kind, SymKind::Class) && s.flags.contains(flag)
-        })
+        self.packages.get(class).is_some_and(|f| f.flavor.contains(flag))
     }
 
     /// `$self->SUPER::m` dispatch: resolve `method_name` over `enclosing`'s

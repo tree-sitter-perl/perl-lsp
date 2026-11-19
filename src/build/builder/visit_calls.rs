@@ -8,11 +8,11 @@ impl<'a> Builder<'a> {
     pub(super) fn visit_var_ref(&mut self, node: Node<'a>) {
         // Skip if parent is a variable_declaration (handled by visit_variable_decl)
         if let Some(parent) = self.syntax.parent(node) {
-            if parent.kind() == "variable_declaration" { return; }
+            if parent.is(Kind::VariableDeclaration) { return; }
             // A signature parameter's own variable is its declaration; its
             // default is an ordinary read.
-            if matches!(parent.kind(), "mandatory_parameter" | "optional_parameter" | "slurpy_parameter")
-                && parent.child_by_field_name("default") != Some(node)
+            if matches!(parent.kind_of(), Kind::MandatoryParameter | Kind::OptionalParameter | Kind::SlurpyParameter)
+                && parent.field(Field::Default) != Some(node)
             {
                 return;
             }
@@ -23,10 +23,10 @@ impl<'a> Builder<'a> {
         // lexical — so its ref is spelled qualified. The block is still
         // visited below for the refs inside it.
         let access = self.determine_access(node);
-        let sigil = match node.kind() {
-            "scalar" => Some(crate::model::conventions::Sigil::Scalar),
-            "array" => Some(crate::model::conventions::Sigil::Array),
-            "hash" => Some(crate::model::conventions::Sigil::Hash),
+        let sigil = match node.kind_of() {
+            Kind::Scalar => Some(crate::model::conventions::Sigil::Scalar),
+            Kind::Array => Some(crate::model::conventions::Sigil::Array),
+            Kind::Hash => Some(crate::model::conventions::Sigil::Hash),
             _ => None,
         };
         for (name, span, folded_from) in sigil.map(|s| self.symbolic_variables(node, s)).unwrap_or_default() {
@@ -43,10 +43,10 @@ impl<'a> Builder<'a> {
             // Recurse into the block to visit inner expressions
             for i in 0..node.child_count() {
                 if let Some(child) = node.child(i) {
-                    if child.kind() == "varname" {
+                    if child.is(Kind::Varname) {
                         for j in 0..child.child_count() {
                             if let Some(gc) = child.child(j) {
-                                if gc.kind() == "block" {
+                                if gc.is(Kind::Block) {
                                     self.queue_children(gc);
                                     return;
                                 }
@@ -66,7 +66,7 @@ impl<'a> Builder<'a> {
         // text isn't a variable name.
         for i in 0..node.child_count() {
             if let Some(child) = node.child(i) {
-                if child.kind() == "block" {
+                if child.is(Kind::Block) {
                     self.queue_children(child);
                     return;
                 }
@@ -126,7 +126,7 @@ impl<'a> Builder<'a> {
             // callee can't add keys to the original, so it's not an
             // escape (unlike a scalar, whose value IS the shared ref).
             if text.starts_with('%')
-                && self.syntax.parent(node).is_some_and(|p| p.kind() == "refgen_expression")
+                && self.syntax.parent(node).is_some_and(|p| p.is(Kind::RefgenExpression))
                 && self.escape_recorded.insert(self.binding_key_here(text, node.start_position()))
             {
                 self.record_escape_write(text.to_string(), node);
@@ -157,8 +157,8 @@ impl<'a> Builder<'a> {
         let Some(expr) = crate::cst::deref_operand_expr(node) else {
             return Vec::new();
         };
-        let (names, span, folded_from) = match expr.kind() {
-            "scalar" => {
+        let (names, span, folded_from) = match expr.kind_of() {
+            Kind::Scalar => {
                 let Some(var) = crate::cst::canonical_var_name(expr, self.source) else { return Vec::new() };
                 let Some(values) = self.resolve_constant_strings(&var, expr) else { return Vec::new() };
                 let source = (values.len() == 1)
@@ -196,17 +196,17 @@ impl<'a> Builder<'a> {
     /// ref is emitted. Excludes the plain non-deref case (a `scalar` whose
     /// varname holds only a leaf varname) and block-derefs (handled separately).
     pub(super) fn sigil_deref_inner_scalar(&self, node: Node<'a>) -> Option<Node<'a>> {
-        if !matches!(node.kind(), "scalar" | "array" | "hash") {
+        if !matches!(node.kind_of(), Kind::Scalar | Kind::Array | Kind::Hash) {
             return None;
         }
         for i in 0..node.child_count() {
             let child = node.child(i)?;
-            if child.kind() != "varname" {
+            if !child.is(Kind::Varname) {
                 continue;
             }
             for j in 0..child.child_count() {
                 let gc = child.child(j)?;
-                if gc.kind() == "scalar" {
+                if gc.is(Kind::Scalar) {
                     return Some(gc);
                 }
             }
@@ -218,10 +218,10 @@ impl<'a> Builder<'a> {
     pub(super) fn is_block_deref(&self, node: Node<'a>) -> bool {
         for i in 0..node.child_count() {
             if let Some(child) = node.child(i) {
-                if child.kind() == "varname" {
+                if child.is(Kind::Varname) {
                     for j in 0..child.child_count() {
                         if let Some(gc) = child.child(j) {
-                            if gc.kind() == "block" {
+                            if gc.is(Kind::Block) {
                                 return true;
                             }
                         }
@@ -265,7 +265,7 @@ impl<'a> Builder<'a> {
                 self.refs[idx].folded_from = folded_from;
             }
         }
-        if operand.kind() == "block" {
+        if operand.is(Kind::Block) {
             self.queue_children(operand);
         } else {
             self.queue_node(operand);
@@ -316,14 +316,14 @@ impl<'a> Builder<'a> {
         // sub. The `code_deref_expression` arm in `visit_node` narrows the
         // operand to CodeRef; just descend so it runs.
         if node
-            .child_by_field_name("function")
-            .map(|f| f.kind() == "code_deref_expression" || code_deref_in(f).is_some())
+            .field(Field::Function)
+            .map(|f| f.is(Kind::CodeDerefExpression) || code_deref_in(f).is_some())
             .unwrap_or(false)
         {
             self.queue_children(node);
             return;
         }
-        if let Some(func_node) = node.child_by_field_name("function") {
+        if let Some(func_node) = node.field(Field::Function) {
             if let Ok(raw) = func_node.utf8_text(self.source) {
                 // `goto &Foo::bar` / `&Foo::bar()` — the leading `&` is the
                 // code-ref sigil; the call targets sub `Foo::bar`. Strip it so
@@ -360,7 +360,7 @@ impl<'a> Builder<'a> {
                 // mechanism as method-call args; covers
                 // `Foo::new(key => val)` and helpers like
                 // `connect(timeout => 30)`.
-                if let Some(args) = node.child_by_field_name("arguments") {
+                if let Some(args) = node.field(Field::Arguments) {
                     let owner = HashKeyOwner::Sub {
                         package: resolved_package.clone(),
                         name: name.to_string(),
@@ -468,7 +468,7 @@ impl<'a> Builder<'a> {
                 // (which the caller may have aliased) isn't load-bearing.
                 let tail = crate::model::file_analysis::split_qualified(name, &crate::model::conventions::PERL_SPELLINGS).1;
                 if tail == "setup_exporter" {
-                    if let Some(args) = node.child_by_field_name("arguments") {
+                    if let Some(args) = node.field(Field::Arguments) {
                         self.detect_exporter_setup_call(tail, args);
                     }
                 }
@@ -515,7 +515,7 @@ impl<'a> Builder<'a> {
             .active_topic_dsl()
             .map(|d| d.group_fn.clone())
             .is_some_and(|g| {
-                node.child_by_field_name("function")
+                node.field(Field::Function)
                     .and_then(|f| f.utf8_text(self.source).ok())
                     == Some(g.as_str())
             });
@@ -544,11 +544,11 @@ impl<'a> Builder<'a> {
     /// `indirect_object` to accept a bareword filehandle, delete this guard
     /// and consume the `indirect_object` node directly.
     pub(super) fn is_indirect_object_filehandle_call(&self, node: Node<'a>) -> bool {
-        if node.kind() != "ambiguous_function_call_expression" {
+        if !node.is(Kind::AmbiguousFunctionCallExpression) {
             return false;
         }
         // The filehandle must be a plain bareword identifier (no sigil).
-        let func = match node.child_by_field_name("function") {
+        let func = match node.field(Field::Function) {
             Some(f) => f,
             None => return false,
         };
@@ -568,17 +568,17 @@ impl<'a> Builder<'a> {
             None => return false,
         };
         if !matches!(
-            parent.kind(),
-            "ambiguous_function_call_expression" | "function_call_expression"
+            parent.kind_of(),
+            Kind::AmbiguousFunctionCallExpression | Kind::FunctionCallExpression
         ) {
             return false;
         }
-        if parent.child_by_field_name("arguments").map(|a| a.id()) != Some(node.id()) {
+        if parent.field(Field::Arguments).map(|a| a.id()) != Some(node.id()) {
             return false;
         }
         matches!(
             parent
-                .child_by_field_name("function")
+                .field(Field::Function)
                 .and_then(|f| f.utf8_text(self.source).ok()),
             Some("print" | "printf" | "say")
         )
@@ -588,7 +588,7 @@ impl<'a> Builder<'a> {
     /// extend the package's parents; `push @EXPORT, 'foo', 'bar'` appends
     /// to the export lists.
     pub(super) fn visit_array_edit_call(&mut self, node: Node<'a>, verb: &str) {
-        let args = match node.child_by_field_name("arguments") {
+        let args = match node.field(Field::Arguments) {
             Some(a) => a,
             None => return,
         };
@@ -601,7 +601,7 @@ impl<'a> Builder<'a> {
         };
         if children.is_empty() { return; }
         let first = children[0];
-        if first.kind() != "array" { return; }
+        if !first.is(Kind::Array) { return; }
         let arr_name = match first.utf8_text(self.source) {
             Ok(t) => t,
             Err(_) => return,
@@ -693,12 +693,12 @@ impl<'a> Builder<'a> {
 
     pub(super) fn find_symbolic_export_push(&self, node: Node<'a>, loop_var_bare: &str) -> bool {
         if matches!(
-            node.kind(),
-            "function_call_expression" | "ambiguous_function_call_expression"
+            node.kind_of(),
+            Kind::FunctionCallExpression | Kind::AmbiguousFunctionCallExpression
         ) {
-            if let Some(func) = node.child_by_field_name("function") {
+            if let Some(func) = node.field(Field::Function) {
                 if func.utf8_text(self.source) == Ok("push") {
-                    if let Some(args) = node.child_by_field_name("arguments") {
+                    if let Some(args) = node.field(Field::Arguments) {
                         if self.push_args_reexport_export(args, loop_var_bare) {
                             return true;
                         }
@@ -721,8 +721,8 @@ impl<'a> Builder<'a> {
     pub(super) fn push_args_reexport_export(&self, args: Node<'a>, loop_var_bare: &str) -> bool {
         let first = crate::cst::nth_element(args, 0);
         let target_is_export = first
-            .and_then(|f| if f.kind() == "array" { f.named_child(0) } else { None })
-            .filter(|v| v.kind() == "varname")
+            .and_then(|f| if f.is(Kind::Array) { f.named_child(0) } else { None })
+            .filter(|v| v.is(Kind::Varname))
             .and_then(|v| v.utf8_text(self.source).ok())
             .map(|t| matches!(t, "EXPORT" | "EXPORT_OK"))
             .unwrap_or(false);
@@ -738,7 +738,7 @@ impl<'a> Builder<'a> {
     /// symbolic array-deref whose interpolated string both references the loop
     /// scalar `loop_var_bare` and targets an `::EXPORT`/`::EXPORT_OK` package var.
     pub(super) fn is_symbolic_export_deref(&self, node: Node<'a>, loop_var_bare: &str) -> bool {
-        if node.kind() != "array" {
+        if !node.is(Kind::Array) {
             return false;
         }
         // `@{ "..." }` parses as array > varname > block > ... interpolated string.
@@ -761,7 +761,7 @@ impl<'a> Builder<'a> {
         refs_loop_var: &mut bool,
         targets_export: &mut bool,
     ) {
-        if node.kind() == "interpolated_string_literal" {
+        if node.is(Kind::InterpolatedStringLiteral) {
             if let Some(content) = node.named_child(0) {
                 if let Ok(text) = content.utf8_text(source) {
                     // Static literal portion holds `::EXPORT[_OK]`; the
@@ -774,7 +774,7 @@ impl<'a> Builder<'a> {
                 // varname is the loop var.
                 for i in 0..content.named_child_count() {
                     if let Some(child) = content.named_child(i) {
-                        if child.kind() == "scalar" {
+                        if child.is(Kind::Scalar) {
                             if let Some(vn) = child.named_child(0) {
                                 if vn.utf8_text(source) == Ok(loop_var_bare) {
                                     *refs_loop_var = true;
@@ -829,9 +829,9 @@ impl<'a> Builder<'a> {
     /// Walk `node` for `array` deref elements whose varname is `Pkg::EXPORT` or
     /// `Pkg::EXPORT_OK`, pushing the bare `Pkg` onto `out`.
     pub(super) fn collect_export_var_derefs(node: Node<'a>, source: &[u8], out: &mut Vec<String>) {
-        if node.kind() == "array" {
+        if node.is(Kind::Array) {
             if let Some(varname) = node.named_child(0) {
-                if varname.kind() == "varname" {
+                if varname.is(Kind::Varname) {
                     if let Ok(text) = varname.utf8_text(source) {
                         if let Some(pkg) = Self::package_from_export_var(text) {
                             out.push(pkg);
@@ -881,7 +881,7 @@ impl<'a> Builder<'a> {
         for child in crate::cst::list_elements(table) {
             // Member names live in the value arrays (after each tag key); the
             // bareword/string keys are selectors, not subs, so they're skipped.
-            if child.kind() == "anonymous_array_expression" {
+            if child.is(Kind::AnonymousArrayExpression) {
                 let members = Self::keep_sub_export_names(self.extract_string_names(child));
                 if let Some(tag) = pending_tag.take() {
                     self.export_tags.entry(tag).or_default().extend(members.iter().cloned());
@@ -911,12 +911,12 @@ impl<'a> Builder<'a> {
     /// list `<%EXPORT_TAGS declaration>, <table list>`; fold every following
     /// list once we've seen the declaration.
     pub(super) fn fold_call_wrapped_export_tags(&mut self, node: Node<'a>) {
-        let Some(args) = node.child_by_field_name("arguments") else { return };
+        let Some(args) = node.field(Field::Arguments) else { return };
         let mut saw_export_tags_decl = false;
         for i in 0..args.named_child_count() {
             let Some(child) = args.named_child(i) else { continue };
             if !saw_export_tags_decl {
-                if child.kind() == "variable_declaration"
+                if child.is(Kind::VariableDeclaration)
                     && child
                         .utf8_text(self.source)
                         .map_or(false, |t| t.trim_end().ends_with("%EXPORT_TAGS"))
@@ -1090,10 +1090,10 @@ impl<'a> Builder<'a> {
     /// all names. We treat presence of an `anonymous_subroutine_expression`
     /// (or `\&sub` reference) among the args as the pair-form signal.
     pub(super) fn is_export_pair_call(&self, node: Node<'a>) -> bool {
-        let Some(args) = node.child_by_field_name("arguments") else { return false };
+        let Some(args) = node.field(Field::Arguments) else { return false };
         for i in 0..args.named_child_count() {
             if let Some(c) = args.named_child(i) {
-                if matches!(c.kind(), "anonymous_subroutine_expression" | "refgen_expression") {
+                if matches!(c.kind_of(), Kind::AnonymousSubroutineExpression | Kind::RefgenExpression) {
                     return true;
                 }
             }
@@ -1105,7 +1105,7 @@ impl<'a> Builder<'a> {
     /// Extensible's `export(...)` and Exporter::Declare's `exports(...)`.
     /// Both take a flat name list; only the sub-name entries are kept.
     pub(super) fn detect_export_name_list_call(&mut self, node: Node<'a>) {
-        let Some(args) = node.child_by_field_name("arguments") else { return };
+        let Some(args) = node.field(Field::Arguments) else { return };
         let names = Self::keep_sub_export_names(self.extract_string_names(args));
         self.record_runtime_exports(names);
     }
@@ -1118,7 +1118,7 @@ impl<'a> Builder<'a> {
     /// if the author also defined one (common) and otherwise on the `use`
     /// line. Honest limit: anonymous-only exports aren't resolvable.
     pub(super) fn detect_export_pair_call(&mut self, node: Node<'a>) {
-        let Some(args) = node.child_by_field_name("arguments") else { return };
+        let Some(args) = node.field(Field::Arguments) else { return };
         // First named child is the export name (bareword or string).
         let Some(first) = crate::cst::nth_element(args, 0) else { return };
         let names: Vec<String> = self.extract_node_string(first).into_iter().collect();
@@ -1130,13 +1130,13 @@ impl<'a> Builder<'a> {
     /// attribute's args are tags/options, not names. Called from `visit_sub`
     /// with the sub name already known.
     pub(super) fn detect_export_attribute(&mut self, node: Node<'a>, sub_name: &str) {
-        let Some(attrs) = node.child_by_field_name("attributes") else { return };
+        let Some(attrs) = node.field(Field::Attributes) else { return };
         let mut has_export_attr = false;
         for i in 0..attrs.named_child_count() {
             let Some(attr) = attrs.named_child(i) else { continue };
-            if attr.kind() != "attribute" { continue; }
+            if !attr.is(Kind::Attribute) { continue; }
             let attr_name = attr
-                .child_by_field_name("name")
+                .field(Field::Name)
                 .and_then(|n| n.utf8_text(self.source).ok());
             if attr_name == Some("Export") {
                 has_export_attr = true;
@@ -1155,7 +1155,7 @@ impl<'a> Builder<'a> {
     /// following arrayref. Best-effort static read — a menu built at
     /// runtime (loops, conditionals, computed keys) isn't covered.
     pub(super) fn detect_importer_menu(&mut self, sub_node: Node<'a>) {
-        let Some(body) = sub_node.child_by_field_name("body") else { return };
+        let Some(body) = sub_node.field(Field::Body) else { return };
         // Collect every list_expression under the body (the return list and
         // its operands). We look at the immediate children of each list for
         // `key => [...]` pairs rather than recursing into the arrayrefs.
@@ -1179,7 +1179,7 @@ impl<'a> Builder<'a> {
     /// Depth-first collect every `list_expression` node reachable from
     /// `node` (used to find the menu pairs anywhere in a return body).
     pub(super) fn collect_list_expressions(node: Node<'a>, out: &mut Vec<Node<'a>>) {
-        if node.kind() == "list_expression" {
+        if node.is(Kind::ListExpression) {
             out.push(node);
         }
         for i in 0..node.named_child_count() {
@@ -1280,7 +1280,7 @@ impl<'a> Builder<'a> {
 
         // Fallback: extract function name from RHS \&name
         // AST: refgen_expression > function > varname
-        if let Some(right) = assign_node.child_by_field_name("right") {
+        if let Some(right) = assign_node.field(Field::Right) {
             return self.extract_names_from_refgen(right);
         }
         vec![]
@@ -1296,8 +1296,8 @@ impl<'a> Builder<'a> {
     /// rather than guessed.
     pub(super) fn synthesize_glob_assigned_sub(&mut self, glob_node: Node<'a>, assign_node: Node<'a>) {
         // Gate on RHS shape: only a sub-producing rvalue installs a callable.
-        let Some(right) = assign_node.child_by_field_name("right") else { return };
-        if right.kind() == "glob" {
+        let Some(right) = assign_node.field(Field::Right) else { return };
+        if right.is(Kind::Glob) {
             self.alias_glob(glob_node, right, assign_node);
             return;
         }
@@ -1413,33 +1413,33 @@ impl<'a> Builder<'a> {
     /// Is this RHS node a sub/coderef rvalue (anon sub, `\&name` alias, or a
     /// scalar holding a coderef)? The gate for glob-assign symbol synthesis.
     pub(super) fn glob_rhs_is_sub(&self, right: Node<'a>) -> bool {
-        match right.kind() {
-            "anonymous_subroutine_expression" => true,
+        match right.kind_of() {
+            Kind::AnonymousSubroutineExpression => true,
             // `\&name` / `\&$var` — a code ref. `refgen_expression > function`.
-            "refgen_expression" => right
+            Kind::RefgenExpression => right
                 .named_child(0)
-                .map(|c| c.kind() == "function")
+                .map(|c| c.is(Kind::Function))
                 .unwrap_or(false),
             // `*name = $coderef;` — a scalar presumed to hold a code ref. The
             // LHS-name gate keeps this from over-firing on truly-dynamic globs.
-            "scalar" => true,
+            Kind::Scalar => true,
             // CG-3b: `*{ 'Pkg::' . $sub } = __PACKAGE__->can($sub)` (DateTime::PP)
             // — `->can(...)` yields a coderef. Recognize as sub-producing so the
             // glob installs a symbol. `can` on any package/`__PACKAGE__`/class
             // invocant qualifies; the LHS-name gate still requires a
             // statically-derivable target name.
-            "method_call_expression" => self.method_call_yields_coderef(right),
+            Kind::MethodCallExpression => self.method_call_yields_coderef(right),
             // Conditional install: `*name = $cond ? \&a : sub {...}` (Try::Tiny's
             // `*_subname = $su ? \&Sub::Util::set_subname : sub {...}`, Path::Tiny's
             // `*_same = IS_WIN32() ? sub{} : sub{}`). The glob holds a coderef in
             // every branch, so the name is callable iff BOTH arms are sub-producing.
-            "conditional_expression" => {
-                let arm = |f| {
+            Kind::ConditionalExpression => {
+                let arm = |f: Field| {
                     right
-                        .child_by_field_name(f)
+                        .field(f)
                         .is_some_and(|n| self.glob_rhs_is_sub(n))
                 };
-                arm("consequent") && arm("alternative")
+                arm(Field::Consequent) && arm(Field::Alternative)
             }
             _ => false,
         }
@@ -1451,12 +1451,12 @@ impl<'a> Builder<'a> {
     /// `$obj` instance, where `->can` is equally valid but the name list it feeds
     /// (cross-package glob targets) only makes sense for class injection.
     pub(super) fn method_call_yields_coderef(&self, node: Node<'a>) -> bool {
-        let Some(method) = node.child_by_field_name("method") else { return false };
+        let Some(method) = node.field(Field::Method) else { return false };
         if method.utf8_text(self.source).ok() != Some("can") {
             return false;
         }
-        match node.child_by_field_name("invocant").map(|n| n.kind()) {
-            Some("package" | "bareword" | "func0op_call_expression") => true,
+        match node.field(Field::Invocant).map(|n| n.kind_of()) {
+            Some(Kind::Package | Kind::Bareword | Kind::Func0opCallExpression) => true,
             _ => false,
         }
     }
@@ -1485,12 +1485,12 @@ impl<'a> Builder<'a> {
         }
 
         let Some(inner) = head.named_child(0) else { return vec![] };
-        match inner.kind() {
+        match inner.kind_of() {
             // `*$m = ...` — scalar (loop var). Resolve via constant folding so
             // `for my $m (qw/a b/)` installs both names; bail on unknown vars.
-            "scalar" => self.glob_name_from_scalar(inner),
+            Kind::Scalar => self.glob_name_from_scalar(inner),
             // `*{ ... }` — block expression. Derive only when literal-ish.
-            "block" => self.glob_name_from_block(inner, assign_node),
+            Kind::Block => self.glob_name_from_block(inner, assign_node),
             _ => vec![],
         }
     }
@@ -1526,17 +1526,17 @@ impl<'a> Builder<'a> {
     /// glob-install name derivation (`*{"…"} = sub`) and dynamic helper /
     /// plugin registration names (`$app->helper("get_$name" => …)`).
     pub(super) fn enumerate_string_values(&self, expr: Node<'a>) -> Vec<String> {
-        match (crate::cst::literal_shape(expr), expr.kind()) {
+        match (crate::cst::literal_shape(expr), expr.kind_of()) {
             // An interpolating string folds its parts; a plain one is its text.
-            (Some(LiteralShape::Str), "interpolated_string_literal") => {
+            (Some(LiteralShape::Str), Kind::InterpolatedStringLiteral) => {
                 self.try_fold_interpolated_string(expr)
             }
             (Some(LiteralShape::Str), _) => crate::cst::string_content_text(expr, self.source).into_iter().collect(),
             (Some(LiteralShape::List), _) => crate::cst::nth_element(expr, 0)
                 .map(|c| self.enumerate_string_values(c))
                 .unwrap_or_default(),
-            (None, "binary_expression") => self.try_fold_string_concat(expr),
-            (None, "scalar" | "array" | "hash" | "bareword") => self
+            (None, Kind::BinaryExpression) => self.try_fold_string_concat(expr),
+            (None, Kind::Scalar | Kind::Array | Kind::Hash | Kind::Bareword) => self
                 .resolve_constant_strings(expr.utf8_text(self.source).unwrap_or(""), expr)
                 .unwrap_or_default(),
             _ => vec![],
@@ -1550,11 +1550,11 @@ impl<'a> Builder<'a> {
         // Cartesian product across operands so a loop-var operand expands.
         let mut acc: Vec<String> = vec![String::new()];
         for child in crate::cst::NodeExt::elements(&node) {
-            let pieces: Vec<String> = match child.kind() {
-                "string_literal" => crate::cst::string_content_text(child, self.source).into_iter().collect(),
-                "interpolated_string_literal" => self.try_fold_interpolated_string(child),
-                "binary_expression" => self.try_fold_string_concat(child),
-                "scalar" => {
+            let pieces: Vec<String> = match child.kind_of() {
+                Kind::StringLiteral => crate::cst::string_content_text(child, self.source).into_iter().collect(),
+                Kind::InterpolatedStringLiteral => self.try_fold_interpolated_string(child),
+                Kind::BinaryExpression => self.try_fold_string_concat(child),
+                Kind::Scalar => {
                     let varname = child.named_child(0);
                     match varname.and_then(|v| v.utf8_text(self.source).ok()) {
                         Some(bare) if !bare.is_empty() => self
@@ -1586,9 +1586,9 @@ impl<'a> Builder<'a> {
             let block = head.named_child(0)?;
             let expr_stmt = block.named_child(0)?;
             let interp = expr_stmt.named_child(0)?;
-            if interp.kind() != "interpolated_string_literal" { return None; }
+            if !interp.is(Kind::InterpolatedStringLiteral) { return None; }
             let c = interp.named_child(0)?;
-            if c.kind() == "string_content" { Some(c) } else { None }
+            if c.is(Kind::StringContent) { Some(c) } else { None }
         })();
         let content = match content {
             Some(c) => c,
@@ -1620,7 +1620,7 @@ impl<'a> Builder<'a> {
             Some(c) => c,
             None => return vec![],
         };
-        if last_child.kind() == "scalar" && last_child.start_byte() >= content.start_byte() + after_colons {
+        if last_child.is(Kind::Scalar) && last_child.start_byte() >= content.start_byte() + after_colons {
             // The name is a variable like $imported or $name — resolve via constant folding.
             // Use scalar > varname to get the canonical name (without ${} braces).
             if let Some(varname_node) = last_child.named_child(0) {
@@ -1644,11 +1644,11 @@ impl<'a> Builder<'a> {
 
     /// Extract bare function name(s) from a `\&name` or `\&$var` refgen expression.
     pub(super) fn extract_names_from_refgen(&self, refgen: Node<'a>) -> Vec<String> {
-        if refgen.kind() != "refgen_expression" {
+        if !refgen.is(Kind::RefgenExpression) {
             return vec![];
         }
         let func = match refgen.named_child(0) {
-            Some(f) if f.kind() == "function" => f,
+            Some(f) if f.is(Kind::Function) => f,
             _ => return vec![],
         };
         // `\&{ EXPR }` — symbolic code-deref. The operand is the target
@@ -1656,7 +1656,7 @@ impl<'a> Builder<'a> {
         // `\&{"$pkg::$sym"}` is a runtime string we can't statically name).
         if let Some(code_deref) = code_deref_in(func) {
             if let Some(operand) = code_deref_operand(code_deref) {
-                if operand.kind() == "scalar" {
+                if operand.is(Kind::Scalar) {
                     if let Some(scalar_varname) = operand.named_child(0) {
                         let bare_name = scalar_varname.utf8_text(self.source).unwrap_or("");
                         let lookup_key = format!("${}", bare_name);
@@ -1674,7 +1674,7 @@ impl<'a> Builder<'a> {
             None => return vec![],
         };
         if let Some(scalar) = varname.named_child(0) {
-            if scalar.kind() == "scalar" {
+            if scalar.is(Kind::Scalar) {
                 // \&$name — resolve variable via scalar > varname (canonical, no ${} braces)
                 if let Some(scalar_varname) = scalar.named_child(0) {
                     let bare_name = scalar_varname.utf8_text(self.source).unwrap_or("");

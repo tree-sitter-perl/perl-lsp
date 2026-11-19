@@ -5,6 +5,8 @@
 //! data regions, multi-angle-bracket formatting, and proper inline nesting.
 
 use crate::util::text::truncate_on_char_boundary;
+use crate::cst::pod::{Field, Kind};
+use crate::cst::NodeExt;
 use tree_sitter::{Node, Parser};
 
 /// Max bytes of rendered markdown a single POD block contributes to hover.
@@ -33,7 +35,7 @@ pub fn extract_head2_section(sub_name: &str, pod_text: &str) -> Option<String> {
 
     for i in 0..root.named_child_count() {
         let child = root.named_child(i)?;
-        if child.kind() == "command_paragraph" {
+        if child.is(Kind::CommandParagraph) {
             let cmd = get_command_name(&child, bytes);
             if cmd == "=head2" {
                 if collecting {
@@ -69,7 +71,7 @@ pub fn extract_item_section(sub_name: &str, pod_text: &str) -> Option<String> {
 
     for i in 0..root.named_child_count() {
         let child = root.named_child(i)?;
-        if child.kind() == "command_paragraph" {
+        if child.is(Kind::CommandParagraph) {
             let cmd = get_command_name(&child, bytes);
             if cmd == "=item" {
                 if collecting {
@@ -131,7 +133,7 @@ pub fn extract_perlfunc_items(pod_text: &str) -> std::collections::HashMap<Strin
             Some(c) => c,
             None => continue,
         };
-        if child.kind() == "command_paragraph" {
+        if child.is(Kind::CommandParagraph) {
             let cmd = get_command_name(&child, bytes);
             if cmd == "=item" {
                 flush(&mut out, current.take());
@@ -198,7 +200,7 @@ pub fn extract_sub_doc_sections(pod_text: &str) -> std::collections::HashMap<Str
             Some(c) => c,
             None => continue,
         };
-        if child.kind() == "command_paragraph" {
+        if child.is(Kind::CommandParagraph) {
             let cmd = get_command_name(&child, bytes);
             if cmd == "=head2" {
                 flush(&mut out, current.take());
@@ -269,13 +271,13 @@ fn render_children(node: Node, source: &[u8], out: &mut String) {
     while i < count {
         if let Some(child) = node.named_child(i) {
             // Merge consecutive verbatim paragraphs into one code block
-            if child.kind() == "verbatim_paragraph" {
+            if child.is(Kind::VerbatimParagraph) {
                 out.push_str("```perl\n");
                 render_verbatim_content(child, source, out);
                 i += 1;
                 while i < count {
                     if let Some(next) = node.named_child(i) {
-                        if next.kind() == "verbatim_paragraph" {
+                        if next.is(Kind::VerbatimParagraph) {
                             out.push('\n');
                             render_verbatim_content(next, source, out);
                             i += 1;
@@ -297,13 +299,13 @@ fn render_children(node: Node, source: &[u8], out: &mut String) {
 }
 
 fn render_node(node: Node, source: &[u8], out: &mut String) {
-    match node.kind() {
-        "command_paragraph" => render_command(node, source, out),
-        "plain_paragraph" => render_plain(node, source, out),
-        "verbatim_paragraph" => render_verbatim(node, source, out),
-        "begin_paragraph" => render_begin(node, source, out),
-        "for_paragraph" => render_for(node, source, out),
-        "cut_paragraph" => {} // skip
+    match node.kind_of() {
+        Kind::CommandParagraph => render_command(node, source, out),
+        Kind::PlainParagraph => render_plain(node, source, out),
+        Kind::VerbatimParagraph => render_verbatim(node, source, out),
+        Kind::BeginParagraph => render_begin(node, source, out),
+        Kind::ForParagraph => render_for(node, source, out),
+        Kind::CutParagraph => {} // skip
         _ => {}
     }
 }
@@ -379,13 +381,13 @@ fn render_verbatim_content(node: Node, source: &[u8], out: &mut String) {
 }
 
 fn render_begin(node: Node, source: &[u8], out: &mut String) {
-    let format_name = node.child_by_field_name("format")
+    let format_name = node.field(Field::Format)
         .and_then(|n| n.utf8_text(source).ok())
         .unwrap_or("text");
     // Render data as fenced code block with format name
     for i in 0..node.named_child_count() {
         if let Some(child) = node.named_child(i) {
-            if child.kind() == "data" {
+            if child.is(Kind::Data) {
                 if let Ok(text) = child.utf8_text(source) {
                     let text = text.trim();
                     if !text.is_empty() {
@@ -398,7 +400,7 @@ fn render_begin(node: Node, source: &[u8], out: &mut String) {
 }
 
 fn render_for(node: Node, source: &[u8], out: &mut String) {
-    let format_name = node.child_by_field_name("format")
+    let format_name = node.field(Field::Format)
         .and_then(|n| n.utf8_text(source).ok())
         .unwrap_or("text");
     let content = get_content_text(&node, source);
@@ -414,7 +416,7 @@ fn render_inline_content(node: &Node, source: &[u8]) -> String {
     // Find the content child node
     for i in 0..node.named_child_count() {
         if let Some(child) = node.named_child(i) {
-            if child.kind() == "content" {
+            if child.is(Kind::Content) {
                 return render_content_node(child, source);
             }
         }
@@ -442,7 +444,7 @@ fn render_content_node(node: Node, source: &[u8]) -> String {
                     result.push_str(text);
                 }
             }
-            if child.kind() == "interior_sequence" {
+            if child.is(Kind::InteriorSequence) {
                 result.push_str(&render_interior_sequence(child, source));
             }
             pos = child.end_byte();
@@ -459,14 +461,14 @@ fn render_content_node(node: Node, source: &[u8]) -> String {
 }
 
 fn render_interior_sequence(node: Node, source: &[u8]) -> String {
-    let letter = node.child_by_field_name("letter")
+    let letter = node.field(Field::Letter)
         .and_then(|n| n.utf8_text(source).ok())
         .unwrap_or("");
 
     // Get the content — may contain nested interior_sequences
     // Trim for multi-angle-bracket variants (C<< ... >> has extra spaces per POD spec)
     let content = node.named_children(&mut node.walk())
-        .find(|c| c.kind() == "content")
+        .find(|c| c.is(Kind::Content))
         .map(|c| render_content_node(c, source).trim().to_string())
         .unwrap_or_default();
 
@@ -521,7 +523,7 @@ fn render_interior_sequence(node: Node, source: &[u8]) -> String {
 // ---- Helpers ----
 
 fn get_command_name(node: &Node, source: &[u8]) -> String {
-    node.child_by_field_name("command")
+    node.field(Field::Command)
         .and_then(|n| n.utf8_text(source).ok())
         .map(|s| s.to_string())
         .unwrap_or_default()
@@ -530,7 +532,7 @@ fn get_command_name(node: &Node, source: &[u8]) -> String {
 fn get_content_text(node: &Node, source: &[u8]) -> String {
     for i in 0..node.named_child_count() {
         if let Some(child) = node.named_child(i) {
-            if child.kind() == "content" {
+            if child.is(Kind::Content) {
                 return child.utf8_text(source).unwrap_or("").to_string();
             }
         }
