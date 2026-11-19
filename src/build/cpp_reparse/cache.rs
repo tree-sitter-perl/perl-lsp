@@ -412,6 +412,7 @@ fn macro_persist_dir() -> &'static std::sync::OnceLock<Option<std::path::PathBuf
 
 /// Point the persisted macro cache at a workspace's cache dir (a `macros/`
 /// subdir under it). Idempotent; first call wins.
+#[cfg(not(test))]
 pub fn set_macro_persist_dir(workspace_cache_dir: Option<std::path::PathBuf>) {
     let resolved = workspace_cache_dir.map(|d| {
         let p = d.join("macros");
@@ -420,6 +421,12 @@ pub fn set_macro_persist_dir(workspace_cache_dir: Option<std::path::PathBuf>) {
     });
     let _ = macro_persist_dir().set(resolved);
 }
+
+/// Persistence stays off under `cargo test`, as the cache-DB openers answer
+/// `None` there: the dir is derived from the user's real cache root, so a test
+/// run would otherwise write `.bin` files into it.
+#[cfg(test)]
+pub fn set_macro_persist_dir(_workspace_cache_dir: Option<std::path::PathBuf>) {}
 
 fn persist_path(file_path: &std::path::Path) -> Option<std::path::PathBuf> {
     use std::hash::{Hash, Hasher};
