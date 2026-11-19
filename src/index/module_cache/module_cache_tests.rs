@@ -214,27 +214,38 @@ fn test_db_plugin_fingerprint_invalidation() {
     let _ = std::fs::remove_file(&bar.path);
 }
 
-/// A dependency's blob still reads the map (an exportless module borrows its
-/// first exporting parent's lists), so a moved map retires the tier's
-/// rows — and only the tier's.
+/// A dependency row describes its file alone: `--gc-cache` takes the rows
+/// no landing can take again (a file gone or changed), keeps a current one
+/// whatever map placed it, and never touches the walk's rows.
 #[test]
-fn test_db_dependency_map_invalidation() {
+fn gc_takes_only_the_dependency_rows_no_landing_can_take() {
     let conn = test_db();
-    let map1 = crate::build::inc::map_over(vec![PathBuf::from("/usr/lib/perl5")]);
-    let map2 = crate::build::inc::map_over(vec![PathBuf::from("/usr/lib/perl5"), PathBuf::from("/home/user/lib")]);
-    let foo = dep_fixture("IncHashFoo", "package Foo;\n1;\n");
-    let ws = dep_fixture("IncHashWs", "package Ws;\n1;\n");
-
-    validate_dependency_map(&conn, &map1.generation()).unwrap();
-    assert!(save_dep(&conn, &foo));
+    let kept = dep_fixture("GcKept", "package GcKept;\n1;\n");
+    let changed = dep_fixture("GcChanged", "package GcChanged;\n1;\n");
+    let gone = dep_fixture("GcGone", "package GcGone;\n1;\n");
+    let ws = dep_fixture("GcWs", "package GcWs;\n1;\n");
+    for m in [&kept, &changed, &gone] {
+        assert!(save_dep(&conn, m));
+    }
     save_to_db(&conn, &ws.path.to_string_lossy(), &Some(Arc::clone(&ws)), "workspace");
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('dependency_map', 'x')", []).unwrap();
 
-    validate_dependency_map(&conn, &map2.generation()).unwrap();
-    assert!(load_dependency_row(&conn, &foo.path).is_none(), "the tier's rows go when the map moves");
+    std::fs::write(&changed.path, "package GcChanged;\nsub grown { 1 }\n1;\n").unwrap();
+    std::fs::remove_file(&gone.path).unwrap();
+    assert_eq!(gc_dependency_rows(&conn), 2);
+    assert!(load_dependency_row(&conn, &kept.path).is_some(), "a current row stays");
+    let rows_of = |p: &std::path::Path| -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM modules WHERE path = ?1", [p.to_string_lossy()], |r| r.get(0)).unwrap()
+    };
+    assert_eq!(rows_of(&changed.path), 0, "a changed file's row goes");
+    assert_eq!(rows_of(&gone.path), 0, "a deleted file's row goes");
+    assert!(!has_ref_rows(&conn, &gone.path.to_string_lossy()), "with its derived rows");
     assert!(load_one(&conn, &ws.path.to_string_lossy()).is_some(), "the walk's rows stay");
+    assert_eq!(forget_retired_meta(&conn), 1);
 
-    let _ = std::fs::remove_file(&foo.path);
-    let _ = std::fs::remove_file(&ws.path);
+    for m in [&kept, &changed, &ws] {
+        let _ = std::fs::remove_file(&m.path);
+    }
 }
 
 #[test]
@@ -1039,27 +1050,6 @@ fn ref_rows_current_stamp_with_stale_shape_recreates_tables() {
     init_schema(&conn).unwrap();
     shred_rows(&conn, "/migrated.pm", "workspace", &[], &[]).unwrap();
     assert!(has_ref_rows(&conn, "/migrated.pm"));
-}
-
-/// The @INC hard-clear is tier-scoped: a PERL5LIB change must take the
-/// import tier (blobs AND derived rows) while workspace rows — possibly
-/// committed by the concurrent indexer moments earlier — survive.
-#[test]
-fn inc_clear_is_dependency_tier_scoped() {
-    let conn = test_db();
-    validate_dependency_map(&conn, "a").unwrap();
-    shred_rows(&conn, "/ws/File.pm", "workspace", &[], &[]).unwrap();
-    shred_rows(&conn, "/inc/Dep.pm", DEPENDENCY_SOURCE, &[], &[]).unwrap();
-
-    validate_dependency_map(&conn, "CHANGED").unwrap();
-    assert!(
-        has_ref_rows(&conn, "/ws/File.pm"),
-        "workspace rows must survive an @INC change"
-    );
-    assert!(
-        !has_ref_rows(&conn, "/inc/Dep.pm"),
-        "dependency rows must clear on an @INC change"
-    );
 }
 
 /// The register-from-Surface warm stub: encode/decode round-trip, and the

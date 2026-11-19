@@ -2,7 +2,8 @@
 //!
 //! Stores a full `Option<FileAnalysis>` per module, serialized via bincode
 //! and compressed with zstd. Validates entries against mtime + file size to
-//! detect stale data. Invalidates the dependency tier when `@INC` changes.
+//! detect stale data. A dependency row describes its file alone, so no map
+//! change invalidates it; `--gc-cache` drops the ones no landing can take.
 
 use std::path::PathBuf;
 use std::sync::Arc;

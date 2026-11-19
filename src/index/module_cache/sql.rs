@@ -169,6 +169,7 @@ registry! {
         CREATE INDEX IF NOT EXISTS idx_modules_name ON modules(module_name);";
     META_GET => NoScratch, "SELECT value FROM meta WHERE key = ?1";
     META_SET => NoScratch, "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)";
+    META_DELETE => NoScratch, "DELETE FROM meta WHERE key = ?1";
     STRINGS_GENERATION_BUMP => NoScratch,
         "INSERT INTO meta (key, value) VALUES ('strings_generation', '1')
          ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT)";
@@ -266,14 +267,6 @@ registry! {
         "DELETE FROM refs; DELETE FROM syms; DELETE FROM held; DELETE FROM files; DELETE FROM strings; \
          DELETE FROM stubs; DELETE FROM surfaces;";
     MODULES_CLEAR => NoScratch, "DELETE FROM modules";
-    MODULES_CLEAR_DEPENDENCY => NoScratch, "DELETE FROM modules WHERE source = 'dependency'";
-    REFS_CLEAR_DEPENDENCY => Scratch("once per @INC change: the IN set drives idx_refs_file per dependency file instead of probing `files` once per refs row"),
-        "DELETE FROM refs WHERE file_id IN (SELECT file_id FROM files WHERE source = 'dependency')";
-    SYMS_CLEAR_DEPENDENCY => Scratch("once per @INC change: the IN set drives the `file_id` index prefix per dependency file instead of probing `files` once per syms row"),
-        "DELETE FROM syms WHERE file_id IN (SELECT file_id FROM files WHERE source = 'dependency')";
-    HELD_CLEAR_DEPENDENCY => Scratch("once per @INC change: the IN set drives idx_held_file per dependency file instead of probing `files` once per held row"),
-        "DELETE FROM held WHERE file_id IN (SELECT file_id FROM files WHERE source = 'dependency')";
-    FILES_CLEAR_DEPENDENCY => NoScratch, "DELETE FROM files WHERE source = 'dependency'";
     CONCLUSIONS_CLEAR => NoScratch, "DELETE FROM conclusions";
     BUILTINS_CLEAR => NoScratch, "DELETE FROM builtins";
     BUILTINS_INSERT => NoScratch, "INSERT INTO builtins (name, doc) VALUES (?1, ?2)";
@@ -506,6 +499,9 @@ registry! {
                 )";
 
     // ---- `--gc-cache` report ----
+    /// The stamps alone: `analysis` is not named, so no blob page is read.
+    GC_DEPENDENCY_STAMPS => NoScratch,
+        "SELECT path, mtime_secs, file_size, extract_version FROM modules WHERE source = ?1";
     GC_COUNT_FILES => NoScratch, "SELECT COUNT(*) FROM files";
     GC_COUNT_REFS => NoScratch, "SELECT COUNT(*) FROM refs";
     GC_COUNT_SYMS => NoScratch, "SELECT COUNT(*) FROM syms";

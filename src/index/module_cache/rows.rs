@@ -232,6 +232,33 @@ pub fn gc_strings(conn: &Connection) -> usize {
     .unwrap_or(0)
 }
 
+/// `--gc-cache`: drop every dependency row no landing can take again — its
+/// file is gone or changed, or another extract version wrote it. A current
+/// row the map no longer reaches stays: it describes its file, not the map
+/// that placed it, and another map (an editor's `PERL5LIB`, the next
+/// manifest) may place that file again.
+pub fn gc_dependency_rows(conn: &Connection) -> usize {
+    let stale: Vec<String> = conn
+        .prepare(sql::GC_DEPENDENCY_STAMPS.registered())
+        .and_then(|mut stmt| {
+            let rows = stmt.query_map(params![DEPENDENCY_SOURCE], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?))
+            })?;
+            Ok(rows
+                .filter_map(Result::ok)
+                .filter(|(path, mtime, size, version)| {
+                    !matches!(classify_row_generation(path, *mtime, *size, *version), RowGeneration::Current(_))
+                })
+                .map(|(path, ..)| path)
+                .collect())
+        })
+        .unwrap_or_default();
+    for path in &stale {
+        invalidate_generation_tier(conn, path, DEPENDENCY_SOURCE);
+    }
+    stale.len()
+}
+
 /// Drop one file's whole persisted generation — blob row AND derived ref
 /// rows, together (the eraser twin of the write invariant "blob + rows
 /// describe one generation"). Every invalidation seam calls this; nobody

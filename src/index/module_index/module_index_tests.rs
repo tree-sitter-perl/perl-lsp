@@ -3021,6 +3021,75 @@ fn a_map_move_restamps_what_it_still_places_and_sweeps_the_rest() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A moved map wipes no row and still answers from the new map: a
+/// dependency row holds its file as written, and what an inherited `import`
+/// lends is read at query time through whatever the map now places. `Child`
+/// exports nothing and inherits `Parent`'s own `import`; the map first
+/// places a `Parent` exporting `one`, then one exporting `two`.
+#[test]
+fn a_map_move_keeps_the_rows_and_answers_from_the_new_map() {
+    use crate::index::module_cache;
+    use crate::util::canonical_path::CanonicalPath;
+    let base = std::env::temp_dir().join(format!(
+        "d6-map-move-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    for d in ["ra", "r1", "r2", "proj"] {
+        std::fs::create_dir_all(base.join(d)).unwrap();
+    }
+    let base = CanonicalPath::resolve(base).into_path_buf();
+    let (ra, r1, r2) = (base.join("ra"), base.join("r1"), base.join("r2"));
+    std::fs::write(ra.join("Child.pm"), "package Child;\nour @ISA = ('Parent');\n1;\n").unwrap();
+    std::fs::write(r1.join("Parent.pm"), "package Parent;\nsub import { }\nour @EXPORT = qw(one);\nsub one { 1 }\n1;\n")
+        .unwrap();
+    std::fs::write(r2.join("Parent.pm"), "package Parent;\nsub import { }\nour @EXPORT = qw(two);\nsub two { 2 }\n1;\n")
+        .unwrap();
+    let child = CanonicalPath::resolve(ra.join("Child.pm"));
+    let old_parent = CanonicalPath::resolve(r1.join("Parent.pm"));
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    module_cache::init_schema(&conn).unwrap();
+    let rows = |conn: &rusqlite::Connection| -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM modules", [], |r| r.get(0)).unwrap()
+    };
+    let lent = |idx: &ModuleIndex| -> Vec<String> {
+        let c = idx.get_cached("Child").expect("Child is held");
+        c.analysis.export_surface_with_index("Child", idx).default_set().to_vec()
+    };
+    let land = |idx: &ModuleIndex, roots: &[std::path::PathBuf]| {
+        idx.set_search_roots_for_test(roots);
+        idx.wait_idle();
+        let map = idx.dependency_map().expect("a published map");
+        let mut parser = crate::index::module_resolver::create_parser();
+        for n in ["Child", "Parent"] {
+            assert!(idx.land_module(Some(&conn), &map, n, &mut parser).1.is_some(), "{n} lands");
+        }
+    };
+
+    let idx = ModuleIndex::new_for_test();
+    idx.set_workspace_root(Some(&format!("file://{}", base.join("proj").display())));
+    land(&idx, &[ra.clone(), r1.clone()]);
+    assert_eq!(lent(&idx), ["one"]);
+    let stored = module_cache::load_dependency_row(&conn, &child).expect("Child's row");
+    assert!(stored.export.is_empty(), "the row holds Child as written, nothing borrowed");
+    assert_eq!(rows(&conn), 2);
+
+    // The map moves: r1's Parent leaves, r2's comes in.
+    land(&idx, &[ra.clone(), r2.clone()]);
+    assert_eq!(lent(&idx), ["two"], "the inherited import answers through the new map");
+    assert!(module_cache::load_dependency_row(&conn, &old_parent).is_some(), "the move wipes no row");
+    assert_eq!(rows(&conn), 3);
+
+    // The next session opens the same store under the new map: Child comes
+    // back from its row, and still lends what the new map places.
+    let next = ModuleIndex::new_for_test();
+    next.set_workspace_root(Some(&format!("file://{}", base.join("proj").display())));
+    land(&next, &[ra.clone(), r2.clone()]);
+    assert_eq!(lent(&next), ["two"]);
+    assert_eq!(rows(&conn), 3, "one row per file, whichever map wrote it");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// A name a project file holds is the project's answer: the tier neither
 /// locates nor parses the installed twin the slot would never pick. When the
 /// project file goes, the ask reopens and the installed copy lands.

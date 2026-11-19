@@ -202,7 +202,8 @@ pub(crate) fn print_usage() {
     eprintln!("                                                         (scripts/equiv/README.md)");
     eprintln!("  perl-lsp --dump-package <root> <package>               Dump every sub in <package>");
     eprintln!("                                                         with derived type info");
-    eprintln!("  perl-lsp --gc-cache <root>                             Reclaim unreferenced interned");
+    eprintln!("  perl-lsp --gc-cache <root>                             Drop stale dependency rows and");
+    eprintln!("                                                          reclaim unreferenced interned");
     eprintln!("                                                          strings (run when nothing else");
     eprintln!("                                                          is writing the cache)");
     eprintln!("  perl-lsp --clear-cache [<root>]                        Wipe the module cache for");
@@ -367,7 +368,8 @@ fn severity_rank(s: &str) -> u8 {
     }
 }
 
-/// --gc-cache <root> — reclaim interned strings nothing references.
+/// --gc-cache <root> — drop dependency rows no landing can take, and reclaim
+/// interned strings nothing references.
 ///
 /// A MAINTENANCE verb, not an automatic sweep, and the distinction is the
 /// point. `strings` is append-only in normal operation: every deletion path
@@ -406,6 +408,11 @@ pub(crate) fn cli_gc_cache(root: &str) {
         before,
         n(sql::GC_COUNT_ORPHANED_STRINGS),
     );
+    // Before the strings sweep, so the names a dropped row held are freed
+    // in the same run.
+    let dependency_rows = module_cache::gc_dependency_rows(&conn);
+    let retired_meta = module_cache::forget_retired_meta(&conn);
+    eprintln!("Dropped {dependency_rows} dependency rows no landing can take; {retired_meta} retired meta rows");
     let missing = n(sql::GC_COUNT_WORKSPACE_FILES);
     let reclaimed = module_cache::gc_strings(&conn);
     eprintln!(

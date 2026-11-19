@@ -31,10 +31,11 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
 
     // The store's gates run before any landing reads a row. There is no
     // warm lane: a landing takes each located file from its row in place of
-    // parsing it, so a warm start lands what a cold one would.
+    // parsing it, so a warm start lands what a cold one would. No gate reads
+    // the map: a dependency row describes its file alone, valid by its own
+    // stamp, whichever map located it.
     let db = module_cache::open_cache_db(ws_root.as_deref(), "perl");
     if let Some(ref conn) = db {
-        let _ = module_cache::validate_dependency_map(conn, &map.generation());
         let _ = module_cache::validate_plugin_fingerprint(
             conn,
             &crate::build::plugin::rhai_host::plugin_fingerprint(),
@@ -166,8 +167,8 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         // A move: every ask is asked again against the new map, which
         // restamps what it still places and lands what it newly places; the
         // sweep, once the re-asks drain, takes back what it no longer places.
-        // The store's rows stay: a held copy may rehydrate from its row until
-        // the sweep, and the next open's map gate clears them.
+        // The store's rows stay: a row describes its file, not the map that
+        // placed it, and one the new map no longer reaches is `--gc-cache`'s.
         if core.queue.map_moved.swap(false, std::sync::atomic::Ordering::AcqRel) {
             (map, map_gen) = core.current_map();
             log::info!("Dependency map moved (generation {}); asking {} names again", map_gen, core.asked.len());
