@@ -123,3 +123,55 @@ fn a_table_keeps_a_name_s_first_row() {
     assert_eq!(map.locate(&Ask::Name("A".into())), [at(&dir, "first.pm", Some("A"))]);
     assert_eq!(map.locate(&Ask::Name("Z".into())), [at(&dir, "second.pm", Some("Z"))]);
 }
+
+fn listed(map: &DependencyMap, workspace: Option<&Path>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    map.for_each_name(workspace, &["pm", "txt"], &mut |n| out.push(n));
+    out.sort();
+    out
+}
+
+/// Every lane lists what it places, read off the filesystem, and every
+/// listed name is one `locate` places.
+#[test]
+fn a_map_lists_the_names_it_places_without_parsing() {
+    let dir = tree(
+        "list",
+        &["table/Pinned.pm", "src/B.pm", "src/C/D.pm", "src/notes.txt", "old/Old/X.pm", "old/New/Y.pm", "a/A/B.pm", "b/A/B.pm", "b/Z.pm"],
+    );
+    let map = DependencyMap::new(
+        vec![
+            Lane::Table(vec![("T::Pinned".into(), dir.join("table/Pinned.pm")), ("T::Gone".into(), dir.join("table/Gone.pm"))]),
+            Lane::Prefix { prefix: "P::".into(), dirs: vec![dir.join("src")], spelling: spelling(), spells: Spells::Remainder },
+            Lane::Prefix { prefix: "Old::".into(), dirs: vec![dir.join("old")], spelling: spelling(), spells: Spells::WholeName },
+            Lane::SearchRoots { roots: vec![dir.join("a"), dir.join("b")], spelling: spelling() },
+            Lane::AlwaysLoad(vec![dir.join("table/Pinned.pm")]),
+        ],
+        Vec::new(),
+        Vec::new(),
+    );
+    let names = listed(&map, None);
+    assert_eq!(names, ["A::B", "A::B", "Old::X", "P::B", "P::C::D", "T::Pinned", "Z"], "a table row whose file is gone, a non-module file, and a whole-name file outside its prefix are not listed");
+    for n in &names {
+        assert!(!map.locate(&Ask::Name(n.clone())).is_empty(), "{n} is listed but not placed");
+    }
+}
+
+/// A listing never walks a filesystem root or a directory the workspace
+/// sits in, and does walk one inside it.
+#[test]
+fn a_listing_never_walks_a_root_the_workspace_sits_in() {
+    let dir = tree("listable", &["ws/lib/In.pm", "ws/Top.pm", "Beside.pm"]);
+    let ws = dir.join("ws");
+    assert!(!listable(Path::new("/"), Some(&ws)));
+    assert!(!listable(&dir, Some(&ws)), "the workspace's parent");
+    assert!(!listable(&ws, Some(&ws)), "the workspace itself");
+    assert!(listable(&ws.join("lib"), Some(&ws)));
+    assert!(listable(&dir, None));
+    let map = DependencyMap::new(
+        vec![Lane::SearchRoots { roots: vec![dir.clone(), ws.clone(), ws.join("lib")], spelling: spelling() }],
+        Vec::new(),
+        Vec::new(),
+    );
+    assert_eq!(listed(&map, Some(&ws)), ["In"]);
+}

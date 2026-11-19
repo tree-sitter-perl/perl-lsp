@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dashmap::DashMap;
 use tower_lsp::lsp_types::*;
 use tower_lsp::lsp_types::{notification, request};
 use tower_lsp::Client;

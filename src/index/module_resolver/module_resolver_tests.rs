@@ -1138,3 +1138,29 @@ fn a_kept_composer_map_is_served_until_an_input_moves() {
     });
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The Perl pin: a search root's modules complete as available before
+/// anything parses them, and a file that is no module lists nothing.
+#[test]
+fn perl_module_completion_lists_the_search_roots_unparsed() {
+    let ws = std::env::temp_dir().join(format!("d10_perl_names_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ws);
+    for rel in ["local/lib/perl5/Dep/Unused.pm", "local/lib/perl5/Dep/Used.pm", "lib/Mine/Thing.pm", "lib/Mine/script.pl"] {
+        let p = ws.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "package X;\n1;\n").unwrap();
+    }
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.set_search_roots_for_test(&[ws.join("local/lib/perl5"), ws.join("lib")]);
+    idx.list_available_for_test(Some(&ws), crate::build::language_driver::LanguageRegistry::served().extensions());
+    let mut got = idx.complete_module_names("");
+    got.sort();
+    assert_eq!(
+        got,
+        [("Dep::Unused".to_string(), false), ("Dep::Used".to_string(), false), ("Mine::Thing".to_string(), false)]
+    );
+    let mut got = idx.complete_module_names("dep::u");
+    got.sort();
+    assert_eq!(got.len(), 2, "the prefix matches case-blind: {got:?}");
+    let _ = std::fs::remove_dir_all(&ws);
+}

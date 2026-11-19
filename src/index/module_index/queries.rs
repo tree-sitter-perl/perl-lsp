@@ -420,9 +420,8 @@ impl ModuleIndex {
             }
         }
 
-        // Tier 2: @INC scan (name only, no analysis yet)
-        for entry in self.core.available_modules.iter() {
-            let name = entry.key();
+        // Tier 2: what the map lists (name only, no analysis yet)
+        for name in self.core.available_names().iter() {
             if name.to_lowercase().starts_with(&prefix_lower) && seen.insert(name.clone()) {
                 results.push((name.clone(), false));
             }
@@ -580,7 +579,7 @@ impl ModuleIndex {
     }
 
     /// Create a ModuleIndex for CLI mode: a real (headless) resolver
-    /// thread — same @INC scan, SQLite warm/persist, and resolve loop as
+    /// thread — same name listing, SQLite warm/persist, and resolve loop as
     /// the server's, without the LSP progress/builtins warmup. One-shot
     /// CLI sessions previously carried NO resolver, so they could never
     /// resolve a module the editor hadn't already cached. The thread
@@ -638,6 +637,14 @@ impl ModuleIndex {
     #[cfg(test)]
     pub fn set_search_roots_for_test(&self, roots: &[std::path::PathBuf]) {
         self.core.publish_dependency_map(Arc::new(crate::build::inc::map_over(roots.to_vec())));
+    }
+
+    /// Test-only: list the current map's names as the resolver does at
+    /// start.
+    #[cfg(test)]
+    pub fn list_available_for_test(&self, workspace: Option<&std::path::Path>, extensions: &[&str]) {
+        let (map, _) = self.core.current_map();
+        self.core.list_available(&map, workspace, extensions);
     }
 
     #[cfg(test)]

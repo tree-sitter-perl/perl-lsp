@@ -2029,6 +2029,7 @@ fn tree_steps_go_through_the_syntax_tree() {
         ("build/cpp_reparse/synthetic.rs", 1, "the C++ reparse's own trees, outside any build forest"),
         ("build/cpp_reparse/validate.rs", 3, "the C++ reparse's own trees, outside any build forest"),
         ("build/cursor_sentinel.rs", 2, "cursor time: one climb per request over the sentinel reparse"),
+        ("build/dependency_map.rs", 1, "std::path::Path, not a tree"),
         ("build/packs/python.rs", 3, "std::path::Path, not a tree"),
         ("build/venv.rs", 1, "std::path::Path, not a tree"),
         ("build/walk_markers.rs", 4, "std::path::Path, not a tree"),

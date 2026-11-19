@@ -302,7 +302,7 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
     let module_index = module_index::ModuleIndex::new_for_cli();
     module_index.mark_long_lived_from_env();
     // Wake the headless resolver: it blocks on this channel for the
-    // @INC scan + SQLite warm.
+    // map's name listing + SQLite warm.
     module_index.set_workspace_root(Some(root_uri.as_str()));
     let ws = open_docs::OpenDocs::new();
     // Only the served language's tree is walked — the same choice the

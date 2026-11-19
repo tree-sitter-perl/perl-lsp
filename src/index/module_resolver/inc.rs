@@ -259,35 +259,3 @@ pub(super) fn parse_one_provider(
     Some(result)
 }
 
-/// Scan the map's search roots for .pm files, populating the
-/// available_modules map. Fast — no file reads, just directory traversal +
-/// path→module name conversion.
-pub(super) fn scan_inc_module_names(map: &DependencyMap, available: &DashMap<String, PathBuf>) {
-    for inc in map.search_roots().iter() {
-        if inc.is_dir() {
-            scan_dir_recursive(inc, inc, available, 0);
-        }
-    }
-}
-
-fn scan_dir_recursive(base: &std::path::Path, dir: &std::path::Path, available: &DashMap<String, PathBuf>, depth: u32) {
-    if depth > 15 { return; } // prevent symlink loops
-    let entries = match std::fs::read_dir(dir) {
-        Ok(rd) => rd,
-        Err(_) => return,
-    };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.is_dir() {
-            scan_dir_recursive(base, &path, available, depth + 1);
-        } else if path.extension().map(|e| e == "pm").unwrap_or(false) {
-            if let Ok(rel) = path.strip_prefix(base) {
-                let module_name = crate::model::conventions::perl_module_from_rel_path(rel);
-                // Roots are walked in search order, so the FIRST one to claim
-                // a name is the one `require` would load — the map's own first
-                // answer for the name. Overwriting would name the LAST root.
-                available.entry(module_name).or_insert_with(|| path.clone());
-            }
-        }
-    }
-}

@@ -30,9 +30,8 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     // repair are its own; a pack's store has the one gate its indexer runs.
     let hub = FrontDoor::of(served) == FrontDoor::Hub;
 
-    // Scan the search roots for available module names (fast, no parsing — just readdir)
-    scan_inc_module_names(&map, &core.available_modules);
-    log::info!("@INC scan: {} modules available", core.available_modules.len());
+    // Listed before `started`, so a one-shot run's `wait_idle` sees it.
+    core.list_available(&map, root_path.as_deref(), served.extensions());
 
     // The store's gates run before any landing reads a row. There is no
     // warm lane: a landing takes each located file from its row in place of
@@ -186,8 +185,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         if core.queue.map_moved.swap(false, std::sync::atomic::Ordering::AcqRel) {
             (map, map_gen) = core.current_map();
             log::info!("Dependency map moved (generation {}); asking {} names again", map_gen, core.asked.len());
-            core.available_modules.clear();
-            scan_inc_module_names(&map, &core.available_modules);
+            core.list_available(&map, root_path.as_deref(), served.extensions());
             let again: Vec<Ask> = core.asked.iter().map(|e| e.key().clone()).collect();
             core.queue.ask(again);
             core.ask(map.declared());

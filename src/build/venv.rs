@@ -51,10 +51,17 @@ pub const SPELLING: ModuleSpelling = ModuleSpelling {
             }
             segments.push(rel.file_stem()?.to_str()?);
         }
-        (!segments.is_empty()).then(|| segments.join(sep()))
+        // A segment that is no identifier (`six-1.0.dist-info`, `tests-data`)
+        // is a directory no import names.
+        (!segments.is_empty() && segments.iter().all(|s| is_identifier(s))).then(|| segments.join(sep()))
     },
     member_of: |name| name.rsplit_once(sep()).map(|(module, _)| module),
 };
+
+fn is_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next().is_some_and(|c| c.is_alphabetic() || c == '_') && chars.all(|c| c.is_alphanumeric() || c == '_')
+}
 
 /// The map for a project at `root` (none: no project, no environment).
 pub fn read_map(root: Option<&Path>) -> Option<DependencyMap> {

@@ -63,9 +63,11 @@ pub(crate) struct IndexCore {
     /// `perlfunc.pod` on first cold-cache miss). Empty until the
     /// resolver has run its warmup path.
     pub(crate) builtins: DashMap<String, String>,
-    /// Known module names from @INC scan. Name → the @INC-order-winning
-    /// path. No exports until resolved.
-    pub(crate) available_modules: DashMap<String, std::path::PathBuf>,
+    /// Every name the current dependency map places, listed without
+    /// parsing (`DependencyMap::for_each_name`): what completion offers as
+    /// "available" before anything lands it. Swapped whole per map
+    /// generation, so a reader never sees a half-built listing.
+    pub(crate) available: std::sync::RwLock<Arc<std::collections::HashSet<String>>>,
     /// ALL cross-file candidates per name, not just the winner in `cache` —
     /// the honest relation for every tier, because a name maps to a SET of
     /// files. Pack: C's flat linkage lets unrelated files each define
@@ -180,6 +182,23 @@ pub(crate) struct IndexCore {
 }
 
 impl IndexCore {
+    /// List `map`'s names and publish them as the available set.
+    pub(crate) fn list_available(&self, map: &crate::build::dependency_map::DependencyMap, workspace: Option<&std::path::Path>, extensions: &[&str]) {
+        let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        crate::util::ghost_stats::timed("resolver.list_names", || {
+            map.for_each_name(workspace, extensions, &mut |n| {
+                names.insert(n);
+            })
+        });
+        log::info!("Dependency map lists {} names", names.len());
+        *self.available.write().unwrap() = Arc::new(names);
+    }
+
+    /// The available set as last listed.
+    pub(crate) fn available_names(&self) -> Arc<std::collections::HashSet<String>> {
+        Arc::clone(&self.available.read().unwrap())
+    }
+
     pub(crate) fn new() -> Self {
         IndexCore {
             cache: DashMap::new(),
@@ -188,7 +207,7 @@ impl IndexCore {
             shapes_by_contributor: DashMap::new(),
             repair_pushed: DashMap::new(),
             builtins: DashMap::new(),
-            available_modules: DashMap::new(),
+            available: Default::default(),
             all_defs: DashMap::new(),
             leaf_defs: DashMap::new(),
             records: FileRecords::default(),

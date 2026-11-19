@@ -350,6 +350,58 @@ impl DependencyMap {
         out
     }
 
+    /// Every name the map places, read off the filesystem without parsing
+    /// anything: a table's names whose file exists, and the name each file
+    /// with one of `extensions` spells under a prefix lane's dirs or a
+    /// search root, by the same spelling `locate` reads it back with (the
+    /// `Ask::File` arm's). A directory the workspace sits in is never
+    /// walked (`listable`).
+    pub fn for_each_name(&self, workspace: Option<&Path>, extensions: &[&str], visit: &mut dyn FnMut(String)) {
+        let under = |dir: &Path, spelling: &ModuleSpelling, visit: &mut dyn FnMut(String)| {
+            if !listable(dir, workspace) {
+                return;
+            }
+            let walk = crate::build::source_files::Walk {
+                extensions,
+                cap: u64::MAX,
+                skip: &[],
+                ignores: false,
+                follow_links: true,
+            };
+            for file in crate::build::source_files::walk(dir, &walk).files {
+                if let Some(name) = file.strip_prefix(dir).ok().and_then(|rel| (spelling.module_of)(rel)) {
+                    visit(name);
+                }
+            }
+        };
+        for lane in &self.lanes {
+            match lane {
+                Lane::Table(rows) => {
+                    for (name, path) in rows {
+                        if path.is_file() {
+                            visit(name.clone());
+                        }
+                    }
+                }
+                Lane::Prefix { prefix, dirs, spelling, spells } => {
+                    for dir in dirs {
+                        under(dir, spelling, &mut |name| match spells {
+                            Spells::Remainder => visit(format!("{prefix}{name}")),
+                            Spells::WholeName if name.starts_with(prefix.as_str()) => visit(name),
+                            Spells::WholeName => {}
+                        });
+                    }
+                }
+                Lane::SearchRoots { roots, spelling } => {
+                    for root in roots {
+                        under(root, spelling, &mut *visit);
+                    }
+                }
+                Lane::AlwaysLoad(_) => {}
+            }
+        }
+    }
+
     /// The search path, canonical, in precedence order.
     pub fn search_roots(&self) -> Arc<Vec<PathBuf>> {
         Arc::clone(&self.search_roots)
@@ -414,6 +466,18 @@ impl DependencyMap {
         }
         format!("{:016x}", h.finish())
     }
+}
+
+/// Whether a listing may walk `dir`: never a filesystem root, and never a
+/// directory the workspace sits in (the workspace itself included), whose
+/// walk would be the whole tree or a stranger's. A directory inside the
+/// workspace (the project's `lib/`, a root package's `src/`) is listed.
+pub fn listable(dir: &Path, workspace: Option<&Path>) -> bool {
+    let dir = CanonicalPath::resolve(dir);
+    if dir.as_path().parent().is_none() {
+        return false;
+    }
+    !workspace.is_some_and(|ws| CanonicalPath::resolve(ws).as_path().starts_with(dir.as_path()))
 }
 
 /// The module name `path` spells under `dir`, if it lies there.

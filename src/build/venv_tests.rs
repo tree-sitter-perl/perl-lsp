@@ -127,3 +127,29 @@ fn python_s_map_is_never_kept() {
     let root = project("unkept", &[(".venv/pyvenv.cfg", ""), (".venv/lib/python3.12/site-packages/six.py", "")]);
     assert!(read_map(Some(&root)).unwrap().encode().is_none());
 }
+
+/// A venv lists its packages and modules by the names an import spells;
+/// a directory no import names (`*.dist-info`, a dashed name) lists
+/// nothing.
+#[test]
+fn an_environment_lists_its_packages_and_modules() {
+    let site = |rel: &str| format!("{SITE}/{rel}");
+    let root = project(
+        "venv-list",
+        &[
+            (".venv/pyvenv.cfg", "home = /usr/bin\n"),
+            (&site("acme/__init__.py"), ""),
+            (&site("acme/models.py"), ""),
+            (&site("acme/sub/__init__.py"), ""),
+            (&site("six.py"), ""),
+            (&site("six-1.16.0.dist-info/record.py"), ""),
+            (&site("not-a-pkg/thing.py"), ""),
+            (&site("acme/data.txt"), ""),
+        ],
+    );
+    let map = read_map(Some(&root)).unwrap();
+    let mut names: Vec<String> = Vec::new();
+    map.for_each_name(Some(&root), &["py"], &mut |n| names.push(n));
+    names.sort();
+    assert_eq!(names, ["acme", "acme.models", "acme.sub", "six"]);
+}

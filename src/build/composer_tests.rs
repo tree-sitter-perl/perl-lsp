@@ -239,6 +239,43 @@ fn lanes_answer_in_composer_s_order_and_files_load_under_no_name() {
         .any(|l| l.loads_as.as_deref() == Some("Acme\\Model\\Base")));
 }
 
+/// The listing names what `locate` places: the classmap's classes whose
+/// file exists, and each file under a PSR-4 directory as prefix + path. A
+/// PSR-0 file lists by the name its path spells, which an underscored
+/// prefix never starts (that class lists only through the classmap). The
+/// root package's own directories sit inside the workspace and are listed.
+#[test]
+fn the_name_listing_spells_what_locate_answers() {
+    let root = project(
+        "listing",
+        &[
+            ("composer.json", ROOT_JSON),
+            ("vendor/composer/installed.json", V2),
+            ("vendor/acme/model/src/Base.php", "<?php"),
+            ("vendor/acme/model/src/Unused.php", "<?php"),
+            ("vendor/acme/model/src/notes.md", ""),
+            ("vendor/acme/model/deep/Thing.php", "<?php"),
+            ("vendor/acme/model/helpers.php", "<?php"),
+            ("vendor/old/lib/lib/Old/Tool/Hammer.php", "<?php"),
+            ("vendor/old/lib/legacy/anything.php", "<?php\nclass Legacy_Widget {}\n"),
+            ("vendor/composer/autoload_classmap.php", CLASSMAP),
+            ("src/Models/User.php", "<?php"),
+        ],
+    );
+    let map = read_map(Some(&root)).unwrap();
+    let mut names: Vec<String> = Vec::new();
+    map.for_each_name(Some(&root), &["php"], &mut |n| names.push(n));
+    names.sort();
+    names.dedup();
+    assert_eq!(
+        names,
+        ["Acme\\Model\\Base", "Acme\\Model\\Deep\\Thing", "Acme\\Model\\Unused", "App\\Models\\User", "Legacy_Widget"]
+    );
+    for n in &names {
+        assert!(!at(&map, n).is_empty(), "{n} is listed but not placed");
+    }
+}
+
 /// The project `lanes_answer_in_composer_s_order…` reads, every lane kind
 /// present.
 fn kept_project(tag: &str) -> PathBuf {
