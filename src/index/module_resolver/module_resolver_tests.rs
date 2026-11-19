@@ -87,11 +87,11 @@ sub new {
     let cached = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/x/Demo/Has/Event.pm")), analysis));
 
     // Workspace-index style insert: a resolved module.
-    core.land_providers("Demo::Has::Event", Some(vec![cached]), false, false);
+    core.land_providers("Demo::Has::Event", Some(vec![cached]), false, false, 1);
     assert!(core.cache.get("Demo::Has::Event").as_deref().unwrap().is_some());
 
     // On-demand resolver miss: `None`. Must NOT clobber the indexed copy.
-    core.land_providers("Demo::Has::Event", None, false, false);
+    core.land_providers("Demo::Has::Event", None, false, false, 1);
     assert!(
         core.cache.get("Demo::Has::Event").as_deref().unwrap().is_some(),
         "a None on-demand miss clobbered an already-indexed module",
@@ -102,7 +102,7 @@ sub new {
     let tree2 = parser.parse(source, None).unwrap();
     let analysis2 = std::sync::Arc::new(crate::build::builder::build(&tree2, source.as_bytes()));
     let cached2 = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/y/Demo/Has/Event.pm")), analysis2));
-    core.land_providers("Demo::Has::Event", Some(vec![cached2]), false, false);
+    core.land_providers("Demo::Has::Event", Some(vec![cached2]), false, false, 1);
     assert_eq!(
         core.cache.get("Demo::Has::Event").as_deref().unwrap().as_ref().unwrap().path,
         crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/y/Demo/Has/Event.pm")),
@@ -246,47 +246,34 @@ fn import_tier_strip_gates_on_persistence() {
 }
 
 
-/// The priority lane is guarded by its OWN mutex while the drain waits on the
-/// `pending` one, so a `request_resolve` for a stale module can land after the
-/// drain's priority check and before it parks — the notify reaches nobody and
-/// the wait loop, which only re-checked `pending`, never looks at priority
-/// again. In an all-stale workload (an `EXTRACT_VERSION` bump: every
-/// `request_resolve` takes the priority branch) nothing ever pushes `pending`,
-/// so the resolver sleeps for the rest of the session and cross-file
-/// resolution silently never completes.
+/// A map move sets a flag, not a queue entry, so with nothing asked the
+/// parked drain must still wake and hand back an empty batch — otherwise the
+/// thread adopts the new map only when some unrelated ask arrives, and
+/// `wait_idle` waits on a flag nobody clears. The batch marks the queue busy
+/// as it is taken, so an idle check cannot slip between the two.
 #[test]
-fn priority_push_wakes_a_parked_drain() {
+fn a_map_move_wakes_a_parked_drain() {
     use std::sync::mpsc;
-    use std::sync::{Condvar, Mutex};
 
-    let queue = Arc::new(ResolveQueue {
-        priority: Mutex::new(Vec::new()),
-        pending: Mutex::new(Vec::new()),
-        condvar: Condvar::new(),
-    });
+    let queue = Arc::new(ResolveQueue::new());
     let (tx, rx) = mpsc::channel();
     let q = Arc::clone(&queue);
     std::thread::spawn(move || {
         let _ = tx.send(drain_next_batch(&q));
     });
 
-    // Let the drain get past its priority check and park in `wait(pending)`.
-    // Generous: the drain reaches the park in microseconds, so an early push
-    // (which the first priority check would catch, hiding the bug) is not a
-    // realistic outcome here.
+    // Let the drain park in `wait(pending)`; an earlier flag would be caught
+    // by its first check and hide a lost wake.
     std::thread::sleep(std::time::Duration::from_millis(300));
 
-    // Exactly what `ModuleIndex::request_resolve` does for a stale module.
-    {
-        let mut p = queue.priority.lock().unwrap();
-        p.push("Stale::Module".to_string());
-    }
-    queue.condvar.notify_one();
+    queue.map_moved.store(true, std::sync::atomic::Ordering::Release);
+    queue.wake();
 
     let batch = rx
         .recv_timeout(std::time::Duration::from_secs(5))
-        .expect("a priority push must wake the parked drain");
-    assert_eq!(batch, vec!["Stale::Module".to_string()]);
+        .expect("a map move must wake the parked drain");
+    assert!(batch.is_empty(), "a move alone is an empty batch, got {batch:?}");
+    assert!(queue.busy.load(std::sync::atomic::Ordering::Acquire), "the taken batch marks the queue busy");
 }
 
 // ---- The @INC tier's candidate relation ----
@@ -746,7 +733,7 @@ fn a_landing_reads_the_files_row_in_place_of_parsing_it() {
     let mut parser = create_parser();
 
     let core = IndexCore::new();
-    let (_, stored) = land_module(&core, Some(&conn), &inc, "Row::Cached", &mut parser, &mut HashMap::new(), false);
+    let (_, stored) = land_module(&core, Some(&conn), &inc, 1, "Row::Cached", &mut parser, &mut HashMap::new(), false);
     assert!(stored.is_some());
     let canon = crate::util::canonical_path::CanonicalPath::resolve(pm.clone());
     let (key, source): (String, String) = conn
@@ -760,11 +747,11 @@ fn a_landing_reads_the_files_row_in_place_of_parsing_it() {
     std::fs::write(&pm, "package Row::Cached;\nsub bb { 1 }\n1;\n").unwrap();
     std::fs::File::options().write(true).open(&pm).unwrap().set_modified(mtime).unwrap();
     let core = IndexCore::new();
-    let (whole, _) = land_module(&core, Some(&conn), &inc, "Row::Cached", &mut parser, &mut HashMap::new(), false);
+    let (whole, _) = land_module(&core, Some(&conn), &inc, 1, "Row::Cached", &mut parser, &mut HashMap::new(), false);
     let names: Vec<String> = whole.unwrap()[0].analysis.symbols().iter().map(|s| s.name.clone()).collect();
     assert!(names.iter().any(|n| n == "aa") && !names.iter().any(|n| n == "bb"), "{names:?}");
 
-    let (_, missed) = land_module(&core, Some(&conn), &inc, "Row::Absent", &mut parser, &mut HashMap::new(), false);
+    let (_, missed) = land_module(&core, Some(&conn), &inc, 1, "Row::Absent", &mut parser, &mut HashMap::new(), false);
     assert!(missed.is_none());
     let rows: i64 = conn.query_row("SELECT COUNT(*) FROM modules", [], |r| r.get(0)).unwrap();
     assert_eq!(rows, 1, "a miss is never remembered");

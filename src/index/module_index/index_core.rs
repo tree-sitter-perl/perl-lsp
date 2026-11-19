@@ -9,6 +9,22 @@
 
 use super::*;
 
+/// What an ask came to at its generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    /// A file the map placed answers it.
+    Landed,
+    /// Nothing the map places answers it.
+    Miss,
+}
+
+struct PublishedMap {
+    map: Arc<crate::build::dependency_map::DependencyMap>,
+    /// Its generation as read: `DependencyMap::generation` re-stats the
+    /// manifests, so a later call would already see the move.
+    stamp: String,
+}
+
 pub(crate) struct IndexCore {
     pub(crate) cache: DashMap<String, Option<Arc<CachedModule>>>,
     /// See `ModuleEdgeIndexes` — names + bridges + children reverse maps.
@@ -78,15 +94,26 @@ pub(crate) struct IndexCore {
     pub(crate) all_files: DashMap<crate::util::canonical_path::CanonicalPath, Arc<CachedModule>>,
     /// The dependency map this process locates from: the one owner of the
     /// search roots (the visibility rank reads them, the landing locates
-    /// through it, the walk skips its tier roots). Read once per process by
-    /// the served language's reader (`dependency_map_for`), and set once:
-    /// the visibility rank reads it on request paths, where a set-once cell
-    /// costs a load and a lock would cost a shared write; `None` until
-    /// then, which every reader takes as an empty map.
-    pub(crate) dependency_map: std::sync::OnceLock<Arc<crate::build::dependency_map::DependencyMap>>,
+    /// through it, the walk skips its tier roots). Read by the served
+    /// language's reader (`dependency_map_for`), and replaced only when a
+    /// manifest it was read from moves (`reread_dependency_map`); `None`
+    /// until the first read, which every reader takes as an empty map.
+    dependency_map: std::sync::RwLock<Option<PublishedMap>>,
     /// Held across a read so concurrent first askers (the walk and the
     /// resolver thread) read the map once.
     map_read: Mutex<()>,
+    /// The process's map generation: 0 before the first map, then one more
+    /// for every map that moved. A dependency placement carries the
+    /// generation that last made it (`FileRecords`), and the memo below is
+    /// current only at this one.
+    pub(crate) map_gen: std::sync::atomic::AtomicU64,
+    /// Between a map move and its sweep: placements of an older generation
+    /// may still be held, and the candidate reads leave them out.
+    pub(crate) map_moving: std::sync::atomic::AtomicBool,
+    /// The resolver's memo: every ask, with the generation it was answered
+    /// at and its outcome. An ask current here is not asked again; a miss
+    /// lives only here, never in the name slot or the store.
+    pub(crate) asked: DashMap<crate::build::dependency_map::Ask, (u64, Outcome)>,
     pub(crate) queue: ResolveQueue,
     pub(crate) resolved: ResolveNotify,
     pub(crate) workspace_root: WorkspaceRootChannel,
@@ -166,13 +193,12 @@ impl IndexCore {
             leaf_defs: DashMap::new(),
             records: FileRecords::default(),
             all_files: DashMap::new(),
-            dependency_map: std::sync::OnceLock::new(),
+            dependency_map: std::sync::RwLock::new(None),
             map_read: Mutex::new(()),
-            queue: ResolveQueue {
-                priority: Mutex::new(Vec::new()),
-                pending: Mutex::new(Vec::new()),
-                condvar: Condvar::new(),
-            },
+            map_gen: std::sync::atomic::AtomicU64::new(0),
+            map_moving: std::sync::atomic::AtomicBool::new(false),
+            asked: DashMap::new(),
+            queue: ResolveQueue::new(),
             resolved: ResolveNotify { mu: Mutex::new(()), cv: Condvar::new() },
             workspace_root: WorkspaceRootChannel {
                 root: Mutex::new(None),
@@ -209,18 +235,112 @@ impl IndexCore {
             return Some(m);
         }
         let map = Arc::new(crate::util::timings::phase("dependency_map::read", || driver.dependency_map(root))?);
-        self.set_dependency_map(Arc::clone(&map));
+        self.publish_dependency_map(Arc::clone(&map));
         Some(map)
+    }
+
+    /// Re-read the map after one of its manifests moved. `true` when the
+    /// read is a new map (a move, published); an unchanged read changes
+    /// nothing.
+    pub(crate) fn reread_dependency_map(
+        &self,
+        driver: &dyn crate::build::language_driver::LanguageDriver,
+        root: Option<&std::path::Path>,
+    ) -> bool {
+        let _g = self.map_read.lock().unwrap_or_else(|e| e.into_inner());
+        match crate::util::timings::phase("dependency_map::read", || driver.dependency_map(root)) {
+            Some(map) => self.publish_dependency_map(Arc::new(map)),
+            None => false,
+        }
     }
 
     /// The map read so far, if any.
     pub(crate) fn dependency_map(&self) -> Option<Arc<crate::build::dependency_map::DependencyMap>> {
-        self.dependency_map.get().cloned()
+        self.dependency_map
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|p| Arc::clone(&p.map))
     }
 
-    /// Publish the map. The first publish wins: a process reads one map.
-    pub(crate) fn set_dependency_map(&self, map: Arc<crate::build::dependency_map::DependencyMap>) {
-        let _ = self.dependency_map.set(map);
+    /// Publish `map`. The first is generation 1; a later one whose
+    /// generation differs is a move: the generation advances, older
+    /// placements stop being current, and the resolver thread is told to
+    /// re-ask its memo and sweep. `true` when it moved.
+    pub(crate) fn publish_dependency_map(&self, map: Arc<crate::build::dependency_map::DependencyMap>) -> bool {
+        use std::sync::atomic::Ordering;
+        let stamp = map.generation();
+        let mut slot = self.dependency_map.write().unwrap_or_else(|e| e.into_inner());
+        let moved = match slot.as_ref() {
+            None => {
+                self.map_gen.store(1, Ordering::Release);
+                false
+            }
+            Some(old) if old.stamp == stamp => return false,
+            Some(_) => {
+                self.map_moving.store(true, Ordering::Release);
+                self.map_gen.fetch_add(1, Ordering::AcqRel);
+                true
+            }
+        };
+        *slot = Some(PublishedMap { map, stamp });
+        drop(slot);
+        if moved {
+            crate::util::ghost_stats::count("dependency.map_moved");
+            self.note_shape_change();
+            self.queue.map_moved.store(true, Ordering::Release);
+            self.queue.wake();
+        }
+        moved
+    }
+
+    /// The map and its generation, read together: a landing stamps what it
+    /// located with the generation of the map it located through.
+    pub(crate) fn current_map(&self) -> (Arc<crate::build::dependency_map::DependencyMap>, u64) {
+        let slot = self.dependency_map.read().unwrap_or_else(|e| e.into_inner());
+        match slot.as_ref() {
+            Some(p) => (Arc::clone(&p.map), self.map_generation()),
+            None => (Arc::new(crate::build::dependency_map::DependencyMap::empty()), self.map_generation()),
+        }
+    }
+
+    /// The current map generation (0: no map yet).
+    pub(crate) fn map_generation(&self) -> u64 {
+        self.map_gen.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Whether `ask` was answered at the current generation.
+    pub(crate) fn asked_now(&self, ask: &crate::build::dependency_map::Ask) -> bool {
+        let now = self.map_generation();
+        self.asked.get(ask).is_some_and(|e| e.0 == now)
+    }
+
+    /// THE ask: queue each of `asks` not answered at the current generation
+    /// for the resolver thread. Non-blocking; one-shot callers `wait_idle`.
+    pub(crate) fn ask(&self, asks: impl IntoIterator<Item = crate::build::dependency_map::Ask>) {
+        let fresh: Vec<_> = asks
+            .into_iter()
+            .filter(|a| {
+                let settled = self.asked_now(a);
+                if settled {
+                    if let crate::build::dependency_map::Ask::Name(n) = a {
+                        crate::util::timings::record_cached(n.as_str());
+                    }
+                }
+                !settled
+            })
+            .collect();
+        if !fresh.is_empty() {
+            self.queue.ask(fresh);
+        }
+    }
+
+    /// Whether `path` is a current candidate under `name`: always, unless a
+    /// map move left it a placement of an older generation the sweep has not
+    /// reached yet. Free outside a move.
+    pub(crate) fn placed_now(&self, path: &crate::util::canonical_path::CanonicalPath, name: &str) -> bool {
+        !self.map_moving.load(std::sync::atomic::Ordering::Acquire)
+            || self.records.placed_at(path, name, self.map_generation())
     }
 
     /// Mint a fresh monotonic registration generation for `path`. The
@@ -302,26 +422,20 @@ impl IndexCore {
     /// derived from the records. Returns the stored copies (the caller's
     /// memo value).
     ///
-    /// A `None` miss never clobbers an already-indexed copy: on-demand @INC
-    /// resolution can miss a module the workspace indexer already built (a
-    /// project module under a relative `use lib` the resolver's @INC doesn't
-    /// cover), and clobbering would leave the reverse index pointing at a
-    /// module the cache no longer holds.
+    /// Each placement is stamped with `map_gen`, the generation that located
+    /// it. A miss touches nothing: it is the memo's (`IndexCore::asked`),
+    /// never the slot's.
     pub(crate) fn land_providers(
         &self,
         module_name: &str,
         result: Option<Providers>,
         persisted: bool,
         strip: bool,
+        map_gen: u64,
     ) -> Option<Providers> {
+        let providers = self.tier_providers(result)?;
         crate::util::ghost_stats::count("epoch.shape.insert_resolved");
         self.note_shape_change();
-        let Some(providers) = self.tier_providers(result) else {
-            if !matches!(self.cache.get(module_name).as_deref(), Some(Some(_))) {
-                self.set_slot(module_name, None);
-            }
-            return None;
-        };
         // One purge, then one push per provider: `record_loader_shapes`
         // clears the contributor's entries before pushing, so calling it
         // per provider would leave only the last one's shapes.
@@ -342,7 +456,8 @@ impl IndexCore {
             self.records.land_dependency(
                 &m.path,
                 package_names(&whole.analysis),
-                (module_name.to_string(), precedence),
+                file_records::Placement { name: module_name.to_string(), precedence, map_gen },
+                crate::index::module_cache::file_stamp(&m.path),
             );
             self.all_files.insert(m.path.clone(), m.clone());
             self.all_defs.entry(module_name.to_string()).or_default().upsert(m.clone());
@@ -387,6 +502,7 @@ impl IndexCore {
         };
         let (workspace, deps): (Vec<&Arc<CachedModule>>, Vec<&Arc<CachedModule>>) = cands
             .iter()
+            .filter(|c| self.placed_now(&c.path, name))
             .partition(|c| self.records.role_of(&c.path) == Some(FileRole::Workspace));
         let winner = if !workspace.is_empty() {
             best_candidate(&workspace, name, &|m, n| self.defines_class(m, n))
@@ -414,30 +530,96 @@ impl IndexCore {
         crate::util::ghost_stats::count("dependency.retired");
         self.note_shape_change();
         self.all_files.remove(path);
-        for (name, _) in &record.loads_as {
-            if let Some(mut v) = self.all_defs.get_mut(name) {
-                v.remove_path(path);
-            }
-            self.all_defs.remove_if(name, |_, v| v.is_empty());
-            self.edges.purge_module(name);
-            let survivors: Vec<Arc<CachedModule>> =
-                self.all_defs.get(name).map(|v| v.to_vec()).unwrap_or_default();
-            for c in &survivors {
-                self.edges.feed(name, &c.path, &c.analysis);
-            }
-            if survivors.is_empty() {
-                self.purge_loader_shapes(name);
-                if matches!(self.cache.get(name).as_deref(), Some(Some(c)) if c.path == *path) {
-                    self.clear_slot(name);
-                }
-            } else {
-                self.derive_slot(name);
-            }
+        for p in &record.loads_as {
+            self.drop_candidate(&p.name, path);
         }
         self.edges.remove_path_record(path);
         if let Some(bc) = self.bag_cache.read().ok().and_then(|g| g.clone()) {
             bc.invalidate(path);
         }
+    }
+
+    /// `path` is no longer a candidate under `name`: re-feed the name's
+    /// edges from the survivors and re-derive its slot.
+    fn drop_candidate(&self, name: &str, path: &crate::util::canonical_path::CanonicalPath) {
+        if let Some(mut v) = self.all_defs.get_mut(name) {
+            v.remove_path(path);
+        }
+        self.all_defs.remove_if(name, |_, v| v.is_empty());
+        self.edges.purge_module(name);
+        let survivors: Vec<Arc<CachedModule>> = self.all_defs.get(name).map(|v| v.to_vec()).unwrap_or_default();
+        for c in &survivors {
+            self.edges.feed(name, &c.path, &c.analysis);
+        }
+        if survivors.is_empty() {
+            self.purge_loader_shapes(name);
+            if matches!(self.cache.get(name).as_deref(), Some(Some(c)) if c.path == *path) {
+                self.clear_slot(name);
+            }
+        } else {
+            self.derive_slot(name);
+        }
+    }
+
+    /// A map move's restamp: when every file the current map places under
+    /// `name` (the project's aside — the walk owns those) is already held
+    /// there, unchanged on disk, its placements carry over to this
+    /// generation at the new map's precedence — no parse, no row read, no
+    /// re-feed. `None` when anything differs; the caller lands the name
+    /// afresh. Returns the held copies.
+    pub(crate) fn restamp_placed(
+        &self,
+        located: &[crate::util::canonical_path::CanonicalPath],
+        name: &str,
+        map_gen: u64,
+    ) -> Option<Providers> {
+        use file_records::HeldAs;
+        let mut held: Vec<(&crate::util::canonical_path::CanonicalPath, Arc<CachedModule>)> = Vec::new();
+        for path in located {
+            match self.records.placement_of(path, name, || crate::index::module_cache::file_stamp(path)) {
+                HeldAs::Project => continue,
+                HeldAs::Placed => held.push((path, self.all_files.get(path)?.clone())),
+                HeldAs::Other => return None,
+            }
+        }
+        if held.is_empty() {
+            return None;
+        }
+        for (precedence, (path, _)) in held.iter().enumerate() {
+            self.records.restamp(path, name, precedence, map_gen);
+        }
+        crate::util::ghost_stats::count_by("dependency.restamped", held.len() as u64);
+        self.derive_slot(name);
+        Some(held.into_iter().map(|(_, m)| m).collect())
+    }
+
+    /// The idle sweep after a map move: every placement an older generation
+    /// made and the current one did not renew is taken back, a file with no
+    /// placement left is retired, and the memo forgets the older asks.
+    pub(crate) fn sweep_stale_placements(&self) {
+        let now = self.map_generation();
+        let stale = self.records.stale_placements(now);
+        crate::util::ghost_stats::count_by("dependency.swept", stale.len() as u64);
+        for (path, name) in stale {
+            match self.records.unplace(&path, &name) {
+                Some(true) => {
+                    self.note_shape_change();
+                    self.all_files.remove(&path);
+                    self.drop_candidate(&name, &path);
+                    self.edges.remove_path_record(&path);
+                    if let Some(bc) = self.bag_cache.read().ok().and_then(|g| g.clone()) {
+                        bc.invalidate(&path);
+                    }
+                }
+                Some(false) => {
+                    self.note_shape_change();
+                    self.drop_candidate(&name, &path);
+                }
+                None => {}
+            }
+        }
+        self.asked.retain(|_, (g, _)| *g == now);
+        self.map_moving.store(false, std::sync::atomic::Ordering::Release);
     }
 
     /// A front door is about to register `path` as the project's: a

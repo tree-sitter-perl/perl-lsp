@@ -14,29 +14,51 @@ use crate::util::canonical_path::CanonicalPath;
 /// parent exactly once.
 pub type ParseMemo = HashMap<String, Option<Providers>>;
 
-/// THE landing of one `@INC` module name, shared by the resolver thread and
-/// the one-shot CLI: locate every file the map places under the name, take
-/// each from its current row (`rows`) or parse it, keep what the tier may
-/// hold (`IndexCore::tier_providers`), persist those path-keyed, and land
-/// them (`IndexCore::land_providers`). `strip` is the eviction switch; a copy
+/// THE landing of one module name, run only by the resolver thread: locate
+/// every file the map places under the name; when each is already held
+/// there, unchanged, carry its placement over to `map_gen`
+/// (`IndexCore::restamp_placed`); otherwise take each from its current row
+/// (`rows`) or parse it, keep what the tier may hold
+/// (`IndexCore::tier_providers`), persist those path-keyed, and land them
+/// (`IndexCore::land_providers`). `strip` is the eviction switch; a copy
 /// strips only once its row is on disk. Returns the whole copies (what a
-/// descent reads — the strip drops the bag) and the stored ones.
+/// descent reads — the strip drops the bag; `None` for a restamp, whose
+/// descent was asked when it first landed) and the stored ones.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn land_module(
     core: &IndexCore,
     rows: Option<&rusqlite::Connection>,
     map: &DependencyMap,
+    map_gen: u64,
     module_name: &str,
     parser: &mut Parser,
     memo: &mut ParseMemo,
     strip: bool,
 ) -> (Option<Providers>, Option<Providers>) {
-    let whole = core.tier_providers(resolve_providers(map, module_name, parser, memo, rows));
+    let located = located_as(map, module_name);
+    if let Some(held) = core.restamp_placed(&located, module_name, map_gen) {
+        return (None, Some(held));
+    }
+    let mut visiting: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let parsed = resolve_and_parse_inner(map, module_name, Some(located), parser, &mut visiting, memo, rows);
+    let whole = core.tier_providers(parsed);
     let persisted = match (rows, &whole) {
         (Some(conn), Some(providers)) => providers.iter().all(|m| persist_dependency(conn, m)),
         _ => false,
     };
-    let stored = core.land_providers(module_name, whole.clone(), persisted, strip);
+    let stored = core.land_providers(module_name, whole.clone(), persisted, strip, map_gen);
     (whole, stored)
+}
+
+/// The files the map places under `module_name` that load as it, in the
+/// map's order. A file placed under a name it does not load as (an
+/// enclosing module) is not that name's provider.
+fn located_as(map: &DependencyMap, module_name: &str) -> Vec<CanonicalPath> {
+    map.locate(&Ask::Name(module_name.to_string()))
+        .into_iter()
+        .filter(|l| l.loads_as.as_deref() == Some(module_name))
+        .map(|l| l.path)
+        .collect()
 }
 
 #[allow(dead_code)]
@@ -70,25 +92,14 @@ pub fn resolve_and_parse_with_memo(
     parser: &mut Parser,
     memo: &mut ParseMemo,
 ) -> Option<Providers> {
-    resolve_providers(map, module_name, parser, memo, None)
-}
-
-/// `resolve_and_parse_with_memo`, taking each file from its current row in
-/// `rows` when there is one.
-fn resolve_providers(
-    map: &DependencyMap,
-    module_name: &str,
-    parser: &mut Parser,
-    memo: &mut ParseMemo,
-    rows: Option<&rusqlite::Connection>,
-) -> Option<Providers> {
     let mut visiting: std::collections::HashSet<String> = std::collections::HashSet::new();
-    resolve_and_parse_inner(map, module_name, parser, &mut visiting, memo, rows)
+    resolve_and_parse_inner(map, module_name, None, parser, &mut visiting, memo, None)
 }
 
 fn resolve_and_parse_inner(
     map: &DependencyMap,
     module_name: &str,
+    located: Option<Vec<CanonicalPath>>,
     parser: &mut Parser,
     visiting: &mut std::collections::HashSet<String>,
     memo: &mut ParseMemo,
@@ -106,14 +117,9 @@ fn resolve_and_parse_inner(
     // carries its own subs and `@ISA`, and the candidate relation is only
     // as honest as its acquisition.
     let mut providers: Providers = Vec::new();
-    // A file the map places under a name it does not load as (an enclosing
-    // module) is not that name's provider.
-    for located in map.locate(&Ask::Name(module_name.to_string())) {
-        if located.loads_as.as_deref() != Some(module_name) {
-            continue;
-        }
+    for path in located.unwrap_or_else(|| located_as(map, module_name)) {
         if let Some(cached) =
-            parse_one_provider(map, module_name, located.path, parser, visiting, memo, rows)
+            parse_one_provider(map, module_name, path, parser, visiting, memo, rows)
         {
             providers.push(cached);
         }
@@ -170,7 +176,7 @@ fn parse_one_provider(
         let parents = crate::index::module_index::primary_package_parents(&analysis, module_name);
         for parent in &parents {
             let parent_primary =
-                resolve_and_parse_inner(map, parent, parser, visiting, memo, rows)
+                resolve_and_parse_inner(map, parent, None, parser, visiting, memo, rows)
                     .and_then(|p| p.into_iter().next());
             if let Some(parent_cached) = parent_primary {
                 if !parent_cached.analysis.export.is_empty()

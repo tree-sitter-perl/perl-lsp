@@ -241,25 +241,23 @@ impl ModuleIndex {
         member_prefilter_may_declare(rows)
     }
 
-    /// Block until `module_name` appears in the cache, or timeout.
-    /// (Used by tests and the one-shot CLI import resolution.)
-    #[doc(hidden)]
+    /// Block until `module_name` was answered at the current map generation
+    /// (landed or missed), or timeout; `true` when it landed. A test's
+    /// per-name wait — production one-shot callers `wait_idle`.
+    #[cfg(test)]
     pub fn wait_resolved(&self, module_name: &str, timeout: std::time::Duration) -> bool {
+        let ask = crate::build::dependency_map::Ask::Name(module_name.to_string());
         let deadline = std::time::Instant::now() + timeout;
         let mut guard = self.core.resolved.mu.lock().unwrap();
         loop {
-            if self.core.cache.contains_key(module_name) {
-                return true;
+            if self.core.asked_now(&ask) {
+                return self.core.asked.get(&ask).is_some_and(|e| e.1 == super::Outcome::Landed);
             }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 return false;
             }
-            let (g, result) = self.core.resolved.cv.wait_timeout(guard, remaining).unwrap();
-            guard = g;
-            if result.timed_out() && !self.core.cache.contains_key(module_name) {
-                return false;
-            }
+            guard = self.core.resolved.cv.wait_timeout(guard, remaining).unwrap().0;
         }
     }
 
@@ -734,7 +732,7 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn search_roots(&self) -> Arc<Vec<std::path::PathBuf>> {
-        self.core.dependency_map.get().map(|m| m.search_roots()).unwrap_or_default()
+        self.core.dependency_map().map(|m| m.search_roots()).unwrap_or_default()
     }
 
     fn workspace_root_path(&self) -> Option<std::path::PathBuf> {
@@ -766,7 +764,9 @@ impl CrossFileLookup for ModuleIndex {
     fn def_candidates(&self, name: &str) -> Vec<Arc<CachedModule>> {
         match self.core.all_defs.get(name) {
             Some(cands) if !cands.is_empty() => {
-                cands.to_vec()
+                let mut cands = cands.to_vec();
+                cands.retain(|c| self.core.placed_now(&c.path, name));
+                cands
             }
             // No workspace candidates: fall back to the name-slot winner.
             // The @INC tier lands here — single-provider by CURRENT

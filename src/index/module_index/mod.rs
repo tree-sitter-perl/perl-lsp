@@ -136,27 +136,58 @@ fn best_candidate<'c>(
 
 // ---- Internal sync primitives (pub(crate) for resolver thread) ----
 
-/// Thread-safe queue: Mutex<Vec> + Condvar.
+/// What the resolver thread has been asked and not yet taken, plus the
+/// state "is it idle" reads. One lane: every asker queues here, and the
+/// memo (`IndexCore::asked`) — not a queue position — says what is settled.
 pub(crate) struct ResolveQueue {
-    /// High priority: stale modules from open files. Drained first.
-    pub priority: Mutex<Vec<String>>,
-    /// Normal priority: missing modules.
-    pub pending: Mutex<Vec<String>>,
+    pub pending: Mutex<Vec<crate::build::dependency_map::Ask>>,
     pub condvar: Condvar,
+    /// A new map was published: the thread re-asks its memo against it and
+    /// sweeps what the new map no longer places. A flag, so the drain hands
+    /// back an empty batch when nothing else is queued.
+    pub map_moved: std::sync::atomic::AtomicBool,
+    /// A manifest the map was read from moved: the thread re-reads the map.
+    pub map_inputs_moved: std::sync::atomic::AtomicBool,
+    /// A batch is out of the queue and not yet landed. Set under `pending`
+    /// as the batch is taken, so "queue empty and not busy" is never true
+    /// while an ask is in flight.
+    pub busy: std::sync::atomic::AtomicBool,
+    /// The thread has read its map and run the store's gates; before that
+    /// an empty queue is not idle.
+    pub started: std::sync::atomic::AtomicBool,
+    /// A resolver thread serves this queue. Without one nothing would ever
+    /// drain it, so `wait_idle` has nothing to wait for.
+    pub served: std::sync::atomic::AtomicBool,
 }
 
 impl ResolveQueue {
-    /// Wake the drain after enqueueing. The notify is taken under `pending`
-    /// — the mutex `drain_next_batch` parks on — so it cannot land in the
-    /// window between the drain's queue checks and its park, where a condvar
-    /// has nobody to signal and the wakeup is simply lost. Free for a
-    /// `pending` push (that mutex already serializes it), load-bearing for a
-    /// `priority` one, whose own mutex gives no such ordering.
-    ///
-    /// The caller must have RELEASED `priority` first: the drain acquires
-    /// pending-then-priority, so holding both the other way round closes a
-    /// cycle.
-    pub fn notify_new_work(&self) {
+    pub(crate) fn new() -> Self {
+        ResolveQueue {
+            pending: Mutex::new(Vec::new()),
+            condvar: Condvar::new(),
+            map_moved: Default::default(),
+            map_inputs_moved: Default::default(),
+            busy: Default::default(),
+            started: Default::default(),
+            served: Default::default(),
+        }
+    }
+
+    /// Queue `asks` and wake the drain. The notify is taken under `pending`
+    /// — the mutex the drain parks on — so it cannot fall between the
+    /// drain's checks and its park.
+    pub(crate) fn ask(&self, asks: impl IntoIterator<Item = crate::build::dependency_map::Ask>) {
+        let mut pending = self.pending.lock().unwrap();
+        for a in asks {
+            if !pending.contains(&a) {
+                pending.push(a);
+            }
+        }
+        self.condvar.notify_one();
+    }
+
+    /// Wake the drain for a flag set outside `pending`.
+    pub(crate) fn wake(&self) {
         let _pending = self.pending.lock().unwrap();
         self.condvar.notify_one();
     }
@@ -178,7 +209,7 @@ mod parts;
 pub use parts::*;
 
 mod index_core;
-pub(crate) use index_core::IndexCore;
+pub(crate) use index_core::{IndexCore, Outcome};
 #[cfg(test)]
 pub(crate) use index_core::strip_import_copy_one;
 

@@ -244,7 +244,7 @@ fn test_resolver_thread_flow() {
     if idx.inc_paths().is_empty() {
         return;
     }
-    idx.request_resolve("Carp");
+    idx.request(crate::build::dependency_map::Ask::Name("Carp".to_string()));
     assert!(
         idx.wait_resolved("Carp", std::time::Duration::from_secs(10)),
         "Carp should be resolved via thread"
@@ -1267,7 +1267,7 @@ fn thread_path_resolution_feeds_loader_config_shapes() {
     // file:// spelling — the thread's project-lib discovery strips the
     // scheme to find `lib/`.
     idx.set_workspace_root(Some(&format!("file://{}", dir.display())));
-    idx.request_resolve("My::App");
+    idx.request(crate::build::dependency_map::Ask::Name("My::App".to_string()));
     assert!(
         idx.wait_resolved("My::App", std::time::Duration::from_secs(30)),
         "resolver thread should resolve the project-lib module",
@@ -1422,7 +1422,7 @@ async fn resolver_fires_refresh_after_every_drained_batch() {
 
     for name in ["Batch::A", "Batch::B", "Batch::C"] {
         let before = fires.load(std::sync::atomic::Ordering::SeqCst);
-        idx.request_resolve(name);
+        idx.request(crate::build::dependency_map::Ask::Name(name.to_string()));
         assert!(
             idx.wait_resolved(name, std::time::Duration::from_secs(30)),
             "{name} should resolve from the project lib"
@@ -2949,4 +2949,74 @@ fn a_dependency_record_does_not_outlive_its_slot() {
     assert!(idx.get_cached("Ext::Gone").is_none(), "and the slot");
     assert!(idx.def_candidates("Ext::Gone").is_empty(), "and the candidacy");
     assert!(idx.modules_with_symbol("f").is_empty(), "and the edge feed");
+}
+
+/// A map move mid-session is a generation bump, not a retire: every ask is
+/// asked again against the new map, which carries over a file it still
+/// places, held and unchanged, without parsing it again; lands what it newly
+/// places (a miss under the old map, a root that now shadows another); and
+/// once the re-asks drain, the idle sweep takes back what it no longer
+/// places, from the slot, the candidates and the records alike.
+#[test]
+fn a_map_move_restamps_what_it_still_places_and_sweeps_the_rest() {
+    use crate::build::dependency_map::Ask;
+    use crate::model::file_analysis::CrossFileLookup;
+    use crate::util::canonical_path::CanonicalPath;
+    let base = std::env::temp_dir().join(format!(
+        "d5-map-move-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    for d in ["r1", "r2", "r3", "proj"] {
+        std::fs::create_dir_all(base.join(d)).unwrap();
+    }
+    let base = CanonicalPath::resolve(base).into_path_buf();
+    let (r1, r2, r3) = (base.join("r1"), base.join("r2"), base.join("r3"));
+    std::fs::write(r1.join("Kept.pm"), "package Kept;\nsub k { 1 }\n1;\n").unwrap();
+    std::fs::write(r1.join("Shadowed.pm"), "package Shadowed;\nsub old { 1 }\n1;\n").unwrap();
+    std::fs::write(r2.join("Gone.pm"), "package Gone;\nsub g { 1 }\n1;\n").unwrap();
+    std::fs::write(r3.join("Shadowed.pm"), "package Shadowed;\nsub fresh { 1 }\n1;\n").unwrap();
+    std::fs::write(r3.join("Late.pm"), "package Late;\nsub l { 1 }\n1;\n").unwrap();
+    let at = |p: std::path::PathBuf| CanonicalPath::resolve(p);
+
+    let idx = ModuleIndex::new_for_test();
+    idx.set_search_roots_for_test(&[r1.clone(), r2.clone()]);
+    idx.set_workspace_root(Some(&format!("file://{}", base.join("proj").display())));
+    for n in ["Kept", "Shadowed", "Gone", "Late"] {
+        idx.request(Ask::Name(n.to_string()));
+    }
+    idx.wait_idle();
+    let gen1 = idx.core.map_generation();
+    let kept = idx.get_cached("Kept").expect("Kept lands from r1");
+    assert_eq!(idx.get_cached("Shadowed").unwrap().path, at(r1.join("Shadowed.pm")));
+    assert!(idx.get_cached("Gone").is_some(), "Gone lands from r2");
+    assert!(idx.get_cached("Late").is_none(), "nothing under the first map places Late");
+    assert_eq!(idx.core.asked.get(&Ask::Name("Late".into())).map(|e| *e), Some((gen1, Outcome::Miss)));
+
+    // The map moves: r2 leaves, r3 comes in ahead of r1.
+    idx.set_search_roots_for_test(&[r3.clone(), r1.clone()]);
+    idx.wait_idle();
+    let gen2 = idx.core.map_generation();
+    assert_eq!(gen2, gen1 + 1, "a move is one generation");
+
+    let kept_after = idx.get_cached("Kept").expect("the new map still places Kept");
+    assert!(Arc::ptr_eq(&kept, &kept_after), "a held, unchanged file is restamped, never parsed again");
+
+    let shadowed = idx.def_candidates("Shadowed");
+    assert_eq!(idx.get_cached("Shadowed").unwrap().path, at(r3.join("Shadowed.pm")), "the new first root wins");
+    assert_eq!(shadowed.len(), 2, "the shadowed copy stays a candidate");
+
+    assert!(idx.get_cached("Late").is_some(), "a miss is asked again, and lands under the new map");
+
+    let gone = at(r2.join("Gone.pm"));
+    assert!(idx.get_cached("Gone").is_none(), "the sweep clears the slot");
+    assert!(idx.def_candidates("Gone").is_empty(), "the sweep drops the candidate");
+    assert_eq!(idx.file_role(&gone), None, "the sweep retires the record");
+    assert_eq!(idx.core.asked.get(&Ask::Name("Gone".into())).map(|e| *e), Some((gen2, Outcome::Miss)));
+    assert!(
+        idx.core.asked.iter().all(|e| e.value().0 == gen2),
+        "the sweep forgets the older generation's asks"
+    );
+    assert!(!idx.core.map_moving.load(std::sync::atomic::Ordering::Acquire));
+    let _ = std::fs::remove_dir_all(&base);
 }

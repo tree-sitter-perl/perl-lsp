@@ -279,12 +279,11 @@ fn canonical_root_and_uri(root: &str) -> (std::path::PathBuf, String) {
     (path, uri)
 }
 
-/// Full CLI workspace setup: index the workspace, open the SQLite cache,
-/// warm cached modules, resolve missing imports + ancestors via @INC,
-/// save fresh entries back to disk. Mirrors the LSP server's startup
-/// minus the resolver thread (one-shot, synchronous). Used by every
-/// CLI command that needs cross-file resolution to behave like the
-/// running server.
+/// Full CLI workspace setup: index the workspace, then ask the dependency
+/// tier for what the project's files name and wait for the resolver thread
+/// to land it. Mirrors the LSP server's startup, synchronously: a one-shot
+/// run has no partial answer to give. Used by every CLI command that needs
+/// cross-file resolution to behave like the running server.
 fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleIndex) {
     // `--check --timings` already flipped this on; the env var lets any
     // startup-driven CLI mode (dump-package, etc.) opt in too.
@@ -337,92 +336,15 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
         return (ws, module_index);
     }
 
-    // The walk above read the map; this is the same one.
-    let map = module_index
-        .dependency_map_for(served, Some(&root_path))
-        .unwrap_or_else(|| std::sync::Arc::new(crate::build::dependency_map::DependencyMap::empty()));
-
-    // The store's gates run before any landing reads a row; there is no
-    // warm lane (`module_resolver::land_module`).
-    let db = module_cache::open_cache_db(Some(&root_uri), "perl");
-    if let Some(ref conn) = db {
-        let _ = module_cache::validate_dependency_map(conn, &map.generation());
-        let _ = module_cache::validate_plugin_fingerprint(
-            conn,
-            &plugin::rhai_host::plugin_fingerprint(),
-        );
-        // Beside the plugin gate, and for the same reason: a cached artifact
-        // that describes a derivation we no longer run. This one clears
-        // conclusions only — the blobs stay, because the repair is a re-bake.
-        let _ = module_cache::validate_conclusion_fingerprint(
-            conn,
-            module_cache::conclusion_fingerprint(),
-        );
-    }
-
-    let mut needed = std::collections::HashSet::new();
-    module_index.for_each_registered_file(&mut |cached| {
-        for imp in &cached.analysis.imports {
-            needed.insert(imp.module_name.clone());
-        }
-        for (_pkg, parents) in cached.analysis.package_parent_edges() {
-            for p in parents {
-                needed.insert(p.clone());
-            }
-        }
-    });
-
-    let mut parser = module_resolver::create_parser();
-    let mut parse_memo: module_resolver::ParseMemo = std::collections::HashMap::new();
-    let mut resolved = 0usize;
-    let mut already_cached = 0usize;
-    // Worklist, not a fixed set: re-exporting modules (Test::Most → Test::More)
-    // pull their re-exported producers' surfaces transitively, so those
-    // producers must be resolved too even though no workspace file `use`s them
-    // directly. Enqueue each resolved module's `reexport_modules`. Bounded by
-    // the seen-set (`queued`); the cross-file surface walk handles cycles.
-    let mut queue: std::collections::VecDeque<String> = needed.iter().cloned().collect();
-    let mut queued: std::collections::HashSet<String> = needed.clone();
+    // The project's demand goes through the one acquisition, as an editor's
+    // does: the resolver thread reads the map, gates the store and lands
+    // every ask; a one-shot run waits for it to go idle.
     let _resolve_phase = timings::PhaseGuard::start("cli::resolve_imports");
-    while let Some(name) = queue.pop_front() {
-        let cached_arc = if module_index.cache_raw().contains_key(name.as_str()) {
-            already_cached += 1;
-            timings::record_cached(&name);
-            // The relation, not the winner — the descent below must see
-            // every provider's re-export edges.
-            let cands = {
-                use crate::model::file_analysis::CrossFileLookup;
-                module_index.def_candidates(&name)
-            };
-            (!cands.is_empty()).then_some(cands)
-        } else {
-            // One-shot copies stay whole: rehydration never amortizes here.
-            let (_, stored) = module_index.land_module(
-                db.as_ref(),
-                &map,
-                &name,
-                &mut parser,
-                &mut parse_memo,
-            );
-            if stored.is_some() {
-                resolved += 1;
-            }
-            stored
-        };
-        if let Some(providers) = cached_arc {
-            // Every provider's re-export edges: a shadowed twin can name a
-            // producer the winner never mentions.
-            for cached in &providers {
-                for re in &cached.analysis.reexport_modules {
-                    if queued.insert(re.clone()) {
-                        queue.push_back(re.clone());
-                    }
-                }
-            }
-        }
-    }
+    module_index.for_each_registered_file(&mut |cached| module_index.request_demand_of(&cached.analysis));
+    module_index.wait_idle();
     drop(_resolve_phase);
-    eprintln!("Modules: {} cached, {} resolved, {} total", already_cached, resolved, queued.len());
+    let (landed, missed) = module_index.asked_counts();
+    eprintln!("Modules: {} landed, {} missed", landed, missed);
 
     (ws, module_index)
 }

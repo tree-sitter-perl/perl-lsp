@@ -284,7 +284,7 @@ impl LanguageServer for Backend {
         // Register file watchers for workspace indexing — the served
         // language's extensions, so out-of-editor changes reach the
         // re-index / invalidation path too.
-        let watchers: Vec<FileSystemWatcher> =
+        let mut watchers: Vec<FileSystemWatcher> =
             crate::build::language_driver::LanguageRegistry::served()
                 .extensions()
                 .iter()
@@ -293,6 +293,14 @@ impl LanguageServer for Backend {
                     kind: None,
                 })
                 .collect();
+        // The manifests the dependency map was read from: a moved one moves
+        // the map (`note_map_input_changed`).
+        let mi = Arc::clone(&self.module_index);
+        let inputs = tokio::task::spawn_blocking(move || mi.dependency_map_inputs()).await.unwrap_or_default();
+        watchers.extend(inputs.into_iter().map(|p| FileSystemWatcher {
+            glob_pattern: GlobPattern::String(p.to_string_lossy().into_owned()),
+            kind: None,
+        }));
         let mut registrations = vec![Registration {
             id: "perl-file-watcher".to_string(),
             method: "workspace/didChangeWatchedFiles".to_string(),
@@ -383,16 +391,8 @@ impl LanguageServer for Backend {
                 needs_gather_refresh =
                     crate::build::language_driver::LanguageRegistry::caps(doc.language)
                         .context_gather;
-                // Enqueue imports for background resolution (non-blocking).
-                for imp in &doc.analysis.imports {
-                    self.module_index.request_resolve(&imp.module_name);
-                }
-                // Enqueue parent classes for resolution (inheritance chain).
-                for (_pkg, parents) in doc.analysis.package_parent_edges() {
-                    for parent in parents {
-                        self.module_index.request_resolve(parent);
-                    }
-                }
+                // Ask for what the file names (non-blocking).
+                self.module_index.request_demand_of(&doc.analysis);
             }
         }
         // The open-doc path now owns this file's surface record (buffer
@@ -474,14 +474,8 @@ impl LanguageServer for Backend {
         if crate::build::language_driver::LanguageRegistry::caps(language).synchronous_rebuild {
             if let Some(mut doc) = self.open_docs.get_open_mut(&uri) {
                 doc.update(change.text);
-                for imp in &doc.analysis.imports {
-                    self.module_index.request_resolve(&imp.module_name);
-                }
-                for (_pkg, parents) in doc.analysis.package_parent_edges() {
-                    for parent in parents {
-                        self.module_index.request_resolve(parent);
-                    }
-                }
+                // Ask for what the file names (non-blocking).
+                self.module_index.request_demand_of(&doc.analysis);
             }
             // Surface record + publish + surface-gated consumer refresh, all
             // debounced OFF the pipeline: the publish re-enriches (heavy),
@@ -1216,7 +1210,7 @@ impl LanguageServer for Backend {
                     if i.insert_text.as_deref() == Some("") {
                         if let Some(ref label) = Some(&i.label) {
                             if let Some(name) = label.strip_prefix("loading ").and_then(|s| s.strip_suffix("...")) {
-                                self.module_index.request_resolve(name);
+                                self.module_index.request(crate::build::dependency_map::Ask::Name(name.to_string()));
                             }
                         }
                     }
@@ -1524,6 +1518,11 @@ impl LanguageServer for Backend {
         let mut perl_changes: Vec<(PathBuf, FileChangeType)> = Vec::new();
         for change in params.changes {
             let Ok(path) = change.uri.to_file_path() else { continue };
+            // A manifest the dependency map was read from: the map moves,
+            // and the resolver thread re-asks against it.
+            if self.module_index.note_map_input_changed(&path) {
+                continue;
+            }
             if invalidator_owned {
                 self.schedule_pack_invalidate(path, change.typ == FileChangeType::DELETED);
             } else {

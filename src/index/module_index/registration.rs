@@ -391,12 +391,13 @@ impl ModuleIndex {
     /// single-copy front door above is this one with a one-element set —
     /// there is no separate one-provider path.
     pub fn insert_cache_providers(&self, module_name: &str, providers: Option<Providers>) {
-        self.core.land_providers(module_name, providers, false, false);
+        self.core.land_providers(module_name, providers, false, false, self.core.map_generation());
     }
 
-    /// The one-shot CLI's landing of `module_name`: the resolver thread's
-    /// own (`module_resolver::land_module`), keeping copies whole — a
-    /// one-shot run never amortizes a rehydration.
+    /// The resolver thread's landing of `module_name`
+    /// (`module_resolver::land_module`), run on the caller's thread with
+    /// copies kept whole, for a test that needs one landing and no queue.
+    #[cfg(test)]
     pub fn land_module(
         &self,
         rows: Option<&rusqlite::Connection>,
@@ -405,7 +406,7 @@ impl ModuleIndex {
         parser: &mut tree_sitter::Parser,
         memo: &mut module_resolver::ParseMemo,
     ) -> (Option<Providers>, Option<Providers>) {
-        module_resolver::land_module(&self.core, rows, map, module_name, parser, memo, false)
+        module_resolver::land_module(&self.core, rows, map, self.core.map_generation(), module_name, parser, memo, false)
     }
 
     /// The dependency map read so far, if any.

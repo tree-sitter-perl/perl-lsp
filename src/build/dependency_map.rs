@@ -195,6 +195,20 @@ impl DependencyMap {
         &self.tier_roots
     }
 
+    /// The manifests the map was read from.
+    pub fn inputs(&self) -> &[PathBuf] {
+        &self.inputs
+    }
+
+    /// Whether `path` is one of the manifests the map was read from, by
+    /// either spelling.
+    pub fn is_input(&self, path: &Path) -> bool {
+        let canon = CanonicalPath::resolve(path);
+        self.inputs
+            .iter()
+            .any(|i| i == path || CanonicalPath::resolve(i.as_path()) == canon)
+    }
+
     /// Whether `path` lies under a tier root.
     pub fn owns(&self, path: &Path) -> bool {
         self.tier_roots.iter().any(|r| path.starts_with(r))

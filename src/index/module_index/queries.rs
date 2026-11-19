@@ -155,18 +155,107 @@ impl ModuleIndex {
             .and_then(|guard| guard.as_ref().and_then(|opt| opt.clone()))
     }
 
-    /// Request background resolution for a module. Non-blocking.
-    pub fn request_resolve(&self, module_name: &str) {
-        if self.core.cache.contains_key(module_name) {
+    /// Ask the dependency tier for `ask`. Non-blocking: the resolver thread
+    /// acquires it, and an ask already answered at the current map
+    /// generation is not queued again. Every asker comes through here.
+    pub fn request(&self, ask: crate::build::dependency_map::Ask) {
+        self.core.ask([ask]);
+    }
+
+    /// `request` for what one file names: its imports and its packages'
+    /// parents — an opened, edited or saved document, or a one-shot
+    /// query's file.
+    pub fn request_demand_of(&self, fa: &FileAnalysis) {
+        use crate::build::dependency_map::Ask;
+        let mut asks: Vec<Ask> = fa.imports.iter().map(|i| Ask::Name(i.module_name.clone())).collect();
+        for (_pkg, parents) in fa.package_parent_edges() {
+            asks.extend(parents.iter().map(|p| Ask::Name(p.clone())));
+        }
+        self.core.ask(asks);
+    }
+
+    /// Block until the resolver thread has read its map and has nothing
+    /// queued, in flight, or owed to a map move — for one-shot callers that
+    /// answer from a settled index. Every landing happens on that thread,
+    /// so this is how such a caller sees one. Returns at once when no
+    /// resolver serves this index.
+    pub fn wait_idle(&self) {
+        use std::sync::atomic::Ordering::Acquire;
+        let q = &self.core.queue;
+        if !q.served.load(Acquire) {
             return;
         }
-        self.core.queue.pending.lock().unwrap().push(module_name.to_string());
-        self.core.queue.notify_new_work();
+        let mut guard = self.core.resolved.mu.lock().unwrap();
+        loop {
+            // Read under `pending`: the drain takes a batch and marks the
+            // queue busy under that lock, so no batch is between the two.
+            let idle = {
+                let pending = q.pending.lock().unwrap();
+                q.started.load(Acquire)
+                    && pending.is_empty()
+                    && !q.map_moved.load(Acquire)
+                    && !q.map_inputs_moved.load(Acquire)
+                    && !q.busy.load(Acquire)
+            };
+            if idle {
+                return;
+            }
+            // The timeout only bounds a wake the thread's notify could
+            // race; every state change above is followed by one.
+            guard = self
+                .core
+                .resolved
+                .cv
+                .wait_timeout(guard, std::time::Duration::from_millis(50))
+                .unwrap()
+                .0;
+        }
+    }
+
+    /// A watched file moved: when it is a manifest the dependency map was
+    /// read from, the resolver thread re-reads the map and `true` comes
+    /// back — the file is the map's input, not a source file to index.
+    pub fn note_map_input_changed(&self, path: &std::path::Path) -> bool {
+        let Some(map) = self.core.dependency_map() else {
+            return false;
+        };
+        if !map.is_input(path) {
+            return false;
+        }
+        self.core.queue.map_inputs_moved.store(true, std::sync::atomic::Ordering::Release);
+        self.core.queue.wake();
+        true
+    }
+
+    /// The manifests the served language's dependency map is read from,
+    /// reading the map if nothing has yet.
+    pub fn dependency_map_inputs(&self) -> Vec<std::path::PathBuf> {
+        let root = self.workspace_root().and_then(|u| module_resolver::uri_to_path(&u));
+        let served = crate::build::language_driver::LanguageRegistry::served();
+        self.core
+            .dependency_map_for(served, root.as_deref())
+            .map(|m| m.inputs().to_vec())
+            .unwrap_or_default()
+    }
+
+    /// The asks answered at the current generation: `(landed, missed)`.
+    pub fn asked_counts(&self) -> (usize, usize) {
+        let now = self.core.map_generation();
+        let mut out = (0, 0);
+        for e in self.core.asked.iter() {
+            match e.value() {
+                (g, Outcome::Landed) if *g == now => out.0 += 1,
+                (g, Outcome::Miss) if *g == now => out.1 += 1,
+                _ => {}
+            }
+        }
+        out
     }
 
     /// Return the cached CachedModule for a module name. Never does I/O.
     pub fn get_cached(&self, module_name: &str) -> Option<Arc<CachedModule>> {
-        self.core.cache.get(module_name).and_then(|entry| entry.clone())
+        let held = self.core.cache.get(module_name).and_then(|entry| entry.clone())?;
+        self.core.placed_now(&held.path, module_name).then_some(held)
     }
 
     /// Like `get_cached`, but scoped to a querying file's VISIBILITY set
@@ -186,6 +275,7 @@ impl ModuleIndex {
                 let reachable: Vec<&Arc<CachedModule>> = cands
                     .iter()
                     .filter(|c| visible.contains(&c.path.to_string_lossy().into_owned()))
+                    .filter(|c| self.core.placed_now(&c.path, module_name))
                     .collect();
                 if let Some(best) = best_candidate(&reachable, module_name, &|m, n| self.module_defines_class(m, n)) {
                     return Some(best);
@@ -220,6 +310,7 @@ impl ModuleIndex {
                 .value()
                 .iter()
                 .filter(|c| c.path.to_str().is_some_and(|p| visible.contains(p)))
+                .filter(|c| self.core.placed_now(&c.path, entry.key()))
                 .collect();
             if let Some(best) = best_candidate(&reachable, entry.key(), &|m, n| self.module_defines_class(m, n)) {
                 out.push((entry.key().clone(), best));
@@ -304,7 +395,9 @@ impl ModuleIndex {
     pub fn for_each_cached<F: FnMut(&str, &Arc<CachedModule>)>(&self, mut f: F) {
         for entry in self.core.cache.iter() {
             if let Some(ref cached) = *entry.value() {
-                f(entry.key(), cached);
+                if self.core.placed_now(&cached.path, entry.key()) {
+                    f(entry.key(), cached);
+                }
             }
         }
     }
@@ -508,7 +601,7 @@ impl ModuleIndex {
     /// shells out to `perl`, and a unit net needs its own roots).
     #[cfg(test)]
     pub fn set_search_roots_for_test(&self, roots: &[std::path::PathBuf]) {
-        self.core.set_dependency_map(Arc::new(crate::build::inc::map_over(roots.to_vec())));
+        self.core.publish_dependency_map(Arc::new(crate::build::inc::map_over(roots.to_vec())));
     }
 
     #[cfg(test)]
@@ -526,22 +619,6 @@ impl ModuleIndex {
     #[cfg(test)]
     pub fn seed_builtin_for_test(&self, name: &str, doc: &str) {
         self.core.builtins.insert(name.to_string(), doc.to_string());
-    }
-
-    /// Direct access to the raw cache DashMap (for CLI warm_cache integration).
-    pub fn cache_raw(&self) -> &DashMap<String, Option<Arc<CachedModule>>> {
-        &self.core.cache
-    }
-
-    /// The candidate relation behind the name-slot winner — the warm lane
-    /// fills it alongside `cache_raw` so a warm start keeps every provider.
-    pub fn all_defs_raw(&self) -> &DashMap<String, DefCandidates> {
-        &self.core.all_defs
-    }
-
-    /// The per-file records the warm lane lands its providers' roles in.
-    pub(crate) fn file_records(&self) -> &FileRecords {
-        &self.core.records
     }
 
 }

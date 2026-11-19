@@ -128,6 +128,8 @@ impl Backend {
                             if let Some(tree) = parser.parse(&source, None) {
                                 let analysis = crate::build::builder::build(&tree, source.as_bytes());
                                 let arc = Arc::new(analysis);
+                                // A save can name a module nothing asked for yet.
+                                module_index.request_demand_of(&arc);
                                 module_index.record_workspace_projections(&canon, &arc);
                                 // register_workspace_resident routes through
                                 // record_and_dirty: the dirty set is bound to
