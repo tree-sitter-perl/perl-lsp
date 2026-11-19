@@ -29,6 +29,11 @@ struct SweepMemo {
     /// Keyed by (path, want_bag) — same axis-mixing hazard as the shared
     /// provider cache's key comment.
     map: std::collections::HashMap<(std::path::PathBuf, bool), Arc<FileAnalysis>>,
+    /// The file this sweep checks. Its own rehydration is held here, for
+    /// as long as its check runs, and by no cache that outlives it: every
+    /// file is a subject exactly once, so a sweep-wide cache that admitted
+    /// subjects would end the sweep holding the corpus.
+    subject: std::path::PathBuf,
     /// Bytes this file's memo holds (estimates) — the crest attribution:
     /// per-worker in-flight working sets are bounded by the largest single
     /// file's memo, and `sweep.memo_peak_file_bytes` reports the max seen.
@@ -353,11 +358,11 @@ impl Drop for SweepAnswerGuard {
     }
 }
 
-/// Opens a rehydration memo for one file's sweep; closes it on drop.
+/// Opens a rehydration memo for the sweep of `subject`; closes it on drop.
 pub struct SweepMemoGuard(());
 
 impl SweepMemoGuard {
-    pub fn open() -> Self {
+    pub fn open(subject: &std::path::Path) -> Self {
         // `PERL_LSP_NO_SWEEP_MEMO=1` leaves the memo closed: the A/B control,
         // and the escape hatch if a sweep ever turns out not to be a
         // consistent world.
@@ -366,7 +371,12 @@ impl SweepMemoGuard {
             std::env::var("PERL_LSP_NO_SWEEP_MEMO").as_deref() == Ok("1")
         });
         if !off {
-            SWEEP_MEMO.with(|c| *c.borrow_mut() = Some(SweepMemo::default()));
+            SWEEP_MEMO.with(|c| {
+                *c.borrow_mut() = Some(SweepMemo {
+                    subject: subject.to_path_buf(),
+                    ..SweepMemo::default()
+                })
+            });
         }
         SweepMemoGuard(())
     }
@@ -1472,7 +1482,13 @@ impl ModuleIndex {
                     crate::util::ghost_stats::count("sweep.memo_invalidated");
                     return None;
                 }
-                memo.map.get(&(cached.path.to_path_buf(), want_bag)).cloned()
+                // A whole copy answers a rows-axes ask too.
+                let path = cached.path.to_path_buf();
+                let whole = (!want_bag).then(|| memo.map.get(&(path.clone(), true)).cloned()).flatten();
+                whole.or_else(|| memo.map.get(&(path, want_bag)).cloned())
+            });
+            let is_subject = SWEEP_MEMO.with(|c| {
+                c.borrow().as_ref().is_some_and(|m| m.subject == cached.path.as_path())
             });
             if let Some(hit) = memoed {
                 crate::util::ghost_stats::count("sweep.memo_hit");
@@ -1483,7 +1499,9 @@ impl ModuleIndex {
                 crate::util::ghost_stats::count("sweep.memo_miss.from_mroc");
             }
             let got = crate::util::ghost_stats::timed("rehydrate.loader", || {
-                if want_bag {
+                if is_subject {
+                    bc.load_unretained(&cached.path, want_bag)
+                } else if want_bag {
                     bc.bag_for_diag(&cached.path)
                 } else {
                     bc.rows_for_diag(&cached.path)
@@ -1491,7 +1509,7 @@ impl ModuleIndex {
             });
             match got {
                 Ok(full) => {
-                    if shared_active {
+                    if shared_active && !is_subject {
                         // The shared cache subsumes the per-file memo (and
                         // its byte accounting — sweepprov's own counters
                         // carry the attribution when it is open).

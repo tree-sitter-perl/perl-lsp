@@ -501,10 +501,14 @@ pattern per depth would silently miss the next depth.
 
 So the document states each level once, as a link: `@link.from.<walk>` on
 a node and `@link.<rel>` on the node one level away, by a closed set of
-relations (`inner`, `declares`, `scope`, `name`, `base`). The `<walk>` suffix
+relations (`inner`, `declares`, `scope`, `name`, `base`, `outer`). The `<walk>` suffix
 names the walk the link belongs to, from a closed set (`ool`, `qualifier`,
-`deref`, `spelled`), and each walk has a root capture (`@ool.def`,
-`@qualifier`, `@nested.target`, `@ref.spelled`). The `spelled` walk carries
+`deref`, `spelled`, `gate`), and each walk has a root capture (`@ool.def`,
+`@qualifier`, `@nested.target`, `@ref.spelled`, `@ctl.gate`). The `gate` walk
+is the one that climbs: from a call out through each node that runs it
+whenever it runs (`outer`: the statement around an expression, an
+assignment storing a value, parens), to the statement control passes
+through, so `a = (b = f())` gates at any depth. The `spelled` walk carries
 a reference its match names by the whole spelling from the node the
 document tagged down to the token it rewrites (`f` in `a::b::f<T>`), and
 mints the scopes it passes as the reference's qualifier, so no consumer
