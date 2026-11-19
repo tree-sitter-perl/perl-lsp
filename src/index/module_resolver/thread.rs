@@ -30,9 +30,6 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     // repair are its own; a pack's store has the one gate its indexer runs.
     let hub = FrontDoor::of(served) == FrontDoor::Hub;
 
-    // Listed before `started`, so a one-shot run's `wait_idle` sees it.
-    core.list_available(&map, root_path.as_deref(), served.extensions());
-
     // The store's gates run before any landing reads a row. There is no
     // warm lane: a landing takes each located file from its row in place of
     // parsing it, so a warm start lands what a cold one would. No gate reads
@@ -170,6 +167,9 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     core.ask(map.declared());
     core.queue.started.store(true, std::sync::atomic::Ordering::Release);
     notify_resolved(&core);
+    if server.is_some() {
+        warm_available(&core);
+    }
 
     loop {
         let batch = drain_or_repair(&core, &core.queue, &mut repair_frontier, db.as_ref());
@@ -185,7 +185,9 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         if core.queue.map_moved.swap(false, std::sync::atomic::Ordering::AcqRel) {
             (map, map_gen) = core.current_map();
             log::info!("Dependency map moved (generation {}); asking {} names again", map_gen, core.asked.len());
-            core.list_available(&map, root_path.as_deref(), served.extensions());
+            if server.is_some() {
+                warm_available(&core);
+            }
             let again: Vec<Ask> = core.asked.iter().map(|e| e.key().clone()).collect();
             core.queue.ask(again);
             core.ask(map.declared());
@@ -515,6 +517,15 @@ fn wait_for_workspace_root(ws_root_channel: &WorkspaceRootChannel) -> Option<Str
         guard = g;
     }
     guard.clone().flatten()
+}
+
+/// List the map's names on the pool, off the resolver thread, so a
+/// server's first module-name completion finds them listed.
+fn warm_available(core: &Arc<IndexCore>) {
+    let core = Arc::clone(core);
+    rayon::spawn(move || {
+        core.available_names();
+    });
 }
 
 pub fn uri_to_path(uri: &str) -> Option<PathBuf> {

@@ -1140,7 +1140,8 @@ fn a_kept_composer_map_is_served_until_an_input_moves() {
 }
 
 /// The Perl pin: a search root's modules complete as available before
-/// anything parses them, and a file that is no module lists nothing.
+/// anything parses them, a file that is no module lists nothing, and the
+/// listing is taken once per map generation.
 #[test]
 fn perl_module_completion_lists_the_search_roots_unparsed() {
     let ws = std::env::temp_dir().join(format!("d10_perl_names_{}", std::process::id()));
@@ -1152,7 +1153,7 @@ fn perl_module_completion_lists_the_search_roots_unparsed() {
     }
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     idx.set_search_roots_for_test(&[ws.join("local/lib/perl5"), ws.join("lib")]);
-    idx.list_available_for_test(Some(&ws), crate::build::language_driver::LanguageRegistry::served().extensions());
+    idx.set_workspace_root(Some(&format!("file://{}", ws.display())));
     let mut got = idx.complete_module_names("");
     got.sort();
     assert_eq!(
@@ -1162,5 +1163,15 @@ fn perl_module_completion_lists_the_search_roots_unparsed() {
     let mut got = idx.complete_module_names("dep::u");
     got.sort();
     assert_eq!(got.len(), 2, "the prefix matches case-blind: {got:?}");
+
+    std::fs::write(ws.join("local/lib/perl5/Dep/Later.pm"), "package X;\n1;\n").unwrap();
+    assert!(
+        !idx.complete_module_names("dep::l").iter().any(|(n, _)| n == "Dep::Later"),
+        "the listing holds for its generation"
+    );
+    idx.set_search_roots_for_test(&[ws.join("local/lib/perl5")]);
+    let mut got: Vec<String> = idx.complete_module_names("").into_iter().map(|(n, _)| n).collect();
+    got.sort();
+    assert_eq!(got, ["Dep::Later", "Dep::Unused", "Dep::Used"], "a moved map lists again");
     let _ = std::fs::remove_dir_all(&ws);
 }
