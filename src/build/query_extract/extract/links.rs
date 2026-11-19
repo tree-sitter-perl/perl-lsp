@@ -68,6 +68,17 @@ impl<'t> Links<'t> {
         self.base_text(LinkWalk::Qualifier, node, src)
     }
 
+    /// The `gate` walk: the outermost node that runs `call` whenever it
+    /// runs, each level out by the document's `outer` link. The call itself
+    /// where nothing links it out.
+    pub(super) fn gate_statement(&self, call: tree_sitter::Node<'t>) -> tree_sitter::Node<'t> {
+        let mut node = call;
+        while let Some(outer) = self.get(LinkWalk::Gate, node, LinkCap::Outer) {
+            node = outer;
+        }
+        node
+    }
+
     /// The `ool` walk: an out-of-line definition's owner and member name: the definition's
     /// declarator, through any transparent wrappers, to the function
     /// declarator, whose declared name is qualified (`A::B::m`). Returns the
