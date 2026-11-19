@@ -44,6 +44,8 @@ enum Payload {
     /// A spelled reference's qualifier: the scopes the `spelled` walk
     /// passed on the way to its token (`a::b` for `a::b::f`).
     Qualifier(String),
+    /// A `@ctl.gate`'s statement: the node the `gate` walk ends at.
+    Runs(crate::cst::NodeId),
 }
 
 /// A capture before it is placed: the live node it tags, and the event.
@@ -553,6 +555,13 @@ pub fn extract_in(
                 flat.push(members::flatten_recv(node, cap, source, match_id))
             }
             Capture::Qualifier => flat.push(Event::at(node, cap, links.qualifier_text(node, source), match_id)),
+            Capture::Ctl(CtlCap::Gate) => {
+                let event = Event::at(node, cap, String::new(), match_id);
+                flat.push(match syntax.main().lift(links.gate_statement(node)) {
+                    Some(statement) => with(event, Payload::Runs(statement.site().id())),
+                    None => event,
+                })
+            }
             // The class is the pattern's word, not the node's.
             Capture::Expr(ExprCap::ReturnClass) => {
                 let class = compiled

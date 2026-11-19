@@ -265,10 +265,13 @@ fn control_view(ad: &Adorned<'_, '_>) -> crate::model::file_analysis::ControlVie
             if c == CtlCap::Body && ad.tree.node(e.site).ts().has_error() {
                 unread.push(e.span());
             }
-            // A gate is the call its statement makes: the statement, the
-            // call's own node or the one around it, is what runs in sequence.
+            // A gate is a call its statement runs: the statement the `gate`
+            // walk reached is what runs in sequence.
             let placed = match c {
-                CtlCap::Gate => in_sequence(e.site) || ad.tree.node(e.site).enclosing_sites().next().is_some_and(|s| in_sequence(s.id())),
+                CtlCap::Gate => match e.payload.as_deref() {
+                    Some(Payload::Runs(statement)) => in_sequence(*statement),
+                    _ => in_sequence(e.site),
+                },
                 c if c.is_leave() => in_sequence(e.site),
                 _ => true,
             };
