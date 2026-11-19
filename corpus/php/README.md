@@ -1,6 +1,6 @@
 # The PHP corpus
 
-Eleven open-source PHP codebases, picked for variety the way the Perl nine
+Twelve open-source PHP codebases, picked for variety the way the Perl nine
 were (`../README.md`). Reconstruct on any box with `corpus/php/bootstrap.sh`.
 
 ```
@@ -15,7 +15,7 @@ Then measure with the PHP server:
 perl-lsp --lang php --check ~/php-corpora/laravel
 ```
 
-## The eleven, and what each is for
+## The twelve, and what each is for
 
 Measured 2026-11-08 on the pins below (cold `--check`, n=3, 4 vCPU), before
 PHP had a dependency tier, so every import of an absent package widened.
@@ -33,13 +33,18 @@ PHP had a dependency tier, so every import of an absent package widened.
 | [carbon](https://github.com/briannesbitt/Carbon) 3.15.1 | 2,015 | 2.2 s / 251 MiB | **Traits and mixins**, plus locale-array files full of non-ASCII strings. |
 | [guzzle](https://github.com/guzzle/guzzle) 8.3.1 | 145 | 1.2 s / 267 MiB | **Huge test files**, the highest RSS per source byte, and `curl_*` builtins against namespaced test mocks. |
 | [laravel-app](https://github.com/laravel/laravel) v13.11.0 | 27 (+ 8,147 vendor) | 0.4 s / 25 MiB | **A real project**: the skeleton app plus its 111-package vendor tree, for the dependency tier. |
+| [firefly](https://github.com/firefly-iii/firefly-iii) main at e1a90bf8 | 1,742 (+ 15,003 vendor) | 3.4 s / 392 MiB | **A full application**: a Laravel app's own controllers, models and jobs over a locked 15,000-file vendor tree; the shape of a real work repo, for the dependency tier and the check sweep at once. |
+
+firefly was added 2026-11-19 and measured that day on main at 73405da4 (cold
+`--check`, n=3, 4 vCPU), still without a dependency tier.
 
 The full survey, with diagnostics by code and the worst findings, is
 `design/php-corpora-survey-2026-11-08.md` in the project files.
 
-## laravel-app's vendor tree
+## The apps' vendor trees
 
-`bootstrap.sh` builds it when `php` and `composer` are on `PATH`:
+`bootstrap.sh` builds one for each app (the entries with a `vendor` field)
+when `php` and `composer` are on `PATH`. For laravel-app,
 `composer update --no-install` resolves the lock, `fetch1.sh` shallow-fetches
 each locked package and exports it the way a GitHub zipball would (zipballs
 403 through the cloud proxy), `installed.php` writes
@@ -48,8 +53,13 @@ Composer's home and cache stay inside the app (git-excluded). `vendor/` is in
 the app's `.gitignore`, so a walk of the app root indexes the 27 app files
 and leaves the vendor tree to the dependency tier.
 
+firefly commits its `composer.lock`, so the resolve step is skipped and the
+same fetch reads the committed lock: its vendor tree is pinned with the clone.
+It ends with `composer dump-autoload`, not an install, because the packages
+are already in place and an install reaches for a dist the proxy refuses.
+
 ## Reproducibility caveat
 
-Each clone is pinned to a commit, but `composer update` resolves laravel-app's
-packages at bootstrap time, so two runs weeks apart can lock different
+Each clone is pinned to a commit, and firefly's vendor tree with it, but
+`composer update` resolves laravel-app's packages at bootstrap time, so two runs weeks apart can lock different
 versions. Pin the lock before the vendor tree gates anything.
