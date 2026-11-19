@@ -98,6 +98,12 @@ tree-sitter-r = { version = "1.2", optional = true }
 tree-sitter-cmake = { version = "0.7", optional = true }
 tree-sitter-php = { version = "0.24", optional = true }
 
+# The grammar vocabulary (`cst::perl::{Field, Kind}`) is generated from the
+# linked grammar's own tables, so a name the grammar lacks fails the build.
+[build-dependencies]
+tree-sitter = "0.25"
+ts-parser-perl = "2.1.0"
+
 [dev-dependencies]
 tree-sitter-python = "0.25"
 tree-sitter-r = "1.2"

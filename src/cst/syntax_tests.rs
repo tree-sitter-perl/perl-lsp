@@ -227,3 +227,50 @@ fn a_climb_runs_from_injected_code_on_through_its_host() {
     assert_eq!(climb[at - 1], code.root_node(), "the injected root stands in for it");
     assert_eq!(climb.last(), Some(&main.root_node()));
 }
+
+/// The generated vocabulary names what the grammar does: every node's
+/// `Kind` spells the node's own kind, and every `Field` id reads the child
+/// its name does.
+#[test]
+fn the_generated_vocabulary_agrees_with_the_grammar() {
+    use crate::cst::{Kind, NodeExt};
+    let src = "package Foo;\nuse parent 'Bar';\nsub new { my ($class, %args) = @_; my $self = bless { %args }, $class; return $self }\n\
+               my @xs = map { $_->{k} // 0 } grep { defined } @{ $h->{list} };\nfor my $x (@xs) { print \"$x\\n\" if $x > 1 }\n\
+               $obj->method(a => 1)->[0]{b} = <<\"EOT\";\ntext\nEOT\n__END__\npod\n";
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(src, None).unwrap();
+    let mut stack = vec![tree.root_node()];
+    let mut named = 0;
+    while let Some(node) = stack.pop() {
+        if node.is_named() {
+            named += 1;
+            assert_eq!(node.kind_of().name(), node.kind(), "kind id {}", node.kind_id());
+            assert!(node.is(node.kind_of()));
+        } else {
+            assert_eq!(node.kind_of(), Kind::Token, "{}", node.kind());
+        }
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                if let Some(id) = cursor.field_id() {
+                    let lang = node.language();
+                    let name = lang.field_name_for_id(id.get()).unwrap();
+                    // The first child in a field is what a read of it answers.
+                    let by_name = node.child_by_field_name(name);
+                    let by_id = node.child_by_field_id(id.get());
+                    assert_eq!(by_name.map(|n| n.id()), by_id.map(|n| n.id()), "field {name}");
+                }
+                stack.push(child);
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+    assert!(named > 60, "the sample exercises the grammar: {named} named nodes");
+    let lang: tree_sitter::Language = ts_parser_perl::LANGUAGE.into();
+    assert_eq!(lang.field_id_for_name(crate::cst::Field::Right.name()).map(|i| i.get()), Some(crate::cst::Field::Right as u16));
+    assert_eq!(lang.id_for_node_kind(Kind::Block.name(), true), Kind::Block as u16);
+}

@@ -26,7 +26,9 @@ use crate::model::conventions::Sigil;
 use crate::model::file_analysis::{Binding, PathStep, Place, Slot, Slots, Span};
 use tree_sitter::Point;
 
+pub(crate) mod perl;
 mod syntax;
+pub(crate) use perl::{Field, Kind};
 pub(crate) use syntax::{kind_ids, Injection, NodeFacts, NodeId, Structure, SyntaxForest, SyntaxNode};
 
 pub(crate) use crate::model::conventions::is_conventional_invocant_name;
@@ -38,6 +40,13 @@ pub(crate) trait NodeExt<'a>: Sized {
     fn text(&self, src: &'a [u8]) -> Option<&'a str>;
     /// Text of a named field's child.
     fn field_text(&self, field: &str, src: &'a [u8]) -> Option<&'a str>;
+    /// The child in `field`.
+    fn field(&self, field: Field) -> Option<Node<'a>>;
+    /// The node's kind. A node of another grammar's tree has no Perl kind:
+    /// these three read Perl trees only.
+    fn kind_of(&self) -> Kind;
+    /// Whether the node is of `kind`.
+    fn is(&self, kind: Kind) -> bool;
     /// The node's span, in `FileAnalysis` coordinates.
     fn span(&self) -> Span;
     /// Named children, by index (no `TreeCursor` borrow gymnastics).
@@ -53,6 +62,15 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
     fn field_text(&self, field: &str, src: &'a [u8]) -> Option<&'a str> {
         self.child_by_field_name(field).and_then(|n| n.text(src))
+    }
+    fn field(&self, field: Field) -> Option<Node<'a>> {
+        self.child_by_field_id(field as u16)
+    }
+    fn kind_of(&self) -> Kind {
+        Kind::from_id(self.kind_id())
+    }
+    fn is(&self, kind: Kind) -> bool {
+        self.kind_of() == kind
     }
     fn span(&self) -> Span {
         node_to_span(*self)
