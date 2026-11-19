@@ -873,6 +873,11 @@ pub trait CrossFileLookup {
         out
     }
     fn modules_with_symbol(&self, name: &str) -> Vec<String>;
+    /// Whether `module` is in `modules_with_symbol(name)`, without
+    /// materializing the bucket: a per-query membership test.
+    fn module_has_symbol(&self, name: &str, module: &str) -> bool {
+        self.modules_with_symbol(name).iter().any(|m| m == module)
+    }
     fn find_exporters(&self, func_name: &str) -> Vec<String>;
     fn defining_module_cached(&self, entry: &str, name: &str) -> Option<std::sync::Arc<CachedModule>>;
     fn module_declaring_method_in_package(&self, name: &str, class: &str) -> Option<String>;
@@ -1592,6 +1597,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     // (pack closure narrowing) applies to the parent relation too.
     fn modules_with_symbol(&self, name: &str) -> Vec<String> {
         self.inner.modules_with_symbol(name)
+    }
+    fn module_has_symbol(&self, name: &str, module: &str) -> bool {
+        self.inner.module_has_symbol(name, module)
     }
     fn find_exporters(&self, func_name: &str) -> Vec<String> {
         self.inner.find_exporters(func_name)

@@ -450,10 +450,10 @@ impl ModuleIndex {
 
     /// Find all cached modules that *export* the given function name: the
     /// modules the symbol index names (it covers every named symbol, not
-    /// just exports) whose surface carries the name, plus every descendant
-    /// of one whose own surface carries it — a class exporting nothing of
-    /// its own exports what its inherited `import` does
-    /// (`export_surface_with_index`).
+    /// just exports) whose own lists or re-exports carry the name, plus
+    /// every descendant of one that declares its own `import` — a class
+    /// exporting nothing of its own exports what its inherited `import`
+    /// does (`export_surface_with_index`).
     pub fn find_exporters(&self, func_name: &str) -> Vec<String> {
         use crate::model::file_analysis::CrossFileLookup;
         use crate::model::graph::{EdgeKindMask, GraphView, Node, WalkControl};
@@ -463,9 +463,23 @@ impl ModuleIndex {
                 .iter()
                 .any(|c| c.analysis.export_surface_with_index(m, self).exports(func_name))
         };
+        // A bucket member exporting the name through an inherited `import`
+        // is reached from the lender below, so its own lists answer here.
+        let lists = |m: &str| {
+            self.def_candidates(m)
+                .iter()
+                .any(|c| c.analysis.listed_export_surface_with_index(self).exports(func_name))
+        };
         let mut result: Vec<String> = Vec::new();
         for m in self.modules_with_symbol(func_name) {
-            if !exports(&m) {
+            if !lists(&m) {
+                continue;
+            }
+            // A descendant lends `m`'s lists only through an `import` `m`
+            // declares itself; one lending an ancestor's lists is found from
+            // that ancestor, which lists the name and so is in this bucket.
+            if !self.module_has_symbol(crate::model::conventions::IMPORT_SUB, &m) {
+                result.push(m);
                 continue;
             }
             if let Some(seed) = self.def_candidates(&m).first().cloned() {

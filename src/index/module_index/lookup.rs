@@ -745,6 +745,10 @@ impl CrossFileLookup for ModuleIndex {
         self.modules_with_symbol(name)
     }
 
+    fn module_has_symbol(&self, name: &str, module: &str) -> bool {
+        self.core.edges.names.get(name).is_some_and(|bucket| bucket.contains(module))
+    }
+
     fn find_exporters(&self, func_name: &str) -> Vec<String> {
         self.find_exporters(func_name)
     }

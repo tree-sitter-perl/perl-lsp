@@ -992,13 +992,7 @@ impl FileAnalysis {
                 matches!(self.symbol(sid).kind, SymKind::Sub | SymKind::Method) && self.symbol_in_class(sid, cls)
             })
         };
-        let mut indexed: Option<HashSet<String>> = None;
-        let mut may_declare = |cls: &str| {
-            declares_here(cls)
-                || indexed
-                    .get_or_insert_with(|| module_index.modules_with_symbol(IMPORT_SUB).into_iter().collect())
-                    .contains(cls)
-        };
+        let may_declare = |cls: &str| declares_here(cls) || module_index.module_has_symbol(IMPORT_SUB, cls);
         let declares = |cls: &str| {
             declares_here(cls)
                 || module_index
@@ -1079,6 +1073,23 @@ impl FileAnalysis {
         } else {
             None
         };
+        self.surface_with_reexports(inherited, module_index)
+    }
+
+    /// `export_surface_with_index` without the inherited `import`: the lists
+    /// this file states and the surfaces it re-exports. For a sweep that
+    /// reaches every lender on its own — `ModuleIndex::find_exporters` walks
+    /// down from each class whose `import` lends — and so need not ask every
+    /// file of a name (FHEM's hundreds of `main` files) up its MRO.
+    pub fn listed_export_surface_with_index(&self, module_index: &dyn CrossFileLookup) -> ExportSurface<'_> {
+        self.surface_with_reexports(None, module_index)
+    }
+
+    fn surface_with_reexports(
+        &self,
+        inherited: Option<(Vec<String>, Vec<String>)>,
+        module_index: &dyn CrossFileLookup,
+    ) -> ExportSurface<'_> {
         if self.reexport_modules.is_empty() && inherited.is_none() {
             return self.export_surface();
         }
