@@ -113,18 +113,20 @@ pub fn document_matches<'s, V: DocumentVocab>(
         .iter()
         .map(|n| V::from_capture(n).ok_or_else(|| format!("query: @{n} is not in the document's vocabulary")))
         .collect::<Result<_, _>>()?;
-    let tree = parser.parse(source, None).ok_or("no parse")?;
+    let tree = crate::util::timings::phase("document::parse", || parser.parse(source, None)).ok_or("no parse")?;
     let mut out = Vec::new();
-    let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
-    while let Some(m) = matches.next() {
-        out.push(
-            m.captures
-                .iter()
-                .filter_map(|c| Some((vocab[c.index as usize], c.node.utf8_text(source.as_bytes()).ok()?)))
-                .collect(),
-        );
-    }
+    crate::util::timings::phase("document::match", || {
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        while let Some(m) = matches.next() {
+            out.push(
+                m.captures
+                    .iter()
+                    .filter_map(|c| Some((vocab[c.index as usize], c.node.utf8_text(source.as_bytes()).ok()?)))
+                    .collect(),
+            );
+        }
+    });
     Ok(out)
 }
 

@@ -181,7 +181,7 @@ fn from_rel(rel: &Path) -> Option<String> {
 /// change that. The generated classmap is read here, once per map.
 pub fn read_map(root: Option<&Path>) -> Option<DependencyMap> {
     let root = root?;
-    let config = ResolvedConfig::load(root, true);
+    let config = crate::util::timings::phase("composer::manifests", || ResolvedConfig::load(root, true));
     let vendor_dir = match &config {
         Ok(c) => c.vendor_dir.clone(),
         Err(_) => vendor_dir(root, None),
@@ -234,7 +234,7 @@ pub fn read_map(root: Option<&Path>) -> Option<DependencyMap> {
             .map(|(prefix, dirs)| Lane::Prefix { prefix, dirs, spelling: PSR_0, spells: Spells::WholeName }),
     );
     lanes.push(Lane::AlwaysLoad(files));
-    Some(DependencyMap::new(lanes, vec![vendor_dir], inputs))
+    Some(crate::util::timings::phase("composer::assemble", || DependencyMap::new(lanes, vec![vendor_dir], inputs)))
 }
 
 /// The classmap Composer generates is read through this document.
