@@ -58,6 +58,11 @@ pub struct UseRow {
     /// Which of the language's name tables the row binds in, as the
     /// document states it.
     pub table: NameTable,
+    /// The member of the file's own module the row binds, where the
+    /// language makes a top-level import one (`ImportBinding::ModuleMember`):
+    /// another file names the imported entity by this name.
+    #[serde(default)]
+    pub member: Option<QualifiedName>,
 }
 
 impl UseRow {

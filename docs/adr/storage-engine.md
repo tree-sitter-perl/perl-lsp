@@ -180,12 +180,12 @@ what a generation write does.
 `unregister_file` cannot walk `old.analysis.symbols` for the names to
 remove — under symbol eviction that vec is empty, and rehydrating would
 fetch the NEW generation's names (a wrong inverse after an edit
-persists). `ModuleIndex.registered_names` records the (name, is-class)
+persists). The file's record (`FileRecords`, beside its role) holds the (name, is-class)
 pairs per path at registration time: an exact inverse by construction
 with no read-path cost, and the class-rank source for the cache-slot
 tie-break (which also read evicted symbols). Cost: one
 `Vec<(String, bool)>` per registered file, bounded and measured into the
-resident floor. The map is private to `module_index.rs`; a self-healing
+resident floor. The table is private to `module_index`; a self-healing
 read-side validation could replace it without touching call sites
 outside registration/unregister (`docs/forks-resolved.md`, "Unregister
 inverse under symbol eviction").

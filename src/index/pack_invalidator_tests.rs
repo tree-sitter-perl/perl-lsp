@@ -168,6 +168,55 @@ fn surface_gate_covers_registered_and_open_consumers() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A save the re-parse refuses (here: past the driver's size cap, which the
+/// walk would also refuse) is a deletion: the file's classes stop answering,
+/// and its consumers, registered and open, re-analyze without it. Saved back
+/// under the cap, it registers again.
+#[cfg(feature = "cpp")]
+#[test]
+fn a_refused_reparse_counts_as_a_deletion() {
+    let dir = std::env::temp_dir().join(format!("pack-refused-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let hdr = dir.join("box.h");
+    let tu = dir.join("use.cpp");
+    let small = "class Box { public: int width() { return 1; } };\n";
+    std::fs::write(&hdr, small).unwrap();
+    std::fs::write(&tu, "#include \"box.h\"\nint f() { Box b; return b.width(); }\n").unwrap();
+
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
+    let driver = reg.for_id("cpp").expect("cpp driver");
+    let pack = Arc::new(ModuleIndex::new_for_test());
+    register_pair(driver, &pack, &[&hdr, &tu]);
+    let canon_tu = std::fs::canonicalize(&tu).unwrap();
+    let canon_hdr = std::fs::canonicalize(&hdr).unwrap();
+    let files = OpenDocs::serving(driver);
+    let tu_url = Url::from_file_path(&canon_tu).unwrap();
+    assert!(files.open(tu_url.clone(), std::fs::read_to_string(&tu).unwrap()));
+    let is_registered = |p: &Path| {
+        let mut found = false;
+        pack.for_each_registered_file(&mut |cm| found |= cm.path.as_path() == p);
+        found
+    };
+    let box_home = || pack.get_cached("Box").map(|c| c.path.to_path_buf());
+    assert_eq!(box_home(), Some(canon_hdr.clone()));
+    let tu_before = arc_of(&pack, &canon_tu);
+
+    let cap = driver.caps().file_cap as usize;
+    std::fs::write(&hdr, format!("{small}// {}\n", "x".repeat(cap))).unwrap();
+    let inv = PackInvalidator::serving(driver);
+    let outcome = inv.file_changed(None, &pack, &files, &hdr, false);
+    assert!(!is_registered(&canon_hdr), "a refused re-parse unregisters the file");
+    assert_eq!(box_home(), None, "its classes stop answering");
+    assert_ne!(arc_of(&pack, &canon_tu), tu_before, "a registered consumer re-analyzes");
+    assert_eq!(outcome.refresh_open, vec![tu_url], "an open consumer refreshes");
+
+    std::fs::write(&hdr, small).unwrap();
+    inv.file_changed(None, &pack, &files, &hdr, false);
+    assert_eq!(box_home(), Some(canon_hdr), "back under the cap, it registers again");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The guard applied at the invalidation swap: a re-analysis whose event
 /// generation is OLDER than the one registered leaves the fresher registration
 /// untouched (H9-1). Simulated by pre-claiming the max generation, so the real
@@ -245,12 +294,10 @@ fn file_changed_defers_during_bulk_index_and_reconciles() {
 
 // ---- The persist/strip licence ----
 //
-// These three drive `swap`'s persist path with a REAL cache DB
-// (`with_test_cache_dir`), which `#[cfg(test)] open_cache_db -> None` made
-// unreachable. The failure lanes are injected with SQLite triggers rather
-// than lock timing, so each is deterministic: `RAISE(ROLLBACK)` discards the
-// whole transaction (the commit-fail lane), `RAISE(ABORT)` scoped to one path
-// fails that file's blob alone while the commit succeeds (the per-file lane).
+// Drives `swap`'s persist path with a REAL cache DB (`with_test_cache_dir`),
+// which `#[cfg(test)] open_cache_db -> None` makes unreachable otherwise. A
+// refused write ends the process, so its lane is pinned on the writer
+// harness instead (`module_resolver_tests`).
 
 #[cfg(feature = "cpp")]
 struct SwapFixture {
@@ -297,9 +344,7 @@ fn registered(pack: &ModuleIndex, path: &Path) -> Arc<FileAnalysis> {
 #[cfg(feature = "cpp")]
 const TEST_BUSY: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Control for the two failure-lane tests below: with a healthy DB the swap
-/// DOES strip, so a "registered whole" assertion there is evidence about the
-/// failure lane rather than evidence the branch was never reached.
+/// With a healthy DB the swap strips: a committed blob is the licence.
 #[cfg(feature = "cpp")]
 #[test]
 fn a_landed_persist_licenses_the_strip() {
@@ -308,78 +353,9 @@ fn a_landed_persist_licenses_the_strip() {
     module_cache::with_test_cache_dir(&f.dir, TEST_BUSY, || {
         f.inv.file_changed(None, &f.pack, &f.files, &f.hdr, false);
     });
-    assert!(
-        registered(&f.pack, &f.hdr).symbols_are_evicted(),
-        "a committed blob licenses the strip — otherwise these tests prove nothing"
-    );
-    let _ = std::fs::remove_dir_all(&f.dir);
-}
-
-/// The commit-fail lane. The transaction is discarded, so no blob landed for
-/// ANY file in the batch and every copy must stay whole: a stripped copy
-/// whose blob was rolled back rehydrates from the PREVIOUS generation's row
-/// (`load_one_diag` skips stamp validation for a single-row path), so the
-/// file answers pre-edit for the rest of the session with no rehydration miss
-/// counted and no strict-residency panic.
-#[cfg(feature = "cpp")]
-#[test]
-fn a_rolled_back_transaction_leaves_every_copy_whole() {
-    let f = swap_fixture("rollback");
-    std::fs::write(&f.hdr, "class Box { public: int width() { return 2; } int h() { return 3; } };\n").unwrap();
-    module_cache::with_test_cache_dir(&f.dir, TEST_BUSY, || {
-        {
-            let conn = module_cache::open_cache_db(None, "cpp").expect("test cache db");
-            conn.execute_batch(
-                "CREATE TRIGGER kill_modules BEFORE INSERT ON modules \
-                 BEGIN SELECT RAISE(ROLLBACK, 'injected'); END;",
-            )
-            .unwrap();
-        }
-        f.inv.file_changed(None, &f.pack, &f.files, &f.hdr, false);
-    });
     for p in [&f.hdr, &f.tu] {
-        let a = registered(&f.pack, p);
-        assert!(
-            !a.symbols_are_evicted() && !a.bag_is_evicted(),
-            "{p:?} was stripped against a transaction that rolled back"
-        );
+        assert!(registered(&f.pack, p).symbols_are_evicted(), "{p:?}: a committed blob licenses the strip");
     }
-    let _ = std::fs::remove_dir_all(&f.dir);
-}
-
-/// The per-file lane: one file's blob fails to land while the transaction
-/// commits. `save_to_db` reports it with its `bool` return; the strip licence
-/// is per PATH, so the failing file stays whole and its sibling still strips.
-#[cfg(feature = "cpp")]
-#[test]
-fn a_file_whose_blob_did_not_land_is_not_stripped() {
-    let f = swap_fixture("perfile");
-    std::fs::write(&f.hdr, "class Box { public: int width() { return 2; } int h() { return 3; } };\n").unwrap();
-    let canon_hdr = std::fs::canonicalize(&f.hdr).unwrap();
-    module_cache::with_test_cache_dir(&f.dir, TEST_BUSY, || {
-        {
-            let conn = module_cache::open_cache_db(None, "cpp").expect("test cache db");
-            // ABORT is statement-scoped: this file's INSERT fails, the
-            // transaction stays open and commits with its siblings' rows.
-            // Inlined, not bound — a trigger body cannot use parameters.
-            let target = canon_hdr.to_string_lossy().replace('\'', "''");
-            conn.execute_batch(&format!(
-                "CREATE TRIGGER kill_one BEFORE INSERT ON modules \
-                 WHEN NEW.path = '{target}' \
-                 BEGIN SELECT RAISE(ABORT, 'injected'); END;"
-            ))
-            .unwrap();
-        }
-        f.inv.file_changed(None, &f.pack, &f.files, &f.hdr, false);
-    });
-    assert!(
-        !registered(&f.pack, &f.hdr).symbols_are_evicted(),
-        "the file whose blob failed to save was stripped anyway"
-    );
-    assert!(
-        registered(&f.pack, &f.tu).symbols_are_evicted(),
-        "a sibling whose blob DID land must still strip — the licence is per path"
-    );
     let _ = std::fs::remove_dir_all(&f.dir);
 }
 

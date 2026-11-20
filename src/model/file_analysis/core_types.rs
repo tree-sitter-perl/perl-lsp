@@ -539,6 +539,20 @@ pub enum ClassCall {
 pub struct ImportRule {
     pub reach: ImportReach,
     pub prefix: ImportPrefix,
+    pub binds: ImportBinding,
+}
+
+/// What an import at a module's top level makes of the imported name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ImportBinding {
+    /// A spelling local to the importing file (PHP's `use`): no other
+    /// file can name the class through it.
+    #[default]
+    Local,
+    /// A member of the importing module, which another file reaches by
+    /// the module's name (Python's `from .core import Group` in
+    /// `click/__init__.py` makes `click.Group` the class `click.core.Group`).
+    ModuleMember,
 }
 
 /// Where in its scope a row binds.
@@ -587,7 +601,7 @@ impl NameSpellings {
         sigils: std::borrow::Cow::Borrowed(&[]),
         class_spelling: ClassSpelling::Identity,
         root_package: None,
-        imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
+        imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute, binds: ImportBinding::Local },
         class_call: ClassCall::FunctionCall,
         enclosing_class: EnclosingClass::ScopeChain,
         instance_slots: InstanceSlots::Apart,
@@ -602,7 +616,7 @@ impl NameSpellings {
             sigils: std::borrow::Cow::Borrowed(&[]),
             class_spelling: ClassSpelling::Identity,
             root_package: None,
-            imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
+            imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute, binds: ImportBinding::Local },
             class_call: ClassCall::FunctionCall,
             enclosing_class: EnclosingClass::ScopeChain,
             instance_slots: InstanceSlots::Apart,

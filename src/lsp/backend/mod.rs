@@ -44,6 +44,14 @@ pub fn max_cache_mb_default() -> u64 {
         .unwrap_or(DEFAULT_MAX_CACHE_MB)
 }
 
+/// The workspace root an `initialize` URI names, resolved the way a CLI root
+/// argument is (`WorkspaceRoot::resolve`). `to_file_path` percent-decodes, so
+/// `%20` is the space on disk; a URI naming no local path gives no root, and
+/// the server keeps the global cache rather than keying on a guess.
+pub(crate) fn workspace_root_of(uri: &Url) -> Option<crate::util::canonical_path::WorkspaceRoot> {
+    uri.to_file_path().ok().map(crate::util::canonical_path::WorkspaceRoot::resolve)
+}
+
 /// Fires the index's completion signal (`Backend::index_ready`) on EVERY exit
 /// path of the indexing task (including the no-root early-out and a panic),
 /// so a bounded waiter is never left blocking for an index that will never
@@ -404,5 +412,92 @@ mod first_change_tests {
             reserve_degraded_token(&map, &u, NumberOrString::String("t1".into())),
             "a new window announces itself with a new token"
         );
+    }
+}
+
+#[cfg(test)]
+mod workspace_root_tests {
+    //! The root `initialize` names keys the same store the CLI's root argument
+    //! does, and walks the directory it names.
+    use super::*;
+    use crate::index::module_cache::cache_dir_for_workspace;
+    use crate::util::canonical_path::WorkspaceRoot;
+
+    struct Scratch(PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(tag: &str) -> Scratch {
+        let base = std::env::temp_dir().join(format!("ws-root-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        Scratch(base)
+    }
+
+    fn server_cache_dir(uri: &Url) -> Option<PathBuf> {
+        cache_dir_for_workspace(Some(workspace_root_of(uri)?.cache_key()))
+    }
+
+    /// The key every existing cache dir was hashed from — the CLI's
+    /// `file://` + canonical path, unencoded. Spelled out here so a change
+    /// to it (which would re-cold every project) fails a test.
+    fn cli_cache_dir(dir: &std::path::Path) -> Option<PathBuf> {
+        let canonical = crate::util::canonical_path::CanonicalPath::resolve(dir);
+        let cli = cache_dir_for_workspace(Some(&format!("file://{}", canonical.display())));
+        assert_eq!(cli, cache_dir_for_workspace(Some(WorkspaceRoot::resolve(dir).cache_key())));
+        cli
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_spelling_of_a_root_keys_the_cli_cache_dir() {
+        let s = scratch("spell");
+        let proj = s.0.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let link = s.0.join("link");
+        std::os::unix::fs::symlink(&proj, &link).unwrap();
+        let want = cli_cache_dir(&proj);
+        assert!(want.is_some());
+
+        let bare = Url::from_file_path(&proj).unwrap();
+        let slashed = Url::from_directory_path(&proj).unwrap();
+        assert!(slashed.as_str().ends_with('/'));
+        let linked = Url::from_file_path(&link).unwrap();
+        for uri in [&bare, &slashed, &linked] {
+            assert_eq!(server_cache_dir(uri), want, "{uri}");
+        }
+        assert_eq!(cli_cache_dir(&link), want);
+
+        let spaced = s.0.join("my proj");
+        std::fs::create_dir_all(&spaced).unwrap();
+        let uri = Url::from_directory_path(&spaced).unwrap();
+        assert!(uri.as_str().contains("%20"));
+        assert_eq!(server_cache_dir(&uri), cli_cache_dir(&spaced));
+    }
+
+    #[test]
+    fn a_root_naming_no_local_path_is_no_root() {
+        assert_eq!(workspace_root_of(&Url::parse("untitled:Untitled-1").unwrap()), None);
+        assert_eq!(workspace_root_of(&Url::parse("https://example.com/proj").unwrap()), None);
+    }
+
+    /// A percent-encoded root walks the directory on disk: the workspace
+    /// index holds its files.
+    #[test]
+    fn a_root_with_a_space_indexes_its_files() {
+        let s = scratch("space");
+        let spaced = s.0.join("my proj");
+        std::fs::create_dir_all(spaced.join("lib/My")).unwrap();
+        std::fs::write(spaced.join("lib/My/Mod.pm"), "package My::Mod;\nsub hello { 1 }\n1;\n").unwrap();
+        let uri = Url::from_directory_path(&spaced).unwrap();
+
+        let idx = ModuleIndex::new_for_test();
+        idx.set_workspace_root(workspace_root_of(&uri).as_ref());
+        let root = idx.workspace_root().expect("a file: root is a root");
+        let indexed = crate::index::module_resolver::index_workspace_with_index(root.dir(), &idx, None, None);
+        assert_eq!(indexed, 1);
     }
 }

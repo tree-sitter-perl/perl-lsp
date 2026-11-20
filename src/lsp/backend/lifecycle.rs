@@ -115,14 +115,8 @@ impl PackHealCtx {
         {
             return;
         }
-        for imp in &analysis.imports {
-            self.module_index.request_resolve(&imp.module_name);
-        }
-        for (_pkg, parents) in analysis.package_parent_edges() {
-            for parent in parents {
-                self.module_index.request_resolve(parent);
-            }
-        }
+        // Ask for what the file names (non-blocking).
+        self.module_index.request_demand_of(&analysis);
         if let Some(mut doc) = self.open_docs.get_open_mut(uri) {
             doc.apply_rebuilt(analysis);
         }
@@ -258,14 +252,8 @@ impl Backend {
             if !latest.still() {
                 return; // a newer keystroke superseded this build
             }
-            for imp in &analysis.imports {
-                module_index.request_resolve(&imp.module_name);
-            }
-            for (_pkg, parents) in analysis.package_parent_edges() {
-                for parent in parents {
-                    module_index.request_resolve(parent);
-                }
-            }
+            // Ask for what the file names (non-blocking).
+            module_index.request_demand_of(&analysis);
             if let Some(mut doc) = open_docs.get_open_mut(&uri) {
                 doc.apply_rebuilt(analysis);
             }
@@ -308,7 +296,7 @@ impl Backend {
         let heal_ctx = self.pack_heal_ctx();
         tokio::spawn(async move {
             let outcome = tokio::task::spawn_blocking(move || {
-                invalidator.file_changed(root.as_deref(), &module_index, &open_docs, &path, deleted)
+                invalidator.file_changed(root.as_ref().map(|r| r.cache_key()), &module_index, &open_docs, &path, deleted)
             })
             .await;
             let Ok(outcome) = outcome else { return };

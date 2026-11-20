@@ -9,11 +9,7 @@ impl ModuleIndex {
         ModuleIndex {
             core,
             loaded_modules: Arc::new(DashMap::new()),
-            open_doc_paths: Arc::new(DashMap::new()),
             closedness: Arc::new(Default::default()),
-            all_files: Arc::new(DashMap::new()),
-            registered_names: Arc::new(DashMap::new()),
-            freshness: Arc::new(crate::model::surface::FreshnessIndex::default()),
             enriched: Arc::new(DashMap::new()),
             enriched_order: Arc::new(std::sync::Mutex::new(Default::default())),
             gated_views: Arc::new(Default::default()),
@@ -29,7 +25,7 @@ impl ModuleIndex {
 
     pub fn new(client: Client, on_diagnostics_refresh: impl Fn() + Send + Sync + 'static) -> Self {
         let core = Arc::new(IndexCore::new());
-        if serves_perl() {
+        if has_dependency_tier() {
             module_resolver::spawn_resolver(
                 Arc::clone(&core),
                 client,
@@ -47,12 +43,12 @@ impl ModuleIndex {
     }
 
     /// Notify the resolver thread of the workspace root (from LSP initialize).
-    pub fn set_workspace_root(&self, root: Option<&str>) {
+    pub fn set_workspace_root(&self, root: Option<&crate::util::canonical_path::WorkspaceRoot>) {
         let mut guard = self.core.workspace_root.root.lock().unwrap();
         if root.is_none() {
             log::warn!("No workspace root from client; using global module cache");
         }
-        *guard = Some(root.map(String::from));
+        *guard = Some(root.cloned());
         self.core.workspace_root.condvar.notify_one();
         drop(guard);
         // Everything below reads `modules.db`. A pack process's store is
@@ -61,9 +57,9 @@ impl ModuleIndex {
             return;
         }
         // The hub's relational-ref-index reader: the SAME cache key the
-        // resolver thread writes under (both spell it as this root string),
-        // so retrieval and shred always address one DB.
-        let key = root.map(String::from);
+        // resolver thread writes under, so retrieval and shred always
+        // address one DB.
+        let key = root.map(|r| r.cache_key().to_owned());
         {
             let key = key.clone();
             self.set_ref_rows_opener(Arc::new(move || {
@@ -151,37 +147,114 @@ impl ModuleIndex {
         ));
     }
 
-    /// Get the workspace root URI if set.
-    pub fn workspace_root(&self) -> Option<String> {
+    /// The workspace root, if set.
+    pub fn workspace_root(&self) -> Option<crate::util::canonical_path::WorkspaceRoot> {
         self.core.workspace_root.root.lock().ok()
             .and_then(|guard| guard.as_ref().and_then(|opt| opt.clone()))
     }
 
-    /// Request background resolution for a module. Non-blocking.
-    /// Stale modules (old extract version) are queued with priority.
-    pub fn request_resolve(&self, module_name: &str) {
-        let is_stale = self.core.stale_modules.contains_key(module_name);
-        if self.core.cache.contains_key(module_name) && !is_stale {
-            return; // fresh and cached
+    /// Ask the dependency tier for `ask`. Non-blocking: the resolver thread
+    /// acquires it, and an ask already answered at the current map
+    /// generation is not queued again. Every asker comes through here.
+    pub fn request(&self, ask: crate::build::dependency_map::Ask) {
+        self.core.ask([ask]);
+    }
+
+    /// `request` for everything one file names across files
+    /// (`FileAnalysis::used_identities`) — an opened, edited or saved
+    /// document, a one-shot run's project file, or a query's file.
+    pub fn request_demand_of(&self, fa: &FileAnalysis) {
+        self.core.ask(fa.used_identities().into_iter().map(crate::build::dependency_map::Ask::Name));
+    }
+
+    /// Whether a resolver thread serves this index: the served language has
+    /// a dependency tier.
+    pub fn serves_dependency_tier(&self) -> bool {
+        self.core.queue.served.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Block until the resolver thread has read its map and has nothing
+    /// queued, in flight, or owed to a map move — for one-shot callers that
+    /// answer from a settled index. Every landing happens on that thread,
+    /// so this is how such a caller sees one. Returns at once when no
+    /// resolver serves this index.
+    pub fn wait_idle(&self) {
+        use std::sync::atomic::Ordering::Acquire;
+        let q = &self.core.queue;
+        if !q.served.load(Acquire) {
+            return;
         }
-        if is_stale {
-            let mut priority = self.core.queue.priority.lock().unwrap();
-            if !priority.contains(&module_name.to_string()) {
-                priority.push(module_name.to_string());
+        let mut guard = self.core.resolved.mu.lock().unwrap();
+        loop {
+            // Read under `pending`: the drain takes a batch and marks the
+            // queue busy under that lock, so no batch is between the two.
+            let idle = {
+                let pending = q.pending.lock().unwrap();
+                q.started.load(Acquire)
+                    && pending.is_empty()
+                    && !q.map_moved.load(Acquire)
+                    && !q.map_inputs_moved.load(Acquire)
+                    && !q.busy.load(Acquire)
+            };
+            if idle {
+                return;
             }
-        } else {
-            let mut pending = self.core.queue.pending.lock().unwrap();
-            pending.push(module_name.to_string());
+            // The timeout only bounds a wake the thread's notify could
+            // race; every state change above is followed by one.
+            guard = self
+                .core
+                .resolved
+                .cv
+                .wait_timeout(guard, std::time::Duration::from_millis(50))
+                .unwrap()
+                .0;
         }
-        // Both guards are out of scope here — `notify_new_work` takes
-        // `pending`, and the drain's lock order forbids holding `priority`
-        // across it.
-        self.core.queue.notify_new_work();
+    }
+
+    /// A watched file moved: when it is a manifest the dependency map was
+    /// read from, the resolver thread re-reads the map and `true` comes
+    /// back — the file is the map's input, not a source file to index.
+    pub fn note_map_input_changed(&self, path: &std::path::Path) -> bool {
+        let Some(map) = self.core.dependency_map() else {
+            return false;
+        };
+        if !map.is_input(path) {
+            return false;
+        }
+        self.core.queue.map_inputs_moved.store(true, std::sync::atomic::Ordering::Release);
+        self.core.queue.wake();
+        true
+    }
+
+    /// The manifests the served language's dependency map is read from,
+    /// reading the map if nothing has yet.
+    pub fn dependency_map_inputs(&self) -> Vec<std::path::PathBuf> {
+        let root = self.workspace_root().map(|r| r.dir().to_path_buf());
+        let served = crate::build::language_driver::LanguageRegistry::served();
+        self.core
+            .dependency_map_for(served, root.as_deref())
+            .map(|m| m.inputs().to_vec())
+            .unwrap_or_default()
+    }
+
+    /// The asks answered at the current generation: `(landed, missed)`.
+    pub fn asked_counts(&self) -> (usize, usize) {
+        let now = self.core.map_generation();
+        let mut out = (0, 0);
+        for e in self.core.asked.iter() {
+            match e.value() {
+                (g, Outcome::Landed) if *g == now => out.0 += 1,
+                (g, Outcome::Miss) if *g == now => out.1 += 1,
+                _ => {}
+            }
+        }
+        out
     }
 
     /// Return the cached CachedModule for a module name. Never does I/O.
     pub fn get_cached(&self, module_name: &str) -> Option<Arc<CachedModule>> {
-        self.core.cache.get(module_name).and_then(|entry| entry.clone())
+        let held = self.core.cache.get(module_name).and_then(|entry| entry.clone())?;
+        self.core.placed_now(&held.path, module_name).then_some(held)
     }
 
     /// Like `get_cached`, but scoped to a querying file's VISIBILITY set
@@ -201,6 +274,7 @@ impl ModuleIndex {
                 let reachable: Vec<&Arc<CachedModule>> = cands
                     .iter()
                     .filter(|c| visible.contains(&c.path.to_string_lossy().into_owned()))
+                    .filter(|c| self.core.placed_now(&c.path, module_name))
                     .collect();
                 if let Some(best) = best_candidate(&reachable, module_name, &|m, n| self.module_defines_class(m, n)) {
                     return Some(best);
@@ -235,6 +309,7 @@ impl ModuleIndex {
                 .value()
                 .iter()
                 .filter(|c| c.path.to_str().is_some_and(|p| visible.contains(p)))
+                .filter(|c| self.core.placed_now(&c.path, entry.key()))
                 .collect();
             if let Some(best) = best_candidate(&reachable, entry.key(), &|m, n| self.module_defines_class(m, n)) {
                 out.push((entry.key().clone(), best));
@@ -319,7 +394,9 @@ impl ModuleIndex {
     pub fn for_each_cached<F: FnMut(&str, &Arc<CachedModule>)>(&self, mut f: F) {
         for entry in self.core.cache.iter() {
             if let Some(ref cached) = *entry.value() {
-                f(entry.key(), cached);
+                if self.core.placed_now(&cached.path, entry.key()) {
+                    f(entry.key(), cached);
+                }
             }
         }
     }
@@ -331,19 +408,17 @@ impl ModuleIndex {
         let mut seen = std::collections::HashSet::new();
         let mut results = Vec::new();
 
-        // Tier 1: resolved modules (have full analysis)
-        for entry in self.core.cache.iter() {
-            if entry.value().is_some() {
-                let name = entry.key();
-                if name.to_lowercase().starts_with(&prefix_lower) && seen.insert(name.clone()) {
-                    results.push((name.clone(), true));
-                }
+        // Tier 1: what a held file loads as — never a member it declares,
+        // which an import path does not name.
+        self.core.records.for_each_identity(|name| {
+            if name.to_lowercase().starts_with(&prefix_lower) && !seen.contains(name) {
+                seen.insert(name.to_string());
+                results.push((name.to_string(), true));
             }
-        }
+        });
 
-        // Tier 2: @INC scan (name only, no analysis yet)
-        for entry in self.core.available_modules.iter() {
-            let name = entry.key();
+        // Tier 2: what the map lists (name only, no analysis yet)
+        for name in self.core.available_names().iter() {
             if name.to_lowercase().starts_with(&prefix_lower) && seen.insert(name.clone()) {
                 results.push((name.clone(), false));
             }
@@ -370,21 +445,56 @@ impl ModuleIndex {
         None
     }
 
-    /// Find all cached modules that *export* the given function name.
-    /// Starts from the generic symbol index, then filters to modules
-    /// whose `export` / `export_ok` list actually contains the name —
-    /// the reverse_index covers every named symbol, not just exports.
+    /// Find all cached modules that *export* the given function name: the
+    /// modules the symbol index names (it covers every named symbol, not
+    /// just exports) whose own lists or re-exports carry the name, plus
+    /// every descendant of one that declares its own `import` — a class
+    /// exporting nothing of its own exports what its inherited `import`
+    /// does (`export_surface_with_index`).
     pub fn find_exporters(&self, func_name: &str) -> Vec<String> {
-        let mut result: Vec<String> = self.modules_with_symbol(func_name)
-            .into_iter()
-            .filter(|m| {
-                // ANY candidate file of the module may carry the export list.
-                crate::model::file_analysis::CrossFileLookup::def_candidates(self, m)
-                    .iter()
-                    .any(|c| c.analysis.export.iter().any(|e| e == func_name)
-                        || c.analysis.export_ok.iter().any(|e| e == func_name))
-            })
-            .collect();
+        use crate::model::file_analysis::CrossFileLookup;
+        use crate::model::graph::{EdgeKindMask, GraphView, Node, WalkControl};
+        // ANY candidate file of the module may carry the export list.
+        let exports = |m: &str| {
+            self.def_candidates(m)
+                .iter()
+                .any(|c| c.analysis.export_surface_with_index(m, self).exports(func_name))
+        };
+        // A bucket member exporting the name through an inherited `import`
+        // is reached from the lender below, so its own lists answer here.
+        let lists = |m: &str| {
+            self.def_candidates(m)
+                .iter()
+                .any(|c| c.analysis.listed_export_surface_with_index(self).exports(func_name))
+        };
+        let mut result: Vec<String> = Vec::new();
+        for m in self.modules_with_symbol(func_name) {
+            if !lists(&m) {
+                continue;
+            }
+            // A descendant lends `m`'s lists only through an `import` `m`
+            // declares itself; one lending an ancestor's lists is found from
+            // that ancestor, which lists the name and so is in this bucket.
+            if !self.module_has_symbol(crate::model::conventions::IMPORT_SUB, &m) {
+                result.push(m);
+                continue;
+            }
+            if let Some(seed) = self.def_candidates(&m).first().cloned() {
+                GraphView::new(&seed.analysis, Some(self)).walk(
+                    Node::Class(m.clone()),
+                    EdgeKindMask::INHERITS_INV,
+                    &mut |node| {
+                        if let Node::Class(d) = node {
+                            if exports(d) {
+                                result.push(d.clone());
+                            }
+                        }
+                        WalkControl::Continue
+                    },
+                );
+            }
+            result.push(m);
+        }
         result.sort();
         result.dedup();
         result
@@ -466,7 +576,7 @@ impl ModuleIndex {
     }
 
     /// Create a ModuleIndex for CLI mode: a real (headless) resolver
-    /// thread — same @INC scan, SQLite warm/persist, and resolve loop as
+    /// thread — same name listing, SQLite warm/persist, and resolve loop as
     /// the server's, without the LSP progress/builtins warmup. One-shot
     /// CLI sessions previously carried NO resolver, so they could never
     /// resolve a module the editor hadn't already cached. The thread
@@ -482,7 +592,7 @@ impl ModuleIndex {
 
     pub fn new_for_cli() -> Self {
         let core = Arc::new(IndexCore::new());
-        if serves_perl() {
+        if has_dependency_tier() {
             module_resolver::spawn_test_resolver(Arc::clone(&core));
         }
         Self::from_core(core)
@@ -522,8 +632,8 @@ impl ModuleIndex {
     /// Test-only: publish an `@INC` without a resolver thread (discovery
     /// shells out to `perl`, and a unit net needs its own roots).
     #[cfg(test)]
-    pub fn set_inc_roots_for_test(&self, roots: &[std::path::PathBuf]) {
-        self.core.set_inc_roots(roots);
+    pub fn set_search_roots_for_test(&self, roots: &[std::path::PathBuf]) {
+        self.core.publish_dependency_map(Arc::new(crate::build::inc::map_over(roots.to_vec())));
     }
 
     #[cfg(test)]
@@ -543,21 +653,16 @@ impl ModuleIndex {
         self.core.builtins.insert(name.to_string(), doc.to_string());
     }
 
-    /// Direct access to the raw cache DashMap (for CLI warm_cache integration).
-    pub fn cache_raw(&self) -> &DashMap<String, Option<Arc<CachedModule>>> {
-        &self.core.cache
-    }
-
-    /// The candidate relation behind the name-slot winner — the warm lane
-    /// fills it alongside `cache_raw` so a warm start keeps every provider.
-    pub fn all_defs_raw(&self) -> &DashMap<String, DefCandidates> {
-        &self.core.all_defs
-    }
-
 }
 
-/// The resolver thread is the Perl `@INC` tier: a pack process has no
-/// dependency tier for it to scan, so it never spawns.
+/// The resolver thread is the served language's dependency tier: a
+/// language with no reader of the dependency map has none, and the thread
+/// never spawns.
+fn has_dependency_tier() -> bool {
+    crate::build::language_driver::LanguageRegistry::served().has_dependency_map()
+}
+
+/// The Perl hub's store and its long-lived behaviours.
 fn serves_perl() -> bool {
     crate::build::language_driver::LanguageRegistry::served().caps().hub_enrichment
 }

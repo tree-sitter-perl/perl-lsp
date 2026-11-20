@@ -93,6 +93,22 @@ pub fn sweep_bag_cache_cap(persisted_source_bytes: u64, stock: usize) -> usize {
     usize::try_from(capped).unwrap_or(usize::MAX).max(stock)
 }
 
+/// Stock floor of `prepare_ahead_cap`.
+pub const PREPARE_AHEAD_STOCK: usize = 16 * 1024 * 1024;
+
+/// Bytes of finished dependency parses the resolver may hold ahead of its
+/// landing cursor (`module_resolver::Prepared`). The parse-ahead exists to
+/// keep the pool's workers busy, so the window needs room for one analysis
+/// per worker at the batch's mean size, estimated from its source bytes;
+/// more only holds whole copies longer. Floored at `stock`, ceilinged at
+/// half of physical RAM.
+pub fn prepare_ahead_cap(workers: usize, batch_source_bytes: u64, files: usize, stock: usize) -> usize {
+    let mean = batch_source_bytes / files.max(1) as u64;
+    let derived = mean.saturating_mul(SOURCE_TO_ANALYSIS_EXPANSION).saturating_mul(workers as u64);
+    let ceiling = physical_ram_bytes().map(|ram| ram / RAM_CEILING_SHARE).unwrap_or(u64::MAX);
+    usize::try_from(derived.min(ceiling)).unwrap_or(usize::MAX).max(stock)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,6 +132,16 @@ mod tests {
         if cfg!(any(unix, windows)) {
             assert!(physical_ram_bytes().is_some_and(|b| b > 0));
         }
+    }
+
+    #[test]
+    fn prepare_cap_floors_at_stock_and_scales_with_workers_and_file_size() {
+        let stock = PREPARE_AHEAD_STOCK;
+        assert_eq!(prepare_ahead_cap(4, 0, 0, stock), stock);
+        assert_eq!(prepare_ahead_cap(4, 100 * 10_000, 100, stock), stock, "small files stay at the floor");
+        let big = prepare_ahead_cap(4, 10 * 200_000, 10, stock);
+        assert_eq!(big as u64, 4 * 200_000 * SOURCE_TO_ANALYSIS_EXPANSION);
+        assert_eq!(prepare_ahead_cap(8, 10 * 200_000, 10, stock), 2 * big);
     }
 
     #[test]

@@ -1048,7 +1048,9 @@ fn driver_caps_axes_are_reviewed_exhaustively() {
             context_gather,
             pack_invalidation,
             entrypoint_symbols,
+            file_cap,
         } = d.caps();
+        assert!(file_cap > 0, "driver {} would refuse every file", d.id());
         // The hub lanes (enrichment, native cursor/hover/rebuild verbs) and
         // the pack lanes (invalidator, gather, bare words) are disjoint
         // architectures today — one driver never straddles both.

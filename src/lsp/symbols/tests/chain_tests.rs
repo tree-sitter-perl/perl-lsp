@@ -169,7 +169,7 @@ fn test_demo_file_chain_to_resolves_on_line_71() {
 
     // Index the project's test_files/ as the workspace.
     let idx = ModuleIndex::new_for_test();
-    idx.set_workspace_root(Some(root.to_str().unwrap()));
+    idx.set_workspace_root(Some(&crate::util::canonical_path::WorkspaceRoot::resolve(&root)));
     let _indexed = crate::index::module_resolver::index_workspace_with_index(
         &root.join("test_files"),
         &idx,
@@ -180,7 +180,7 @@ fn test_demo_file_chain_to_resolves_on_line_71() {
     // Use the ACTUAL Mojolicious library from @INC — the same
     // code nvim analyzes. If Mojo isn't installed, skip cleanly
     // so CI on bare systems doesn't break.
-    let inc_paths = crate::index::module_resolver::discover_inc_paths();
+    let inc_paths = crate::build::inc::read_map(None);
     let insert_real = |name: &str| -> bool {
         let mut p = crate::index::module_resolver::create_parser();
         match crate::index::module_resolver::resolve_and_parse(&inc_paths, name, &mut p) {
@@ -364,7 +364,7 @@ fn data_printer_use_line_options_completion_for_data_printer_module() {
 fn test_route_pm_chain_decomposition() {
     use std::fs;
     use std::path::PathBuf;
-    let inc = crate::index::module_resolver::discover_inc_paths();
+    let inc = crate::build::inc::discover_inc_paths();
     let route_path = inc
         .iter()
         .map(|p| p.join("Mojolicious/Routes/Route.pm"))
@@ -576,7 +576,7 @@ fn test_demo_chain_empirical_truth_table() {
     let demo_source = fs::read_to_string(&demo).expect("demo file");
 
     let idx = ModuleIndex::new_for_test();
-    idx.set_workspace_root(Some(root.to_str().unwrap()));
+    idx.set_workspace_root(Some(&crate::util::canonical_path::WorkspaceRoot::resolve(&root)));
     let _ = crate::index::module_resolver::index_workspace_with_index(
         &root.join("test_files"),
         &idx,
@@ -584,7 +584,7 @@ fn test_demo_chain_empirical_truth_table() {
         None,
     );
 
-    let inc = crate::index::module_resolver::discover_inc_paths();
+    let inc = crate::build::inc::read_map(None);
     let install = |name: &str| -> bool {
         let mut p = crate::index::module_resolver::create_parser();
         match crate::index::module_resolver::resolve_and_parse(&inc, name, &mut p) {

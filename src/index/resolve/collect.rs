@@ -681,7 +681,7 @@ fn editable_copy_satisfies(
         return true;
     }
     for path in idx.ref_candidate_paths(keys) {
-        if idx.is_dependency_path(&path) {
+        if super::refs::index_role(idx, &path) != RoleMask::WORKSPACE {
             continue;
         }
         let Some(cm) = idx.cached_by_path(&path) else { continue };

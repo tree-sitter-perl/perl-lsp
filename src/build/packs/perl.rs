@@ -13,6 +13,7 @@ pub fn perl_pack() -> LangPack {
         construction: crate::model::file_analysis::ConstructionKey::Constructor,
         member_spaces: crate::model::conventions::PERL_CONVENTIONS.member_spaces.clone(),
         family_reach: crate::model::conventions::PERL_CONVENTIONS.family_reach,
+        file_identity: crate::model::conventions::PERL_CONVENTIONS.file_identity,
         lattice: crate::model::conventions::PERL_CONVENTIONS.lattice.clone(),
         type_display: |_| None,
         // The builder stores variable symbols WITH sigil. Nothing to

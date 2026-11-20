@@ -23,9 +23,9 @@ pub(crate) fn strict_residency() -> bool {
 
 /// The post-bulk-index residency check, one speller for the pack tier and
 /// the Perl workspace tier: fully-resident registered copies beyond the
-/// deliberately-accounted ones (writer fallbacks, degraded/unpersisted
-/// analyses) mean a registration path is silently pinning whole analyses —
-/// the RAM regression no functional test can see. `debug_assert` catches it
+/// deliberately-accounted ones (degraded/unpersisted analyses) mean a
+/// registration path is silently pinning whole analyses — the RAM
+/// regression no functional test can see. `debug_assert` catches it
 /// in `cargo test`; strict mode makes it fatal in release (the gold net).
 pub(super) fn residency_tripwire(tier: &str, whole: usize, expected: usize) {
     if whole <= expected {
@@ -33,7 +33,7 @@ pub(super) fn residency_tripwire(tier: &str, whole: usize, expected: usize) {
     }
     log::error!(
         "residency tripwire ({tier}): {whole} fully-resident copies, only \
-         {expected} accounted (writer fallbacks / degraded) — a registration \
+         {expected} accounted (degraded / unpersisted) — a registration \
          path is pinning whole analyses"
     );
     debug_assert!(
@@ -48,28 +48,26 @@ pub(super) fn residency_tripwire(tier: &str, whole: usize, expected: usize) {
     }
 }
 
-/// Persist EVERY provider of `module_name` — one row per file, because the
-/// name maps to a set. `true` only when all of them landed: a partial write
-/// must not license the resident strip, or the un-persisted provider loses
-/// the axes it can no longer rehydrate.
-pub(super) fn save_module_generation(
+/// Persist one dependency file, path-keyed. The verdict is `true` when a
+/// row that can rehydrate it is on disk — already current (the landing took
+/// it from that row) or written now — and that verdict is the strip
+/// licence. The surface is the one that row describes: what the encode
+/// projected, or the row's persisted projection when it was current (a warm
+/// landing, recorded as the workspace warm lane records its stub's). `None`
+/// when neither is to hand.
+pub(super) fn persist_dependency(
     conn: &rusqlite::Connection,
-    module_name: &str,
-    result: &Option<Providers>,
-) -> bool {
-    let Some(providers) = result else {
-        return module_cache::save_to_db(conn, module_name, &None, module_cache::NAME_KEYED_SOURCE);
-    };
-    let mut all = true;
-    for m in providers {
-        all &= module_cache::save_to_db(
-            conn,
-            module_name,
-            &Some(m.clone()),
-            module_cache::NAME_KEYED_SOURCE,
-        );
+    m: &Arc<CachedModule>,
+) -> Result<(bool, Option<crate::model::surface::Surface>), module_cache::PersistFailure> {
+    if let Some(stamp) = module_cache::file_stamp(&m.path) {
+        if module_cache::dependency_row_is_current(conn, &m.path, stamp) {
+            let surface = crate::util::ghost_stats::timed("resolver.load_surface", || {
+                module_cache::load_surface(conn, &m.path.to_string_lossy())
+            });
+            return Ok((true, surface));
+        }
     }
-    all
+    module_cache::save_to_db_projected(conn, &m.path.to_string_lossy(), m, module_cache::DEPENDENCY_SOURCE)
 }
 
 /// Stamp-before-read + re-stat-after-parse: capture the disk stamp, run the
@@ -88,21 +86,6 @@ pub(super) fn analyze_stamped<T>(
     }
     Some((out, stamp))
 }
-
-/// Byte budget for whole `FileAnalysis` copies the persist writer retains
-/// when a chunk fails to commit (disk full) or panics. The strip is licensed
-/// only by a landed blob, so a fallback keeps copies WHOLE — and a
-/// persistently failing writer would otherwise pin the ENTIRE tree resident
-/// (the docs/forks-resolved.md "writer fallback budget" entry). Past the cap
-/// we DROP the resident copy rather than register a stripped one: the chunk
-/// didn't commit, so a stripped copy's blob isn't on disk and could only
-/// rehydrate to wrong-empty. Dropping is honest absence — the file reads as
-/// "not indexed this session" and the next index/warm re-registers it; it
-/// never serves wrong data and never leaves an evicted copy unrehydratable
-/// (nothing is evicted — nothing is registered). Byte-accounted like the
-/// enrichment overlay (`ENRICHED_BYTE_CAP`); 128 MiB per writer thread — a
-/// transient failure degrades gracefully, a permanent one can't OOM.
-pub(super) const FALLBACK_WHOLE_BYTE_CAP: usize = 128 * 1024 * 1024;
 
 /// Entries per persist transaction. The writer fills a batch with
 /// `try_recv` after its first blocking `recv`, so this is also the floor the
@@ -206,90 +189,67 @@ pub(crate) fn send_to_writer<E>(tx: &std::sync::mpsc::SyncSender<E>, entry: E) {
 /// the channel (≤128 per txn), owns BEGIN IMMEDIATE / COMMIT / ROLLBACK
 /// (IMMEDIATE — a deferred txn that reads before writing can hit an
 /// unretryable SQLITE_BUSY_SNAPSHOT against a concurrent writer), and hands
-/// every entry to exactly one of `on_committed` (deferred registration, the
-/// strip) or `on_fallback` (the whole-copy self-heal). `write_batch` returns
-/// one verdict per entry — did THAT entry's blob and rows land — and only an
-/// entry that landed in a chunk that committed reaches `on_committed`: a
-/// statement fails alone inside a transaction that still commits, and a copy
-/// stripped against the blob that failed answers empty. Commit failure and
-/// chunk panic send the whole chunk to the fallback (a panic must not kill
-/// the writer, workers keep stripping copies whose sends would silently
-/// fail). With no Connection the channel drains unregistered. Registration
-/// runs inside the panic guard, mirroring the txn: entries a mid-batch
-/// registration panic leaves behind take the fallback lane instead of
-/// vanishing. `begin_chunk` runs once per chunk inside its transaction and
-/// hands `write_entry` whatever chunk-wide state it reads (the stubs-table
-/// version); `write_entry` answers for one entry, so there is exactly one
-/// verdict per entry by construction.
+/// each entry of a chunk that committed to `on_committed` (deferred
+/// registration, the strip) with `write_entry`'s verdict: `Ok(false)` is an
+/// entry with nothing to write, never a write that failed. The first write,
+/// BEGIN or COMMIT the store refuses rolls the chunk back and ends the
+/// writer with that `PersistFailure`, which its caller makes fatal; so does
+/// a chunk that panicked, since its entries can no longer be accounted for.
+/// Registration runs inside the panic guard, mirroring the txn. With no
+/// Connection the channel drains unregistered. `begin_chunk` runs once per
+/// chunk inside its transaction and hands `write_entry` whatever
+/// chunk-wide state it reads (the stubs-table version).
 pub(crate) fn run_persist_writer<E, C>(
     rx: std::sync::mpsc::Receiver<E>,
     conn: Option<&rusqlite::Connection>,
     label: &str,
     begin_chunk: impl Fn(&rusqlite::Connection) -> C,
-    write_entry: impl Fn(&rusqlite::Connection, &C, &E) -> bool,
-    mut on_committed: impl FnMut(E),
-    mut on_fallback: impl FnMut(E),
-) {
+    write_entry: impl Fn(&rusqlite::Connection, &C, &E) -> Result<bool, module_cache::PersistFailure>,
+    mut on_committed: impl FnMut(E, bool),
+) -> Result<(), module_cache::PersistFailure> {
+    use module_cache::PersistFailure;
     let Some(conn) = conn else {
         while rx.recv().is_ok() {}
-        return;
+        return Ok(());
     };
     let mut batch: Vec<E> = Vec::new();
-    let mut process = |batch: &mut Vec<E>| {
+    let mut process = |batch: &mut Vec<E>| -> Result<(), PersistFailure> {
         if batch.is_empty() {
-            return;
+            return Ok(());
         }
         let n = batch.len();
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let txn_open = match conn.execute_batch(module_cache::sql::TXN_BEGIN_IMMEDIATE.registered()) {
-                Ok(()) => true,
-                Err(err) => {
-                    log::error!("{label}: BEGIN failed ({n} files, registering whole copies): {err}");
-                    false
+            conn.execute_batch(module_cache::sql::TXN_BEGIN_IMMEDIATE.registered())
+                .map_err(|err| PersistFailure::new(conn, format_args!("{label}: BEGIN: {err}")))?;
+            let chunk = begin_chunk(conn);
+            let written: Result<Vec<bool>, PersistFailure> =
+                batch.iter().map(|e| write_entry(conn, &chunk, e)).collect();
+            let committed = written.and_then(|w| {
+                conn.execute_batch(module_cache::sql::TXN_COMMIT.registered())
+                    .map(|()| w)
+                    .map_err(|err| PersistFailure::new(conn, format_args!("{label}: COMMIT: {err}")))
+            });
+            let written = match committed {
+                Ok(w) => w,
+                Err(failure) => {
+                    let _ = conn.execute_batch(module_cache::sql::TXN_ROLLBACK.registered());
+                    return Err(failure);
                 }
             };
-            // A failed BEGIN would leave each write autocommitting, and the
-            // whole chunk takes the fallback lane anyway — skip the writes.
-            let landed: Vec<bool> = if txn_open {
-                let chunk = begin_chunk(conn);
-                batch.iter().map(|e| write_entry(conn, &chunk, e)).collect()
-            } else {
-                Vec::new()
-            };
-            let committed = txn_open
-                && match conn.execute_batch(module_cache::sql::TXN_COMMIT.registered()) {
-                    Ok(()) => true,
-                    Err(err) => {
-                        let _ = conn.execute_batch(module_cache::sql::TXN_ROLLBACK.registered());
-                        log::error!(
-                            "{label}: commit failed ({n} files, registering whole copies): {err}"
-                        );
-                        false
-                    }
-                };
-            if committed {
-                for (e, landed) in batch.drain(..).zip(landed) {
-                    if landed {
-                        on_committed(e);
-                    } else {
-                        on_fallback(e);
-                    }
-                }
-            } else {
-                for e in batch.drain(..) {
-                    on_fallback(e);
-                }
+            for (e, wrote) in batch.drain(..).zip(written) {
+                on_committed(e, wrote);
             }
+            Ok(())
         }));
-        if r.is_err() {
-            // A panic can leave the txn open; roll back defensively so the
-            // NEXT chunk's BEGIN isn't poisoned.
+        r.unwrap_or_else(|panic| {
             let _ = conn.execute_batch(module_cache::sql::TXN_ROLLBACK.registered());
-            log::error!("{label}: chunk panicked ({n} files) — registering whole copies");
-            for e in batch.drain(..) {
-                on_fallback(e);
-            }
-        }
+            let why = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_default();
+            Err(PersistFailure::new(conn, format_args!("{label}: a chunk of {n} files panicked: {why}")))
+        })
     };
     while let Ok(entry) = rx.recv() {
         batch.push(entry);
@@ -299,7 +259,7 @@ pub(crate) fn run_persist_writer<E, C>(
                 Err(_) => break,
             }
         }
-        process(&mut batch);
+        process(&mut batch)?;
     }
-    process(&mut batch);
+    process(&mut batch)
 }

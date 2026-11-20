@@ -55,7 +55,7 @@ pub fn rehydration_miss_count() -> usize {
 /// The linkage-visible feed a registration extracts from a WHOLE analysis:
 /// (name, declares-a-Class) per visible symbol. Collected before any strip
 /// so the feeds and tie-breaks never read an emptied `symbols`.
-fn collect_linkage_feed(analysis: &FileAnalysis) -> Vec<(String, bool)> {
+pub(crate) fn collect_linkage_feed(analysis: &FileAnalysis) -> Vec<(String, bool)> {
     let mut index: std::collections::HashMap<std::borrow::Cow<'_, str>, usize> = std::collections::HashMap::new();
     let mut feed: Vec<(String, bool)> = Vec::new();
     for sym in analysis.symbols() {
@@ -136,27 +136,58 @@ fn best_candidate<'c>(
 
 // ---- Internal sync primitives (pub(crate) for resolver thread) ----
 
-/// Thread-safe queue: Mutex<Vec> + Condvar.
+/// What the resolver thread has been asked and not yet taken, plus the
+/// state "is it idle" reads. One lane: every asker queues here, and the
+/// memo (`IndexCore::asked`) — not a queue position — says what is settled.
 pub(crate) struct ResolveQueue {
-    /// High priority: stale modules from open files. Drained first.
-    pub priority: Mutex<Vec<String>>,
-    /// Normal priority: missing modules.
-    pub pending: Mutex<Vec<String>>,
+    pub pending: Mutex<Vec<crate::build::dependency_map::Ask>>,
     pub condvar: Condvar,
+    /// A new map was published: the thread re-asks its memo against it and
+    /// sweeps what the new map no longer places. A flag, so the drain hands
+    /// back an empty batch when nothing else is queued.
+    pub map_moved: std::sync::atomic::AtomicBool,
+    /// A manifest the map was read from moved: the thread re-reads the map.
+    pub map_inputs_moved: std::sync::atomic::AtomicBool,
+    /// A batch is out of the queue and not yet landed. Set under `pending`
+    /// as the batch is taken, so "queue empty and not busy" is never true
+    /// while an ask is in flight.
+    pub busy: std::sync::atomic::AtomicBool,
+    /// The thread has read its map and run the store's gates; before that
+    /// an empty queue is not idle.
+    pub started: std::sync::atomic::AtomicBool,
+    /// A resolver thread serves this queue. Without one nothing would ever
+    /// drain it, so `wait_idle` has nothing to wait for.
+    pub served: std::sync::atomic::AtomicBool,
 }
 
 impl ResolveQueue {
-    /// Wake the drain after enqueueing. The notify is taken under `pending`
-    /// — the mutex `drain_next_batch` parks on — so it cannot land in the
-    /// window between the drain's queue checks and its park, where a condvar
-    /// has nobody to signal and the wakeup is simply lost. Free for a
-    /// `pending` push (that mutex already serializes it), load-bearing for a
-    /// `priority` one, whose own mutex gives no such ordering.
-    ///
-    /// The caller must have RELEASED `priority` first: the drain acquires
-    /// pending-then-priority, so holding both the other way round closes a
-    /// cycle.
-    pub fn notify_new_work(&self) {
+    pub(crate) fn new() -> Self {
+        ResolveQueue {
+            pending: Mutex::new(Vec::new()),
+            condvar: Condvar::new(),
+            map_moved: Default::default(),
+            map_inputs_moved: Default::default(),
+            busy: Default::default(),
+            started: Default::default(),
+            served: Default::default(),
+        }
+    }
+
+    /// Queue `asks` and wake the drain. The notify is taken under `pending`
+    /// — the mutex the drain parks on — so it cannot fall between the
+    /// drain's checks and its park.
+    pub(crate) fn ask(&self, asks: impl IntoIterator<Item = crate::build::dependency_map::Ask>) {
+        let mut pending = self.pending.lock().unwrap();
+        for a in asks {
+            if !pending.contains(&a) {
+                pending.push(a);
+            }
+        }
+        self.condvar.notify_one();
+    }
+
+    /// Wake the drain for a flag set outside `pending`.
+    pub(crate) fn wake(&self) {
         let _pending = self.pending.lock().unwrap();
         self.condvar.notify_one();
     }
@@ -170,7 +201,7 @@ pub(crate) struct ResolveNotify {
 
 /// Channel for workspace root from initialize() → resolver thread.
 pub(crate) struct WorkspaceRootChannel {
-    pub root: Mutex<Option<Option<String>>>,
+    pub root: Mutex<Option<Option<crate::util::canonical_path::WorkspaceRoot>>>,
     pub condvar: Condvar,
 }
 
@@ -178,10 +209,14 @@ mod parts;
 pub use parts::*;
 
 mod index_core;
-pub(crate) use index_core::IndexCore;
+pub(crate) use index_core::{FrontDoor, IndexCore, Outcome, Surfaces};
+#[cfg(test)]
+pub(crate) use index_core::{load_kept_map, read_and_keep};
 #[cfg(test)]
 pub(crate) use index_core::strip_import_copy_one;
 
+mod file_records;
+pub(crate) use file_records::{FileRecords, PlacedAs};
 mod gated_views;
 mod lookup;
 mod queries;
@@ -215,32 +250,11 @@ pub struct ModuleIndex {
     /// forgot to load); installed CPAN plugins keep the generous
     /// "downloaded = intended" resolution.
     workspace_modules: Arc<DashMap<String, ()>>,
-    /// Canonical paths of currently-open docs whose surface record the
-    /// open-doc path owns (`SurfaceWrite` — background writes yield).
-    /// Marked by the backend on didOpen, cleared + reconciled on didClose.
-    /// Perl hub only today: pack languages have no open-doc surface
-    /// recorder yet, so guarding their background writes would freeze
-    /// records staleward.
-    /// Open documents, and whether the OPEN-DOC lane has actually recorded a
-    /// surface for each yet. The flag is what `Background` suppression tests:
-    /// yielding to "a doc is open here" yields to a writer that may not exist.
-    open_doc_paths: Arc<DashMap<std::path::PathBuf, bool>>,
     /// Closedness certificates, byte-bounded (`docs/prompt-enrichment-
     /// alternatives.md` §6j). Derived state that decides nothing on its own:
     /// every hit is validated against the live index before it is trusted, so
     /// a stale entry costs a failed validation and a decode.
     closedness: Arc<crate::index::closedness_store::ClosednessStore>,
-    /// Every pack file registered, keyed by canonical path — including files
-    /// that declare NOTHING registrable (a header-only `#include` shim). The
-    /// name-keyed views can't reach those, but whole-project sweeps
-    /// (`for_each_cached_file`) must.
-    all_files: Arc<DashMap<crate::util::canonical_path::CanonicalPath, Arc<CachedModule>>>,
-    /// The freshness engine (`docs/adr/storage-engine.md`):
-    /// per-file span-free surface records + the reverse-dependency index.
-    /// Fed at registration (whole copy, pre-strip) and on open-doc
-    /// rebuilds; `dirty_consumers` names who must re-enrich after a
-    /// surface CHANGE, and an Unchanged verdict is the early-cutoff.
-    freshness: Arc<crate::model::surface::FreshnessIndex>,
     /// The enrichment overlay (R4): derived enriched copies keyed by the
     /// surface fingerprints of the file + its providers. Bounded FIFO —
     /// `enriched_order` is the eviction queue.
@@ -265,13 +279,6 @@ pub struct ModuleIndex {
     /// (epoch, key) pairs overwrite in place, never accumulate — so the
     /// ceiling is the registered-file count × ~100 bytes.
     enrichment_key_memo: Arc<DashMap<crate::util::canonical_path::CanonicalPath, (u64, u64)>>,
-    /// The linkage-visible (name, declares-a-Class) pairs each file
-    /// registered — the exact inverse list `unregister_file` walks AND the
-    /// class-rank source for the cache-slot tie-break. Recorded at
-    /// registration (pre-strip) because the resident copy's `symbols` may be
-    /// evicted, and rehydration after an edit persists would fetch the NEW
-    /// generation's names.
-    registered_names: Arc<DashMap<crate::util::canonical_path::CanonicalPath, Vec<(String, bool)>>>,
     /// Read-connection opener for the relational ref index
     /// (`docs/adr/relational-ref-index.md`) — set once per index onto the
     /// served language's DB (`modules.db` for Perl, `modules-{lang}.db`
@@ -298,7 +305,7 @@ pub struct ModuleIndex {
 /// package with the same name as `module_name` and falling back to the
 /// single-package case if only one package exists in the file.
 /// Every `package X;` / `class X` a FileAnalysis declares, in declaration
-/// order, deduped — `(name, is-class)` in the `registered_names` record
+/// order, deduped — `(name, is-class)` in the `FileRecord` names
 /// shape. Workspace registration keys the candidate tables on ALL of them:
 /// a multi-package `.pm` is ordinary Perl, and keying on the first name
 /// alone leaves every later package unreachable by name. Empty for scripts
@@ -314,10 +321,6 @@ pub fn package_names(analysis: &FileAnalysis) -> Vec<(String, bool)> {
         }
     }
     out
-}
-
-pub fn primary_package_parents(analysis: &FileAnalysis, module_name: &str) -> Vec<String> {
-    analysis.declared_parents(module_name).to_vec()
 }
 
 

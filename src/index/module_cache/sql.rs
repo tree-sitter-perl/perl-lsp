@@ -165,10 +165,17 @@ registry! {
             version TEXT NOT NULL,
             surface BLOB NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS dependency_maps (
+            root    TEXT PRIMARY KEY,
+            version TEXT NOT NULL,
+            stamps  BLOB NOT NULL,
+            map     BLOB NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_modules_path ON modules(path);
         CREATE INDEX IF NOT EXISTS idx_modules_name ON modules(module_name);";
     META_GET => NoScratch, "SELECT value FROM meta WHERE key = ?1";
     META_SET => NoScratch, "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)";
+    META_DELETE => NoScratch, "DELETE FROM meta WHERE key = ?1";
     STRINGS_GENERATION_BUMP => NoScratch,
         "INSERT INTO meta (key, value) VALUES ('strings_generation', '1')
          ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT)";
@@ -266,14 +273,6 @@ registry! {
         "DELETE FROM refs; DELETE FROM syms; DELETE FROM held; DELETE FROM files; DELETE FROM strings; \
          DELETE FROM stubs; DELETE FROM surfaces;";
     MODULES_CLEAR => NoScratch, "DELETE FROM modules";
-    MODULES_CLEAR_IMPORT => NoScratch, "DELETE FROM modules WHERE source = 'import'";
-    REFS_CLEAR_IMPORT => Scratch("once per @INC change: the IN set drives idx_refs_file per import file instead of probing `files` once per refs row"),
-        "DELETE FROM refs WHERE file_id IN (SELECT file_id FROM files WHERE source = 'import')";
-    SYMS_CLEAR_IMPORT => Scratch("once per @INC change: the IN set drives the `file_id` index prefix per import file instead of probing `files` once per syms row"),
-        "DELETE FROM syms WHERE file_id IN (SELECT file_id FROM files WHERE source = 'import')";
-    HELD_CLEAR_IMPORT => Scratch("once per @INC change: the IN set drives idx_held_file per import file instead of probing `files` once per held row"),
-        "DELETE FROM held WHERE file_id IN (SELECT file_id FROM files WHERE source = 'import')";
-    FILES_CLEAR_IMPORT => NoScratch, "DELETE FROM files WHERE source = 'import'";
     CONCLUSIONS_CLEAR => NoScratch, "DELETE FROM conclusions";
     BUILTINS_CLEAR => NoScratch, "DELETE FROM builtins";
     BUILTINS_INSERT => NoScratch, "INSERT INTO builtins (name, doc) VALUES (?1, ?2)";
@@ -300,15 +299,22 @@ registry! {
         "DELETE FROM modules WHERE path = ?1 AND source = ?2";
     MODULES_PATH_EXISTS => NoScratch, "SELECT 1 FROM modules WHERE path = ?1 LIMIT 1";
     MODULES_SOURCE_BYTES => NoScratch, "SELECT COALESCE(SUM(file_size), 0) FROM modules";
+    DEPENDENCY_ROW_LOAD => NoScratch,
+        "SELECT analysis, bag, mtime_secs, file_size, extract_version, deps_stamp \
+         FROM modules WHERE path = ?1 AND source = ?2";
+    DEPENDENCY_ROW_CURRENT => NoScratch,
+        "SELECT 1 FROM modules WHERE path = ?1 AND source = ?2 AND mtime_secs = ?3 \
+         AND file_size = ?4 AND extract_version = ?5 AND analysis IS NOT NULL";
     WARM_MODULES_BY_SOURCE => NoScratch,
         "SELECT module_name, path, mtime_secs, file_size, analysis, extract_version, deps_stamp \
          FROM modules WHERE source = ?1";
     /// The stub BLOB is column 6, read only after the stamp checks pass;
-    /// `length(m.analysis)` reads the record header, not the blob.
+    /// `length(m.analysis)` reads the record header, not the blob. A
+    /// dependency row is its landing's, never the walk's.
     WARM_PACK_WITH_STUBS => NoScratch,
         "SELECT m.module_name, m.path, m.mtime_secs, m.file_size, m.extract_version, \
                 m.deps_stamp, s.stub, length(m.analysis) \
-         FROM modules m LEFT JOIN stubs s ON s.path = m.path";
+         FROM modules m LEFT JOIN stubs s ON s.path = m.path WHERE m.source = 'workspace'";
 
     // ---- stubs, surfaces, conclusions ----
     STUBS_CLEAR => NoScratch, "DELETE FROM stubs";
@@ -321,6 +327,12 @@ registry! {
     SURFACE_SAVE => NoScratch,
         "INSERT OR REPLACE INTO surfaces (path, version, surface) VALUES (?1, ?2, ?3)";
     SURFACE_DELETE => NoScratch, "DELETE FROM surfaces WHERE path = ?1";
+    DEPENDENCY_MAP_SAVE => NoScratch,
+        "INSERT OR REPLACE INTO dependency_maps (root, version, stamps, map) VALUES (?1, ?2, ?3, ?4)";
+    DEPENDENCY_MAP_LOAD => NoScratch,
+        "SELECT stamps, map FROM dependency_maps WHERE root = ?1 AND version = ?2";
+    DEPENDENCY_MAP_ALL => NoScratch, "SELECT root, version, stamps FROM dependency_maps";
+    DEPENDENCY_MAP_DELETE => NoScratch, "DELETE FROM dependency_maps WHERE root = ?1";
     SURFACE_LOAD => NoScratch,
         "SELECT surface FROM surfaces WHERE path = ?1 AND version = ?2";
     /// The newest row at or below the pinned generation; the `(path,
@@ -362,7 +374,7 @@ registry! {
 
     // ---- the relational row store ----
     /// Sticky workspace tier: a project lib/ file re-shredded by the @INC
-    /// resolver as 'import' keeps the walk's verdict.
+    /// resolver as 'dependency' keeps the walk's verdict.
     FILES_UPSERT => NoScratch,
         "INSERT INTO files (path, source) VALUES (?1, ?2)
          ON CONFLICT(path) DO UPDATE SET source =
@@ -500,6 +512,9 @@ registry! {
                 )";
 
     // ---- `--gc-cache` report ----
+    /// The stamps alone: `analysis` is not named, so no blob page is read.
+    GC_DEPENDENCY_STAMPS => NoScratch,
+        "SELECT path, mtime_secs, file_size, extract_version FROM modules WHERE source = ?1";
     GC_COUNT_FILES => NoScratch, "SELECT COUNT(*) FROM files";
     GC_COUNT_REFS => NoScratch, "SELECT COUNT(*) FROM refs";
     GC_COUNT_SYMS => NoScratch, "SELECT COUNT(*) FROM syms";

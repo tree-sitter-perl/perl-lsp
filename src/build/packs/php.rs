@@ -35,6 +35,9 @@ pub fn php_pack() -> LangPack {
         // Protected reaches the declaring class's ancestors as well as its
         // descendants.
         family_reach: crate::model::file_analysis::FamilyReach::Lineage,
+        // Composer's autoloader loads a file for the class it declares; a
+        // namespace, function or constant lives inside one.
+        file_identity: FileIdentity::Classes,
         lattice: PHP_LATTICE,
         type_display: display_type,
         shape_name: |raw| raw.to_string(),

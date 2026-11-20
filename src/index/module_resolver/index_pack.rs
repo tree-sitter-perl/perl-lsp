@@ -27,8 +27,7 @@ pub fn index_pack_language(
     // disables retention (rehydrate-and-drop). See `docs/adr/memory-slice-2-lru.md`.
     bag_cache_bytes: usize,
 ) -> usize {
-    use ignore::types::TypesBuilder;
-    use ignore::WalkBuilder;
+    use crate::build::source_files;
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -39,24 +38,18 @@ pub fn index_pack_language(
     crate::build::cpp_reparse::set_macro_persist_dir(module_cache::cache_dir_for_workspace(cache_key));
 
     let lang = driver.id();
-    let paths: Vec<PathBuf> = {
-        let mut tb = TypesBuilder::new();
-        for ext in driver.extensions() {
-            let _ = tb.add(lang, &format!("*.{ext}"));
-        }
-        let _ = tb.select(lang);
-        match tb.build() {
-            Ok(types) if !driver.extensions().is_empty() => WalkBuilder::new(root)
-                .types(types)
-                .build()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-                .filter(|e| e.metadata().map(|m| m.len() < 2_000_000).unwrap_or(false))
-                .map(|e| e.into_path())
-                .collect(),
-            _ => Vec::new(),
-        }
-    };
+    let cap = driver.caps().file_cap;
+    // The dependency map first: its tier roots (Composer's `vendor/`) are
+    // the tier's, so the walk leaves them out whether or not the project
+    // ignores them.
+    let skip: Vec<PathBuf> =
+        index.dependency_map_for(driver, Some(root)).map(|m| m.tier_roots().to_vec()).unwrap_or_default();
+    let walked = source_files::walk(
+        root,
+        &source_files::Walk { extensions: driver.extensions(), cap, skip: &skip, ignores: true, follow_links: false },
+    );
+    source_files::report_oversize(&walked.oversize, cap);
+    let paths = walked.files;
     let grand_total = paths.len();
     // The walk already yielded every marker file (they are source files of
     // the language): record where, so naming a module asks this snapshot
@@ -117,7 +110,7 @@ pub fn index_pack_language(
         let conn = module_cache::open_cache_db(cache_key, lang);
         // A generation built under different analysis inputs (toolchain
         // change — or its probe FAILURE, which empties the system include
-        // roots) must not be warmed: hard-clear, same as `validate_inc_paths`.
+        // roots) must not be warmed: hard-clear.
         if let Some(ref conn) = conn {
             let _ = module_cache::validate_input_fingerprint(
                 conn,
@@ -231,24 +224,20 @@ pub fn index_pack_language(
                         blob,
                         *stamp,
                     );
+                    Ok(())
                 },
-            );
+            )
+            .unwrap_or_else(|failure| failure.exit());
             module_cache::write_in_chunks(
                 conn,
                 &pending_backfill,
                 128,
                 "pack row backfill",
                 |conn, (path, seeds)| {
-                    if let Err(e) = module_cache::shred_derived_rows(
-                        conn,
-                        &path.to_string_lossy(),
-                        "workspace",
-                        seeds,
-                    ) {
-                        log::error!("Failed to backfill derived rows for {:?}: {}", path, e);
-                    }
+                    module_cache::shred_derived_rows(conn, &path.to_string_lossy(), "workspace", seeds)
                 },
-            );
+            )
+            .unwrap_or_else(|failure| failure.exit());
             for path in dead_rows {
                 module_cache::invalidate_generation_tier(
                     conn,
@@ -298,14 +287,9 @@ pub fn index_pack_language(
         let expected_whole = Arc::new(AtomicUsize::new(0));
         let writer_conn = conn;
         let pack_index_writer = pack_index;
-        let expected_whole_writer = Arc::clone(&expected_whole);
         std::thread::scope(|scope| {
             let writer = scope.spawn(move || {
-                // Byte budget for the whole copies a failed chunk retains
-                // (see FALLBACK_WHOLE_BYTE_CAP). Per-writer accumulator — the
-                // fallback lane is single-threaded (this writer thread).
-                let mut fallback_bytes = 0usize;
-                run_persist_writer(
+                let persisted = run_persist_writer(
                     fresh_rx,
                     writer_conn.as_ref(),
                     "pack persist writer",
@@ -327,8 +311,9 @@ pub fn index_pack_language(
                                 stub: e.stub_blob.as_deref().filter(|_| stubs_writable),
                             },
                         )
+                        .map(|()| true)
                     },
-                    |e: FreshEntry| {
+                    |e: FreshEntry, _| {
                         // Stale-pin clear BEFORE the stripped copy is
                         // reachable, so its first rehydration reads the
                         // just-committed blob.
@@ -337,32 +322,10 @@ pub fn index_pack_language(
                             pack_index_writer.register_symbols_inner(e.path, parts);
                         }
                     },
-                    |e: FreshEntry| {
-                        pack_index_writer.invalidate_derived_copies(&e.path);
-                        if let Some(fa) = e.blob.decode_whole() {
-                            let bytes = fa.heap_estimate().total();
-                            if fallback_bytes.saturating_add(bytes) <= FALLBACK_WHOLE_BYTE_CAP {
-                                fallback_bytes += bytes;
-                                // Tripwire-accounted: this whole copy is a
-                                // DELIBERATE (failure-bounded) pin.
-                                expected_whole_writer.fetch_add(1, Ordering::Relaxed);
-                                pack_index_writer.register_symbols(e.path, Arc::new(fa));
-                            } else {
-                                // Over budget: DROP the resident copy. The
-                                // chunk didn't commit, so a stripped copy
-                                // would rehydrate to wrong-empty; leaving it
-                                // unregistered is honest absence that the next
-                                // index/warm re-registers.
-                                log::warn!(
-                                    "pack persist writer: fallback budget ({} MiB) exceeded — \
-                                     dropping resident copy for {:?}; re-indexes next run",
-                                    FALLBACK_WHOLE_BYTE_CAP / (1024 * 1024),
-                                    e.path,
-                                );
-                            }
-                        }
-                    },
                 );
+                if let Err(failure) = persisted {
+                    failure.exit();
+                }
             });
 
             paths.par_iter().for_each(|path| {
@@ -378,22 +341,9 @@ pub fn index_pack_language(
                 }
                 crate::util::timings::trace_file(&canon);
                 crate::util::timings::set_current_file(Some(&canon));
-                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    analyze_stamped(path, || {
-                        let source = crate::util::text::read_source(path).ok()?;
-                        Some(driver.analyze_with_path(&source, Some(path)))
-                    })
-                }));
+                let res = analyze_stamped(path, || source_files::analyze_file(driver, path, cap));
                 crate::util::timings::set_current_file(None);
-                if res.is_err() {
-                    // eprintln, not log::warn — the CLI runs without a logger,
-                    // and a panic that doesn't name its file costs a bisection.
-                    eprintln!(
-                        "perl-lsp: panic while indexing {}; file skipped",
-                        canon.display()
-                    );
-                }
-                if let Ok(Some((analysis, stamp))) = res {
+                if let Some((analysis, stamp)) = res {
                     // Encode the FULL analysis for the disk write, then strip
                     // the resident copy — one struct, no clone
                     // (`docs/adr/memory-slice-2-lru.md`). Strip only when the

@@ -56,7 +56,7 @@ pub fn point_to_byte(src: &str, point: Point) -> usize {
 
 /// The receiver of a dangling member access, recovered by sentinel
 /// re-parse. Test-only probe surface: production consumes
-/// `member_completion_ctx_incremental`; these wrappers exercise the shared
+/// `member_completion_ctx`; these wrappers exercise the shared
 /// sentinel mechanics (the document's member site / `cursor_in_skip`)
 /// with a directly assertable result.
 #[cfg(test)]
@@ -190,11 +190,37 @@ pub fn receiver_at_incremental(
     old: &Tree,
     cursor: usize,
 ) -> Option<Receiver> {
-    if cursor_in_skip(old, src, cursor, cfg) {
+    let sp = sentinel_parse(parser, cfg, src, old, cursor)?;
+    receiver_of(&sp.tree, cfg, &sp.patched, cursor)
+}
+
+/// The buffer with the sentinel spliced in at `cursor`, re-parsed from the
+/// cached `written` tree. The splice is a pure insertion, so the edit is
+/// exact and only the region around the cursor re-parses. One per
+/// completion request: every arm that reads the finished buffer (member,
+/// identity, domain comparison) reads this one.
+pub struct SentinelParse<'w> {
+    pub written: &'w Tree,
+    pub src: &'w str,
+    pub cursor: usize,
+    pub patched: String,
+    pub tree: Tree,
+}
+
+/// The sentinel parse at `cursor`, or `None` where no arm may splice: the
+/// cursor sits in a string, char or comment of the written parse.
+pub fn sentinel_parse<'w>(
+    parser: &mut Parser,
+    cfg: &crate::build::query_extract::LangPack,
+    src: &'w str,
+    written: &'w Tree,
+    cursor: usize,
+) -> Option<SentinelParse<'w>> {
+    if cursor_in_skip(written, src, cursor, cfg) {
         return None;
     }
     let patched = patch(src, cursor);
-    let mut edited = old.clone();
+    let mut edited = written.clone();
     let pos = byte_to_point(src, cursor);
     edited.edit(&InputEdit {
         start_byte: cursor,
@@ -205,7 +231,15 @@ pub fn receiver_at_incremental(
         new_end_position: Point::new(pos.row, pos.column + SENTINEL.len()),
     });
     let tree = parser.parse(&patched, Some(&edited))?;
-    receiver_of(&tree, cfg, &patched, cursor)
+    Some(SentinelParse { written, src, cursor, patched, tree })
+}
+
+/// The identity being typed at the cursor, where the document spells one a
+/// dependency map places: `use Vendor\Pa|`, `new \Vend|`, `import os.pa|`.
+/// The sentinel completes the token, so the half-typed spelling parses into
+/// the capture it will be (`CursorDocument::identity_prefix_at`).
+pub fn identity_prefix(sp: &SentinelParse<'_>, cfg: &crate::build::query_extract::LangPack) -> Option<String> {
+    crate::build::query_extract::CursorDocument::new(&sp.tree, sp.patched.as_bytes(), cfg)?.identity_prefix_at(sp.cursor, cfg)
 }
 
 /// The completion context at a dangling member access: the receiver's type
@@ -242,33 +276,15 @@ pub struct MemberCompletionCtx {
 /// finished: the same document over the same receiver bytes. A site the
 /// written buffer parsed was matched there already, so the finished buffer
 /// can say nothing more about it and is never analyzed.
-#[allow(clippy::too_many_arguments)]
-pub fn member_completion_ctx_incremental(
-    parser: &mut Parser,
+pub fn member_completion_ctx(
+    sp: &SentinelParse<'_>,
     cfg: &crate::build::query_extract::LangPack,
-    src: &str,
-    old: &Tree,
-    cursor: usize,
     analysis: &FileAnalysis,
     module_index: Option<&dyn CrossFileLookup>,
     completed: &dyn Fn(&str) -> FileAnalysis,
 ) -> Option<MemberCompletionCtx> {
-    if cursor_in_skip(old, src, cursor, cfg) {
-        return None;
-    }
-    let patched = patch(src, cursor);
-    let mut edited = old.clone();
-    let pos = byte_to_point(src, cursor);
-    edited.edit(&InputEdit {
-        start_byte: cursor,
-        old_end_byte: cursor,
-        new_end_byte: cursor + SENTINEL.len(),
-        start_position: pos,
-        old_end_position: pos,
-        new_end_position: Point::new(pos.row, pos.column + SENTINEL.len()),
-    });
-    let tree = parser.parse(&patched, Some(&edited))?;
-    let doc = CursorDocument::new(&tree, patched.as_bytes(), cfg)?;
+    let SentinelParse { written: old, src, cursor, ref patched, ref tree } = *sp;
+    let doc = CursorDocument::new(tree, patched.as_bytes(), cfg)?;
     let site = doc.member_named_at(cursor)?;
     // Downstream projects `class_name()` without an index, so the
     // exact-spelling-vs-primary dispatch call (a spec class exists for
@@ -337,34 +353,17 @@ fn parsed_as_error(written: &Tree, start: usize, end: usize) -> bool {
 /// dangling value operand, so the comparison becomes syntactically whole
 /// and the field slot (which lies entirely before the cursor) types
 /// exactly as it does in finished source.
-pub fn domain_compare_ctx_incremental(
-    parser: &mut Parser,
+pub fn domain_compare_ctx(
+    sp: &SentinelParse<'_>,
     cfg: &crate::build::query_extract::LangPack,
-    src: &str,
-    old: &Tree,
-    cursor: usize,
     analysis: &FileAnalysis,
     module_index: Option<&dyn CrossFileLookup>,
 ) -> Option<InferredType> {
     if cfg.domain_compare_kinds.is_empty() || cfg.domain_compare_ops.is_empty() {
         return None;
     }
-    if cursor_in_skip(old, src, cursor, cfg) {
-        return None;
-    }
-    let patched = patch(src, cursor);
-    let mut edited = old.clone();
-    let pos = byte_to_point(src, cursor);
-    edited.edit(&InputEdit {
-        start_byte: cursor,
-        old_end_byte: cursor,
-        new_end_byte: cursor + SENTINEL.len(),
-        start_position: pos,
-        old_end_position: pos,
-        new_end_position: Point::new(pos.row, pos.column + SENTINEL.len()),
-    });
-    let tree = parser.parse(&patched, Some(&edited))?;
-    let node = find_sentinel(tree.root_node(), &patched, cursor)?;
+    let SentinelParse { cursor, ref patched, ref tree, .. } = *sp;
+    let node = find_sentinel(tree.root_node(), patched, cursor)?;
     let cmp = climb_to_domain_compare(node, cfg, &patched)?;
     let doc = CursorDocument::new(&tree, patched.as_bytes(), cfg)?;
     let slot = domain_slot_operand(cmp, &doc, cursor)?;

@@ -282,11 +282,8 @@ fn whole_copy_registration_sites_are_allowlisted() {
         (
             "register_symbols",
             vec![
-                // 1 shared writer fallback (commit-fail + panic, via
-                // run_persist_writer — bounded by failure, tripwire-
-                // counted), 1 degraded/unpersisted worker arm (tripwire-
-                // counted).
-                ("module_resolver", 2, "failure fallbacks, tripwire-counted"),
+                // The degraded/unpersisted worker arm (tripwire-counted).
+                ("module_resolver", 1, "degraded/unpersisted arm, tripwire-counted"),
                 // The invalidation swap's unpersisted fallback — bounded by
                 // in-session edit volume, whole so the bag stays recoverable.
                 ("pack_invalidator", 1, "unpersisted-edit fallback"),
@@ -316,7 +313,6 @@ fn whole_copy_registration_sites_are_allowlisted() {
             vec![
                 ("backend", 1, "watcher re-register — bounded by external change volume"),
                 ("module_index", 1, "register_workspace_module's residency half"),
-                ("module_resolver", 1, "shared writer failure fallback (run_persist_writer)"),
             ],
         ),
         (
@@ -1740,12 +1736,48 @@ fn query_paths_never_canonicalize() {
     let files = layer_files(&[Layer::Util, Layer::Model, Layer::Cst, Layer::Build, Layer::Index, Layer::Lsp]);
     let seen = count_lines(&files, &|l| l.contains("CanonicalPath::from_stored("));
     let allow: &[(&str, usize, &str)] = &[
-        ("index/module_cache/warm.rs", 1, "the warm scan re-adopts the spelling its own writer persisted"),
-        ("index/module_index/lookup.rs", 3, "ref-row retrieval hands back the paths registration shredded the rows under; \
-          the included-by edge holds registered paths"),
+        ("index/module_index/lookup.rs", 4, "ref-row retrieval hands back the paths registration shredded the rows under; \
+          the included-by and module-member edges hold registered paths"),
         ("index/resolve/definitions.rs", 1, "an include target is the canonical spelling the build minted"),
     ];
     drift.extend(allowlist_drift("CanonicalPath::from_stored", &seen, allow));
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// A held file's role (workspace / dependency) is a fact on its record,
+/// minted where the file lands and read through `FileRecords::role_of` — never
+/// inferred from which table a path is missing from, the absence test that
+/// made any file outside the front doors a dependency by default. Pinned in
+/// three halves: the sites that read a role, no membership test on the path
+/// home, and the two sweeps over it (the workspace sweep filters by role in
+/// its one iterator, so a file of another role in the home is left out in
+/// one place).
+#[test]
+fn file_roles_are_read_from_the_record() {
+    let files = layer_files(&[Layer::Model, Layer::Index, Layer::Lsp]);
+    let seen = count_lines(&files, &|l| l.contains("role_of(") || l.contains(".file_role("));
+    let allow: &[(&str, usize, &str)] = &[
+        ("index/module_index/file_records.rs", 1, "the accessor"),
+        ("index/module_index/lookup.rs", 1, "`CrossFileLookup::file_role` for the index"),
+        ("model/file_analysis/cross_file.rs", 1, "`ScopedLookup` delegates to the index it scopes"),
+        ("index/module_index/index_core.rs", 3, "the name slot ranks a workspace candidate first (`derive_slot`, \
+          a landing's shadow check) and the tier never lands a file the project registered (`tier_providers`)"),
+        ("index/module_index/registration.rs", 2, "`for_each_registered_file` is the workspace sweep; \
+          `mark_doc_closed` re-records only the front door's copy"),
+        ("index/resolve/refs.rs", 1, "`index_role`: the role as a `RoleMask`, the one projection resolve's \
+          consumers read"),
+        ("index/module_resolver/prepare.rs", 1, "`prepare_batch` leaves a file the index holds, in either role, to \
+          its landing"),
+    ];
+    let mut drift = allowlist_drift("file role read", &seen, allow);
+    let seen = count_lines(&files, &|l| l.contains("all_files.contains_key("));
+    drift.extend(allowlist_drift("path-home membership as a role", &seen, &[]));
+    let seen = count_lines(&files, &|l| l.contains("all_files.iter()"));
+    let allow: &[(&str, usize, &str)] = &[
+        ("index/module_index/registration.rs", 1, "`for_each_registered_file`, the role-filtered workspace sweep"),
+        ("index/module_index/lookup.rs", 1, "`for_each_cached_file`: every held file, every role"),
+    ];
+    drift.extend(allowlist_drift("sweep over the path home", &seen, allow));
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
@@ -1944,6 +1976,7 @@ fn build_facts_are_not_keyed_by_position() {
         ("build/builder/pattern_dispatch.rs", 3, "plugin matches deduplicated by span (walk and fold); a pattern's owner by pattern index, not a position"),
         ("build/cpp_reparse/defs.rs", 1, "a sorted keyword table, not a position"),
         ("build/cpp_reparse/mod.rs", 1, "the splice map: a transformed byte offset to the source's, a map between two texts"),
+        ("build/dependency_map.rs", 1, "a dependency map's name table, searched by name, not a position"),
         ("build/language_driver.rs", 3, "the line index (a byte to its row, text not tree); macro expansion sites by span"),
         ("build/query_extract/extract/defs.rs", 2, "duplicate defs settled by their name's start"),
         ("build/query_extract/extract/flow.rs", 4, "reassigned names, declaration sites and constants by start point; member reads by span"),
@@ -2041,8 +2074,10 @@ fn tree_steps_go_through_the_syntax_tree() {
         ("build/cpp_reparse/synthetic.rs", 1, "the C++ reparse's own trees, outside any build forest"),
         ("build/cpp_reparse/validate.rs", 3, "the C++ reparse's own trees, outside any build forest"),
         ("build/cursor_sentinel.rs", 2, "cursor time: one climb per request over the sentinel reparse"),
+        ("build/dependency_map.rs", 1, "std::path::Path, not a tree"),
         ("build/packs/python.rs", 3, "std::path::Path, not a tree"),
-        ("build/walk_markers.rs", 3, "std::path::Path, not a tree"),
+        ("build/venv.rs", 1, "std::path::Path, not a tree"),
+        ("build/walk_markers.rs", 4, "std::path::Path, not a tree"),
         ("lsp/backend/server.rs", 1, "std::path::Path, not a tree"),
         ("lsp/cli/mod.rs", 1, "std::path::Path, not a tree"),
         ("lsp/cli/query.rs", 1, "std::path::Path, not a tree"),

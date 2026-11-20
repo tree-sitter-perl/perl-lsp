@@ -879,7 +879,58 @@ impl fmt::Display for UnknownCapture {
     }
 }
 
+#[cfg(feature = "php")]
+spelled! {
+    /// A capture of `queries/php/composer-classmap.scm`, the classmap
+    /// `composer dump-autoload` generates: read beside the extraction
+    /// (`document_matches`), never part of a pack's skeleton.
+    pub enum ClassmapCap {
+        /// The class identity, a single-quoted string.
+        Class = "classmap.class",
+        /// The variable a path is anchored at; only the document's
+        /// predicates read it.
+        Anchor = "classmap.anchor",
+        /// A path under `$vendorDir`.
+        VendorPath = "classmap.path.vendor",
+        /// A path under `$baseDir`.
+        BasePath = "classmap.path.base",
+        /// A path under neither, spelled whole.
+        AbsolutePath = "classmap.path.absolute",
+    }
+}
+
+#[cfg(feature = "php")]
+impl super::DocumentVocab for ClassmapCap {
+    fn from_capture(name: &str) -> Option<Self> {
+        Self::parse(name)
+    }
+}
+
+/// How a capture's token spells an identity a dependency map can place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentitySpelling {
+    /// An import names its module or class outright.
+    Import,
+    /// A class reference names one only when written absolute: a relative
+    /// spelling resolves against the file first.
+    Reference,
+}
+
 impl Capture {
+    /// Whether this capture's token spells a module or class identity, and
+    /// how: what the cursor's module-path slot reads.
+    pub fn identity_spelling(&self) -> Option<IdentitySpelling> {
+        match self {
+            Capture::Import(ImportCap::Name | ImportCap::Module | ImportCap::Prefix | ImportCap::Path | ImportCap::Arg) => {
+                Some(IdentitySpelling::Import)
+            }
+            Capture::Ref(RefCap::Type) | Capture::NamedReceiver(ReceiverCap::Class) | Capture::Parent | Capture::ParentSuper => {
+                Some(IdentitySpelling::Reference)
+            }
+            _ => None,
+        }
+    }
+
     pub fn parse(name: &str) -> Result<Capture, UnknownCapture> {
         Self::parse_segments(name).ok_or_else(|| UnknownCapture(name.to_string()))
     }

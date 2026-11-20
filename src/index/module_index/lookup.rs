@@ -241,25 +241,23 @@ impl ModuleIndex {
         member_prefilter_may_declare(rows)
     }
 
-    /// Block until `module_name` appears in the cache, or timeout.
-    /// (Used by tests and the one-shot CLI import resolution.)
-    #[doc(hidden)]
+    /// Block until `module_name` was answered at the current map generation
+    /// (landed or missed), or timeout; `true` when it landed. A test's
+    /// per-name wait — production one-shot callers `wait_idle`.
+    #[cfg(test)]
     pub fn wait_resolved(&self, module_name: &str, timeout: std::time::Duration) -> bool {
+        let ask = crate::build::dependency_map::Ask::Name(module_name.to_string());
         let deadline = std::time::Instant::now() + timeout;
         let mut guard = self.core.resolved.mu.lock().unwrap();
         loop {
-            if self.core.cache.contains_key(module_name) {
-                return true;
+            if self.core.asked_now(&ask) {
+                return self.core.asked.get(&ask).is_some_and(|e| e.1 == super::Outcome::Landed);
             }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 return false;
             }
-            let (g, result) = self.core.resolved.cv.wait_timeout(guard, remaining).unwrap();
-            guard = g;
-            if result.timed_out() && !self.core.cache.contains_key(module_name) {
-                return false;
-            }
+            guard = self.core.resolved.cv.wait_timeout(guard, remaining).unwrap().0;
         }
     }
 
@@ -269,22 +267,26 @@ impl ModuleIndex {
         if let Some(entry) = self.core.cache.get(module_name) {
             return entry.clone();
         }
-        let inc_paths = module_resolver::discover_inc_paths();
+        let map = crate::build::inc::read_map(None);
         let mut parser = module_resolver::create_parser();
-        let result = module_resolver::resolve_and_parse(&inc_paths, module_name, &mut parser);
+        let result = module_resolver::resolve_and_parse(&map, module_name, &mut parser);
         self.core.set_slot(module_name, result.clone());
         result
     }
 
     #[cfg(test)]
     pub(super) fn inc_paths(&self) -> Vec<PathBuf> {
-        module_resolver::discover_inc_paths()
+        crate::build::inc::discover_inc_paths()
     }
 
     #[cfg(test)]
     pub fn resolve_module(&self, module_name: &str) -> Option<PathBuf> {
-        let inc_paths = module_resolver::discover_inc_paths();
-        module_resolver::resolve_module_path(&inc_paths, module_name)
+        use crate::build::dependency_map::Ask;
+        crate::build::inc::read_map(None)
+            .locate(&Ask::Name(module_name.to_string()))
+            .into_iter()
+            .next()
+            .map(|l| l.path.into_path_buf())
     }
 }
 
@@ -584,26 +586,12 @@ impl CrossFileLookup for ModuleIndex {
         .unwrap_or_default()
     }
 
-    fn is_dependency_path(&self, path: &crate::util::canonical_path::CanonicalPath) -> bool {
-        // `all_files` holds exactly what a workspace/pack front door
-        // registered; the @INC tier writes only the name-keyed cache.
-        !self.all_files.contains_key(path)
+    fn file_role(&self, path: &crate::util::canonical_path::CanonicalPath) -> Option<crate::model::file_analysis::FileRole> {
+        self.core.records.role_of(path)
     }
 
     fn cached_by_path(&self, path: &crate::util::canonical_path::CanonicalPath) -> Option<Arc<CachedModule>> {
-        // Registered files: the per-path registry is O(1). The @INC cache is
-        // name-keyed with unique paths — linear fallback (its candidate sets
-        // are @INC-sized, not tree-sized).
-        if let Some(cm) = self.all_files.get(path) {
-            return Some(cm.value().clone());
-        }
-        self.core.cache.iter().find_map(|entry| {
-            entry
-                .value()
-                .as_ref()
-                .filter(|cm| &cm.path == path)
-                .cloned()
-        })
+        self.core.all_files.get(path).map(|cm| cm.value().clone())
     }
 
     fn enriched_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
@@ -633,7 +621,7 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn surface_fingerprint_of(&self, path: &std::path::Path) -> Option<u64> {
-        self.freshness.fingerprint_of(path)
+        self.core.freshness.fingerprint_of(path)
     }
 
     fn closedness_certificate(
@@ -684,7 +672,7 @@ impl CrossFileLookup for ModuleIndex {
         // No freshness record means absent, not valid: a path the index has
         // never recorded is one we cannot vouch for, and the fail-open
         // direction here is "decode", never "trust".
-        match self.freshness.fingerprint_of(path) {
+        match self.core.freshness.fingerprint_of(path) {
             Some(fp) if fp == stamp.source_fingerprint => {
                 // The fingerprint is the WHOLE decision, generation included.
                 // A flush can publish a round while this walk is in flight,
@@ -743,22 +731,20 @@ impl CrossFileLookup for ModuleIndex {
         self.module_path_cached(module_name)
     }
 
-    fn inc_roots(&self) -> Arc<Vec<std::path::PathBuf>> {
-        self.core
-            .inc_roots
-            .read()
-            .map(|g| Arc::clone(&g))
-            .unwrap_or_default()
+    fn search_roots(&self) -> Arc<Vec<std::path::PathBuf>> {
+        self.core.dependency_map().map(|m| m.search_roots()).unwrap_or_default()
     }
 
     fn workspace_root_path(&self) -> Option<std::path::PathBuf> {
-        self.workspace_root()
-            .as_deref()
-            .and_then(crate::index::module_resolver::uri_to_path)
+        self.workspace_root().map(|r| r.dir().to_path_buf())
     }
 
     fn modules_with_symbol(&self, name: &str) -> Vec<String> {
         self.modules_with_symbol(name)
+    }
+
+    fn module_has_symbol(&self, name: &str, module: &str) -> bool {
+        self.core.edges.names.get(name).is_some_and(|bucket| bucket.contains(module))
     }
 
     fn find_exporters(&self, func_name: &str) -> Vec<String> {
@@ -780,7 +766,9 @@ impl CrossFileLookup for ModuleIndex {
     fn def_candidates(&self, name: &str) -> Vec<Arc<CachedModule>> {
         match self.core.all_defs.get(name) {
             Some(cands) if !cands.is_empty() => {
-                cands.to_vec()
+                let mut cands = cands.to_vec();
+                cands.retain(|c| self.core.placed_now(&c.path, name));
+                cands
             }
             // No workspace candidates: fall back to the name-slot winner.
             // The @INC tier lands here — single-provider by CURRENT
@@ -795,29 +783,30 @@ impl CrossFileLookup for ModuleIndex {
         self.core.leaf_defs.get(leaf).map(|c| c.to_vec()).unwrap_or_default()
     }
 
+    fn module_member_target(&self, member: &str) -> Option<String> {
+        let mut paths: Vec<String> =
+            self.core.edges.members.get(member).map(|b| b.as_slice().to_vec()).unwrap_or_default();
+        // Smallest path first, so two files binding one member answer the
+        // same on every run.
+        paths.sort();
+        paths.iter().find_map(|p| {
+            let p = crate::util::canonical_path::CanonicalPath::from_stored(p.into());
+            let c = CrossFileLookup::cached_by_path(self, &p)?;
+            let target = c.analysis.module_members().find(|(m, _)| m == member).map(|(_, target)| target);
+            target
+        })
+    }
+
     fn for_each_workspace_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) {
         self.for_each_registered_file(f)
     }
 
     fn for_each_cached_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) {
-        // `all_files` is the complete per-path registry (pack indexes, fed by
-        // `register_symbols`) — the name-keyed views can't see a file that
-        // lost all its name ties OR declares nothing registrable. The Perl
-        // hub's cache is written directly (module-name keys, unique per
-        // file), so union it in for both worlds.
-        let mut seen: std::collections::HashSet<std::path::PathBuf> =
-            std::collections::HashSet::new();
-        for entry in self.all_files.iter() {
-            if seen.insert(entry.key().to_path_buf()) {
-                f(entry.value());
-            }
-        }
-        for entry in self.core.cache.iter() {
-            if let Some(ref cached) = *entry.value() {
-                if seen.insert(cached.path.to_path_buf()) {
-                    f(cached);
-                }
-            }
+        // The path home holds every file once, whatever its role — a file
+        // that lost every name tie or declares nothing registrable included,
+        // which the name-keyed views cannot reach.
+        for entry in self.core.all_files.iter() {
+            f(entry.value());
         }
     }
 
