@@ -2,7 +2,7 @@
 
 > Status: design brief, not ratified. Replaces the builder's fold table
 > (`build/builder/consts.rs`). Rides the CFG tier
-> (`docs/prompt-cfg-tier.md`, scheduled as `docs/epics/16-cfg-tier.md`):
+> (`docs/adr/cfg-tier.md`, `docs/epics/16-cfg-tier.md`):
 > `Place` gives the identity, `Join` + `JoinFold` give the joins.
 
 ## The problem

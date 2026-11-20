@@ -1,6 +1,7 @@
 # Epic 8 — Heatmap residuals: Handlers + plugin-owned reachability
 
-> **Status:** scheduled (8th).
+> **Status:** not started (audited 2026-11-19: Handlers are still not
+> heatmap-eligible, `adr/heatmap.md` §residuals).
 > **Design owner-doc:** `docs/adr/heatmap.md` — the honest
 > over-approximation, the guard table, the failure modes, and the two
 > residuals this epic closes.

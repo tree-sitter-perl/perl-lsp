@@ -1,9 +1,9 @@
 # Epic 1 — Provider identity: retire the single-winner assumption
 
-> **Status:** partly landed (audited 2026-11-12). Phase A (the
-> `pkgid-*` rows, all `gold` now), Phase B.2 (`parents_cached` unions
-> every provider) and Phase E (the `@INC` multi-provider tier, PR #122)
-> are done. Open: Phase B.1 and B.3, then Phases C–D — the residual
+> **Status:** partly landed (audited 2026-11-19). Phase A (the
+> `pkgid-*` rows, all `gold`), Phase B.2 (`parents_cached` unions
+> every provider) and Phase E (the `@INC` multi-provider tier, PR #122;
+> `IndexCore::land_providers` lands every provider by file) are done. Open: Phase B.1 and B.3, then Phases C–D — the residual
 > consumer conversion. It is a class of confidently-wrong answers, not a
 > class of misses, which is why it outranks the feature epics.
 > **Design owner-docs:** `docs/open-problems.md` §"Duplicate-package
@@ -26,7 +26,7 @@ dependence), `rebuild_name_registration` is the one mutation seam, and
 gold rows `pkgid-01..05` pin it on `gold-corpus/pkgsplit-fixture`.
 
 What did **not** land is the consumer conversion. **30 non-test
-`get_cached` call sites (2026-11-12; ~75 when this epic was written)
+`get_cached` call sites (2026-11-19; ~75 when this epic was written)
 still read the derived single winner.** Each is wrong
 whenever the queried fact lives in a losing file. This epic converts
 the user-visible ones to the candidate relation and leaves the winner

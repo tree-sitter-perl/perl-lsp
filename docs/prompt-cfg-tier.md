@@ -1,7 +1,9 @@
 # The CFG tier — sparse guarded value-flow on the witness bag
 
-**Status: design brief, not landed.** The path-sensitivity tier the
-diagnostics arc is parked on: `docs/adr/use-after-move.md` ships a
+**Status: background brief.** The tier's joins, `Place` and effect lane
+landed (`docs/adr/cfg-tier.md`); what stays forward here is the diagnostics
+that wait on it, the interprocedural-effects arc (§5) and path-symbolic
+refinement (§8). The path-sensitivity tier the diagnostics arc was parked on: `docs/adr/use-after-move.md` ships a
 decidable subset *because* "we don't have a CFG"; the cpp D-codes
 (`docs/adr/narrowing-diagnostics.md` §C/C++ applicability) are blocked
 on a nullability layer "along cpp control flow"; D9 needs a
@@ -14,9 +16,9 @@ Prereq reading: `docs/adr/flow-narrowing.md`, `docs/adr/use-after-move.md`,
 `src/model/witnesses/` (attachments; `query_rec` in `registry.rs`),
 `src/build/builder/narrowing.rs` (`NarrowSubject`),
 `src/model/file_analysis/core_types.rs` (`FlowEdge`, `RebindIndex`),
-CLAUDE.md worklist invariants. Scheduled as
-`docs/epics/16-cfg-tier.md` — read that for the phased ladder, the
-anchors and the gates; this brief is the design it implements.
+CLAUDE.md worklist invariants. Built as `docs/epics/16-cfg-tier.md`
+(phases A–C landed, D open): `docs/adr/cfg-tier.md` is the contract and
+wins where it differs from this brief's ladder.
 
 ## 1. The two constraints that shape everything
 

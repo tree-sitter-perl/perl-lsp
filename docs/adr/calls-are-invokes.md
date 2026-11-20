@@ -74,7 +74,7 @@ extra, whatever the pattern.
   qualified pack call (`@ref.call` named by its `@ref.spelled`) mints
   no call value yet outside a use-map.
 - Under a use-map a free function is its namespace's identity
-  (`docs/prompt-class-identity.md`, "A free name is its identity too"): a
+  (`docs/adr/class-identity.md`, "A free name is its identity too"): a
   qualified spelling (`@ref.call` under `@ref.spelled`, php's `\Lib\f()`)
   resolves like a class spelling, a `use function` row binds its leaf,
   and a bare name walks `UseMap::free_name_ladder` — the namespace in

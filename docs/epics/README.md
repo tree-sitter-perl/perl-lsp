@@ -41,43 +41,45 @@ the Tier-1 query-path residual are each an arc, not a paragraph.
 **Epic 16 is a third kind of entry: a tier three shipped features are
 parked on.** `use-after-move` ships a decidable subset because there is
 no CFG; the cpp D-codes have no facts to read; D9 reachability has no
-pass. It is **being built for 0.10.0** as one topic stack (#448: PRs
-0–8b; PR 9 and 8c–14 spill to 0.11), and `docs/adr/cfg-tier.md` is the
-contract it builds to — it departs from the epic's original ladder
-(joins are bag edges, control structure is declared in each language's
-query document, effects get their own lane). Epics 4, 7 and 12 carry
+pass. The tier's facts shipped in 0.10.0 (phases A–C, the #446–#519
+stack); `docs/adr/cfg-tier.md` is the contract — it departs from the
+epic's original ladder (joins are bag edges, control structure is
+declared in each language's query document, effects get their own
+lane). What is left is Phase D, the diagnostics. Epics 4 and 7 carry
 pointers back to it; read the ADR before acting on them.
 
 ## The slate
 
-Status as of the 2026-11-12 audit (see "Audit at every release" below).
+Status as of the 2026-11-19 audit (see "Audit at every release" below).
 
 | # | Epic | Size | Depends on | Status |
 |---|---|---|---|---|
-| 1 | [Provider identity — retire the single-winner assumption](01-provider-identity.md) | M | — | A, B.2, E landed; B.1/B.3, C, D open |
-| 2 | [DBIC out of core, phases 2–3](02-dbic-out-of-core.md) | M | — | A landed; B–F open |
+| 1 | [Provider identity — retire the single-winner assumption](01-provider-identity.md) | M | — | A, B.2, E landed; B.1/B.3, C, D open (30 `get_cached` sites) |
+| 2 | [DBIC out of core, phases 2–3](02-dbic-out-of-core.md) | M | — | A landed; B–F open (no `parametric_bases` / `parametric_mints`) |
 | 3 | [Openness — one answer to "is this name real?"](03-openness.md) | M | — | not started |
 | 4 | [Value provenance, tier 1](04-value-provenance.md) | L | — | not started |
-| 5 | [One-seam sweep: magic tokens + cst backlog](05-one-seam-sweep.md) | S | — | in review for 0.10.0 |
 | 6 | [Rename provenance (residual)](06-rename-provenance.md) | S–M | 1 gates Phase B | C's mechanism landed (negative pin owed); A, B open |
 | 7 | [Diagnostic framework: codes, config, SARIF](07-diagnostic-framework.md) | L | after 3's promotions | not started |
 | 8 | [Heatmap residuals: Handlers + plugin-owned reachability](08-heatmap-residuals.md) | M | interlocks with 7 | not started |
 | 9 | [Mojo polish: routes, stash, hooks, chains](09-mojo-polish.md) | L | — | A landed except Lite auto-names; B–E open |
 | 10 | [CLI analysis subcommands + `--migrate`](10-cli-analysis-and-migrate.md) | L | 7/8 for two lint aliases | A.1 landed (`--completion`); rest open |
 | 11 | [Program boundaries + MAIN-1](11-program-boundaries.md) | M | brands-half waits on 4 | not started |
-| 12 | [Type::Tiny check-guards](12-type-tiny-completeness.md) | S | — | in review for 0.10.0 |
-| 13 | [Pack-language ceiling: diagnostics, framework tier, calibration](13-pack-language-ceiling.md) | L | — | trimmed: A and D open; B's first codes shipped with PHP; C is the PHP arc's framework work after 0.10.0 |
-| 14 | [The per-file stall — C++ beta → GA](14-per-file-stall.md) | M | — | not started; C++ held until after 0.10.0 |
+| 13 | [Pack-language ceiling: diagnostics, framework tier, calibration](13-pack-language-ceiling.md) | L | — | A open (PHP real-project corpora only, no pack gold rows) and D open; B's first codes shipped with PHP; C is the PHP arc's framework work, 0.11 |
+| 14 | [The per-file stall — C++ beta → GA](14-per-file-stall.md) | M | — | not started; only `is_context_free_safe` of the ranked fixes landed |
 | 15 | [Query paths at scale — Tier 1 residual](15-query-paths-at-scale.md) | L | 1 interlocks (candidate sets) | open; its 138k board dates from 2026-08-17 |
-| 16 | [The CFG tier — path sensitivity on the bag](16-cfg-tier.md) | L | **4, 7 and 12 carry pointers to it** — see above | being built for 0.10.0 (`adr/cfg-tier.md`) |
+| 16 | [The CFG tier — path sensitivity on the bag](16-cfg-tier.md) | L | **4, 7 and 12 carry pointers to it** — see above | A–C landed (`adr/cfg-tier.md`); D (D9, cpp D-codes, must/may UAM) open |
 | 17 | [Builder decomposition](17-builder-decomposition.md) | S–M | — | not started |
 
 **Suggested order.** The current release's scope overrides this list:
-0.10.0 is PHP plus Epic 16, with Epics 5 and 12 as fillers. Past that:
-1 first (it is a class of confidently-wrong answers); then 14 and 15,
-because they are the two places the product is currently *unusable*
-rather than merely incomplete; then 2–4, which finish the standing
-type-intelligence commitments; then the rest pull-driven.
+0.10.0 shipped PHP, the dependency tier and Epic 16's phases A–C, with
+Epics 5 and 12 retired as landed. **0.11 is whole-program analysis and the
+frameworks (rails, Laravel, PHPUnit, Symfony)** — Epic 13 Phase C's
+extension channel and the whole-program engine the CFG tier's effects wait on
+(`adr/cfg-tier.md`); **Epic 7 (the diagnostic framework) was the
+runner-up.** Past that: 1 first (it is a class of confidently-wrong
+answers); then 14 and 15, because they are the two places the product is
+currently *unusable* rather than merely incomplete; then 2–4, which finish
+the standing type-intelligence commitments; then the rest pull-driven.
 
 ## Coverage map — every open design doc and item
 
@@ -98,8 +100,7 @@ residuals, or (d) explicitly out of scope. Nothing is unaccounted for.
 | `prompt-type-inference-residual.md` Parts 3, 4 | Queued after Epic 4 (same engine, QA pulls decide) |
 | `prompt-type-inference-residual.md` Part 5c residuals (prefetch, `join =>` keys) | Queued; natural follow-on to Epic 2 |
 | `prompt-type-inference-residual.md` Part 7 (Rhai reducers) | **Parked**: wants a second concrete consumer beyond route aggregation |
-| `prompt-magic-tokens.md` | **Epic 5** (phases A–B) |
-| `prompt-cst-migration.md` items 1–5, 7 | **Epic 5** (phases C–G); item 6 is a standing strangler rule, not schedulable |
+| Magic tokens, the cst/conventions backlog | **Landed** (Epic 5, retired 2026-11-19): `__PACKAGE__` / `__SUB__` / `__FILE__` / `__LINE__` are expression witnesses (`adr/bag-canonical.md`); the cst seams are `cst::string_value`, `cst::is_positional_receiver`, `FileAnalysis::invocant_text_type`. The raw-CST long tail and the unbuilt `typed_node!` wrappers are a strangler rule in `PARKED.md` |
 | `prompt-ref-provenance.md` | **Epic 6** — `Ref.folded_from` and override scoping LANDED; the import-list pin, package→file rename and the override negative pin remain |
 | `prompt-cli-tools.md` — diagnostic framework | **Epic 7** |
 | `prompt-config-schema.md` | **Epic 7** (its named forcing function) |
@@ -108,28 +109,29 @@ residuals, or (d) explicitly out of scope. Nothing is unaccounted for.
 | `prompt-cli-tools.md` — analysis subcommands + `--migrate` | **Epic 10** |
 | `prompt-entrypoint-analysis.md` | **Epic 11** (brands-half stays parked) |
 | `open-problems.md` §"`main::` aggregation across `require`" | **Epic 11** (phase C) |
-| Type::Tiny check-guards | **Epic 12**. The import-scoped name gate and the `Maybe[T]` → `Optional<T>` fold are landed (`adr/type-constraints.md`); `ArrayRef[T]` elements are parked with sequence-types, which names the fold as its waiting caller |
+| Type::Tiny check-guards | **Landed** (Epic 12, retired 2026-11-19): `type_check_functions` / `type_check_methods` in `frameworks/type-tiny.rhai`, the import-scoped name gate and `Maybe[T]` → `Optional<T>` (`adr/type-constraints.md`); `completion-typetiny-imported-blessed` is `gold`. Residuals (coercions, `Enum`/`Dict`/`Tuple`, `ArrayRef[T]` elements) are in `PARKED.md` |
 | `open-problems.md` §"Cross-file `ClassIsa`-trigger emissions" | **LANDED** — `plugin.gated_emissions` + `class_isa_prefix` + `enrichment::apply_gated_emissions`; the doc section is stale and Epic 3 Phase A retires it |
 | `prompt-enrichment-inheritance-residual.md` | Landed with the above; only the `ClassIsa`/`param_types` applicability matrix rows remain, verified in **Epic 3** |
-| `prompt-helper-consumption.md` | Phases 1–2 landed; phase 3 (per-app surfaces) **parked** with instance brands |
+| `prompt-helper-consumption.md` | Phases 1–2 landed (`helper-not-loaded`); phase 3 (per-app surfaces) **parked** with instance brands |
 | `prompt-long-distance.md` | Landed; open-world caller gather **parked** on Epic 3's enumerability witness |
 | `prompt-method-resolution-residuals.md` | §§1–3 landed; probe-based plugin generation **parked** (needs a runtime-probe design); §4 rides Epic 4 |
 | `prompt-flow-narrowing.md` / `prompt-optional-types.md` | Landed; residuals parked in-doc |
 | `prompt-sequence-types.md` | **Parked — QA pulls** |
 | `prompt-value-lane.md` (constant folds as values on the bag) | **Design, not ratified.** Rides Epic 16's `Place` and joins; replaces the builder's fold table. Overlaps Epic 4 (keyed returns, hash-key unions) without being it — reconcile the two before either starts |
-| `prompt-type-constraint-flow.md` (the import installs the sub) | **Epic 12**'s sibling: its phase 3 IS Epic 12 Phase A (amended per its §6); its other phases (retire the name gate, the isa projection on the bag, home minting, per-name import spans) are unscheduled |
-| `prompt-class-identity.md` | **Landed** (CLAUDE.md's class-identity paragraph); only its in-doc residuals remain, none scheduled. A `docs-gc` candidate |
+| `prompt-type-constraint-flow.md` (the import installs the sub) | **Unscheduled.** Its phase 3 (check-guards) landed with Epic 12; the other phases (retire the name gate, the isa projection on the bag, home minting, per-name import spans) wait for a motivating case |
+| Class identity | **Landed** — promoted to `adr/class-identity.md` (CLAUDE.md's class-identity paragraph); its in-doc residuals are unscheduled |
 | `prompt-type-is-the-gate.md` | **Parked**: waits for the next motivating strict-eq gate; Epic 2's emission work is the likeliest place it surfaces |
 | `prompt-type-system-encoding.md` | **Parked**: Epic 2 decides the manifest-vs-axis question at the boundary |
-| `prompt-type-system-futures.md` | Pillar 1 (narrowing) LANDED; pillar 2 (effects/throws) aspirational, out of the QA loop by its own charter |
+| `prompt-type-system-futures.md` | Pillar 1 (narrowing) LANDED; pillar 2 (effects/throws): the first slice, how a call ends (`Ends`: completes / unwinds / exits), landed in Epic 16's effect lane (`adr/cfg-tier.md` §Effects); the rest of the effect set is aspirational, out of the QA loop by its own charter |
 | `open-problems.md` — untyped param/hash-element boundary | Hard boundary; Epic 4 + constructor/field flow are the approach vector |
 | `open-problems.md` — runtime export generators | Hard boundary; MooseX::Role::Parameterized and Sub::Exporter ride it |
-| `prompt-optional-types.md` / `prompt-relational-iteration.md` | Landed (see `adr/relational-ref-index.md`) |
-| `prompt-cfg-tier.md` | **Epic 16**, being built for 0.10.0. The brief stays background; `adr/cfg-tier.md` is the contract and supersedes its ladder where they differ (`Place` landed; joins are bag edges; typed persisted regions are dropped) |
-| `prompt-cfg-tier.md` §5 — interprocedural effects (ladder step 4) | **How a call ends** (`Ends`, the effect lane) **is in Epic 16's 0.10.0 scope** (`adr/cfg-tier.md`). **Argument effects are blocked on a design round, not on an epic.** §5.2 is a deliberately open hole: parameter identity for dependent effects, where positional vs invocant vs Perl `@_` flattening/aliasing vs kwargs vs unpacking projections disagree about what a parameter *is*. The brief enumerates the axes and the requirements any answer must satisfy. Its own arc once that round closes; note it is also the phase where summaries join the Surface |
-| `prompt-cfg-tier.md` §8 — path-symbolic refinement | **Forward-looking and additive.** P1 (the chase reports its arm trail) is carried by Epic 16's 0.10.0 stack in span form: each join arm records its condition as `(Span, bool)`. P2 (guards keep a decidable-fragment `SymExpr`) is deferred past 0.10.0. The checker ladder (atom-SAT → intervals → optional SMT) and its placement are all later |
-| `adr/use-after-move.md` residual classes | **Epic 16**, after its 0.10.0 stack: `adr/cfg-tier.md` lists must/may use-after-move among the diagnostics not in the tier yet. The ADR's decidable subset is the honest floor until then |
-| `prompt-lsp-surface-parity.md` | Landed — the type-hierarchy / call-hierarchy / typeDefinition cluster plus a re-scoped documentLink, each with gold rows. The brief's own non-goals stand; `linkedEditingRange` stays OFF |
+| `prompt-optional-types.md` | Landed (`adr/optional-types.md`); the `FieldValueReducer` `{T, undef}` residual stays in-doc |
+| `prompt-relational-iteration.md` | Direction brief for the scaling push; the member pre-filter, bridged-walk early exit and `RetainedReader` landed (`adr/relational-ref-index.md`), the rest of its ladder is ranked and not started |
+| `prompt-cfg-tier.md` | **Epic 16**, phases A–C landed. The brief stays background; `adr/cfg-tier.md` is the contract and supersedes its ladder where they differ (`Place` landed; joins are bag edges; typed persisted regions are dropped) |
+| `prompt-cfg-tier.md` §5 — interprocedural effects (ladder step 4) | **How a call ends** (`Ends`, the effect lane) **landed with Epic 16** (`adr/cfg-tier.md` §Effects). **Argument effects are blocked on a design round, not on an epic.** §5.2 is a deliberately open hole: parameter identity for dependent effects, where positional vs invocant vs Perl `@_` flattening/aliasing vs kwargs vs unpacking projections disagree about what a parameter *is*. The brief enumerates the axes and the requirements any answer must satisfy. Its own arc once that round closes; note it is also the phase where summaries join the Surface |
+| `prompt-cfg-tier.md` §8 — path-symbolic refinement | **Forward-looking and additive.** P1 (the chase reports its arm trail) is carried in span form: each join arm records its condition as `(Span, bool)` (`adr/cfg-tier.md`). P2 (guards keep a decidable-fragment `SymExpr`) is not built (`SymExpr` has no hits). The checker ladder (atom-SAT → intervals → optional SMT) and its placement are all later |
+| `adr/use-after-move.md` residual classes | **Epic 16** Phase D: `adr/cfg-tier.md` lists must/may use-after-move among the diagnostics not in the tier yet. The ADR's decidable subset is the honest floor until then |
+| `prompt-lsp-surface-parity.md` | Type-hierarchy / call-hierarchy / typeDefinition and a re-scoped documentLink landed, each with gold rows; pull diagnostics and codeLens are the forward verbs, unscheduled. The brief's own non-goals stand; `linkedEditingRange` stays OFF |
 | `prompt-wasm-web-extension.md` | **Backburner** (ROADMAP). The crate split it assumes was executed and REJECTED; `workspace-split` is the playbook if wasm ever forces it |
 | `parser-shortcomings.md` | Upstream tree-sitter-perl bugs, handed off to the parser team. Not schedulable here; `adr/error-recovery.md` is what we do about them meanwhile |
 
@@ -151,7 +153,7 @@ residuals, or (d) explicitly out of scope. Nothing is unaccounted for.
 | `cpp-system-headers.md`, `cpp-stdlib-autoconfig-research.md`, `cpp-lsp-experience-research.md`, `clangd-comparison.md`, `clangd-benchmark-procedure.md` | Research and procedure records, not schedulable work. Epic 14 reads them |
 | `cpp-golive-map.md` §Deferred | Recorded, not queued — each line names its own prerequisite |
 | `docs/adr/cpp-templates.md` parked residue (deduction, template-template params, `extern template`) | **Parked** on their own brief |
-| Pack framework plugins (PHP frameworks, tidyverse, CMake conventions) | **Epic 13** Phase C, built by the PHP arc after 0.10.0 as one extension channel for every language |
+| Pack framework plugins (PHP frameworks, tidyverse, CMake conventions) | **Epic 13** Phase C, built by the PHP arc in 0.11 as one extension channel for every language |
 
 ### Scaling
 

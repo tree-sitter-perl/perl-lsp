@@ -6,8 +6,9 @@ offers. The doc ranks the verbs that are cheap on this architecture —
 each a projection over machinery that already exists — and records the
 ones that aren't worth it and why.
 
-**Status: the cluster below (1–3) plus a re-scoped documentLink LANDED.**
-Each is a CandidateSet/Model projection + CLI verb + LSP handler + gold
+**Status: the type/call hierarchy, typeDefinition and a re-scoped
+documentLink LANDED; pull diagnostics and codeLens are forward.**
+Each landed verb is a CandidateSet/Model projection + CLI verb + LSP handler + gold
 rows (`fixtures/type-definition.json`, `type-hierarchy.json`,
 `call-hierarchy.json`, `document-link.json`). Two findings that amend this
 brief's own argument:
@@ -54,37 +55,23 @@ Every verb below is wiring over machinery that already exists — the
 analysis is done, only the protocol edge is missing. That's what makes
 the value ÷ effort ratio worth acting on.
 
-## The cluster worth doing (value ÷ effort)
+## Landed
 
-These three lean entirely on landed machinery. They are one arc, not three.
+`typeHierarchy`, `callHierarchy`, `typeDefinition` and the re-scoped
+`documentLink` are CandidateSet / Model projections with CLI verbs and gold
+rows; `docs/adr/resolution-candidate-set.md` owns the projection rule, and
+CLAUDE.md's LSP capabilities paragraph states each verb's contract.
 
-1. **`typeHierarchyProvider`** — supertypes are `parents_of`; subtypes are the
-   `implementations()` CandidateSet projection's fan-out. `GraphView` +
-   `for_each_ancestor_class` already walk both directions with the
-   `INHERITS | APP_SURFACE` edge mask. No new analysis, only the
-   prepare/supertypes/subtypes request triple and the item mapping.
-2. **`callHierarchyProvider`** — incoming calls are the `references()`
-   projection minted at a declaration (the same one `--heatmap` already uses
-   for fan-in, so the counts agree with the heatmap by construction).
-   Outgoing calls are `call_bindings` within the sub's body span. Both sides
-   are already computed; this is projection plumbing.
-3. **`typeDefinitionProvider`** — `$obj` → the definition of its inferred
-   class, via `InferredType` + `dispatch_class()`. Smallest surface of the
-   three and the best story: it is the one verb that directly exhibits the
-   witness-bag differentiator.
+## Forward verbs, by priority
 
-## Also worth having, lower priority
-
-4. **Pull diagnostics (`diagnosticProvider`)** — architecturally aligned with
+1. **Pull diagnostics (`diagnosticProvider`)** — architecturally aligned with
    the refresh work in `7343ae59`: the client decides when diagnostics
    compute rather than the server managing execution depth. For anything
    doing cross-file analysis, `interFileDependencies: true` is the honest
    value — that single field is a correctness claim worth making
    explicitly.
-5. **`documentLinkProvider`** — landed re-scoped (see the finding above):
-   non-symbol ranges only.
-6. **`codeLensProvider`** — reference counts per sub, from the same heatmap
-   fan-in as (2). The principle: counts must be real — a lens that always
+2. **`codeLensProvider`** — reference counts per sub, from the same heatmap
+   fan-in as call hierarchy. The principle: counts must be real — a lens that always
    reads `"0 references"` on a heavily-referenced module is worse than no
    lens, because it asserts a wrong answer where silence would be a known
    gap. Real counts via the shared `references()` projection are the only

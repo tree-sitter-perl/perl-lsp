@@ -1,7 +1,7 @@
 # Epic 6 — Rename provenance: the residual
 
 > **Status:** Phases A and B open; Phase C's mechanism is landed and
-> only its negative pin is owed (audited 2026-11-12). The headline
+> only its negative pin is owed (audited 2026-11-19). The headline
 > phase (`folded_from`) landed before this epic was cut.
 > **Design owner-doc:** `docs/prompt-ref-provenance.md` §"What's still
 > missing" (three items; the doc has already been trimmed to them).

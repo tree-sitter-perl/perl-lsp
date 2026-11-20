@@ -1,6 +1,7 @@
 # Epic 3 — Openness: one answer to "is this unresolved name real?"
 
-> **Status:** scheduled, third.
+> **Status:** not started (audited 2026-11-19: no `Openness` / `OpenCause`
+> type; `deferral.rs` holds only the `ClassIsaPrefix` question decider).
 > **Design owner-docs:** `docs/prompt-graph-walking.md` §"Deferred:
 > Scope nodes", `docs/open-problems.md` §"Qualified-name resolution
 > suppression is coarse", `docs/adr/graph-walking.md` (the landed walker

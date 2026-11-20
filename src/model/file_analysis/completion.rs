@@ -64,7 +64,7 @@ pub enum MethodResolution {
     /// leaf-keyed candidate table admits when the pinned identity declares
     /// nothing. The answer still lands (dirty real-world editing wants it),
     /// but it is confidently wrong whenever the code is, so the diagnostics
-    /// lane reads this flag and says so (`docs/prompt-class-identity.md`).
+    /// lane reads this flag and says so (`docs/adr/class-identity.md`).
     ///
     /// `member` is the member's name as the declaration found spells it, so
     /// a by-role ask (`MemberKey::Constructor`) carries its answer out of

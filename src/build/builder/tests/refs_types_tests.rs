@@ -2044,7 +2044,7 @@ fn test_indirect_object_constructor_keys_bind_like_arrow_calls() {
     assert_eq!(owners, vec![(4, want.clone()), (5, want)]);
 }
 
-// ── compile-time tokens (docs/prompt-magic-tokens.md) ──
+// ── compile-time tokens (docs/adr/bag-canonical.md) ──
 
 #[test]
 fn current_sub_token_is_a_coderef_to_its_own_sub() {

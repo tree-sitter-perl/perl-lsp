@@ -1,6 +1,8 @@
 # Epic 2 — DBIC out of core, phases 2–3 (meta-methods, parametric emission, projection)
 
-> **Status:** Phase A landed (audited 2026-11-12); Phases B–F open.
+> **Status:** Phase A landed (audited 2026-11-19: `meta_methods` in
+> `plugin_facts.rs`; `parametric_bases` / `parametric_mints` and the
+> `extract_resultset_parametric` deletion do not exist yet); Phases B–F open.
 > Finishes the standing "core is plugin-free except generic dispatch"
 > commitment.
 > **Design owner-doc:** `docs/prompt-dbic-as-plugin.md` (read it whole —

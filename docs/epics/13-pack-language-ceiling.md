@@ -1,7 +1,9 @@
 # Epic 13 — The pack-language ceiling: calibration, diagnostics, framework tier
 
-> **Status:** trimmed 2026-11-12. Phase A (calibration) and Phase D
-> (status pages) are open and unowned. Phase B's first codes shipped
+> **Status:** audited 2026-11-19. Phase A (calibration) is open and
+> unowned except step 5 for PHP (`corpus/php/bootstrap.sh`, twelve
+> projects); there are no pack-language gold fixtures. Phase D (status
+> pages) is open: only `cpp-status.md` exists. Phase B's first codes shipped
 > with PHP. Phase C (the framework tier) is the PHP arc's framework
 > work, which starts after 0.10.0; the constraints below still bind it.
 > This is the epic that turns a pack language from "parses and answers"

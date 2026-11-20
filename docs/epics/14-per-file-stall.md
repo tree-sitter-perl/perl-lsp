@@ -1,6 +1,7 @@
 # Epic 14 — The per-file stall: C/C++ beta → GA
 
-> **Status:** scheduled (14th) but **high priority by impact** — this is
+> **Status:** not started (audited 2026-11-19: no attribution of the
+> stall; of the ranked fixes only `is_context_free_safe` has landed). **High priority by impact** — this is
 > the one place the product is measurably unusable rather than merely
 > incomplete.
 > **Design owner-docs:** `docs/cpp-status.md` §"The scaling limit:

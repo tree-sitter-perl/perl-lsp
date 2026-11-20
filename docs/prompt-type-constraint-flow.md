@@ -3,9 +3,11 @@
 > Design brief for retiring the constraint-constructor name gate and
 > the core `isa`-string table that duplicated the plugin's vocabulary. Owning
 > ADR after landing: `adr/type-constraints.md` (its "Retiring the name
-> gate" deferral is superseded by this brief). Sibling: `epics/12-type-
-> tiny-completeness.md` — Phase A (check-guards) is unbuilt; §6 below
-> amends where its baked map lives, nothing else.
+> gate" deferral is superseded by this brief). Check-guards
+> (`is_X` / `assert_X` / `->check`) landed as the plugin's
+> `type_check_functions` / `type_check_methods` manifests
+> (`adr/type-constraints.md` §"A check is a guard"); §6 below is the
+> design for where a guard's resolved type lives under the mint.
 
 ## 1. The claim
 
@@ -121,7 +123,7 @@ Symbol {
 One vocabulary, three projections — the export list, the mint, and the
 companion typing (`is_X` → `Bool`, `to_X` → the base) come from the same
 `types_standard_exports()` / `base_constant_type()` tables. No second
-hand-kept list, which is the discipline Epic 12 Phase A already demands.
+hand-kept list, which is the discipline the check-guard manifests already follow.
 
 What this buys, with zero new machinery: `Str` / `Int` / `ArrayRef` in
 value position resolve through `find_callee_symbol` to a local symbol and
@@ -290,9 +292,9 @@ adjacent, not part of this brief.
 ## 6. Check-guards under this model (question 3)
 
 Yes — `is_X` / `assert_X` / `to_X` are minted symbols too (they are in
-the vocabulary the `Import` already emits). Epic 12 Phase A step 2 bakes
-a `name → resolved type` map onto the plugin lane and step 3 gates the
-recognizer on "the baked map contains this name". Under the mint, **the
+the vocabulary the `Import` already emits). The landed check-guard recognizer
+reads each imported `is_*` / `assert_*` call's library through the index
+and gates on what that library declares. Under the mint, **the
 guard is a property of the callee symbol**: the mint for `is_X` carries
 `guard: { to: base_constant_type(X), asserts: false }`, `assert_X`
 carries `asserts: true`, and `recognize_guards`' function-call arm does
@@ -345,7 +347,9 @@ statement (record this as a gold row so Phase 6 and 5 move it
 deliberately); `--timings` tail and per-file heap on the substrate, three
 runs, dated.
 
-**Phase 3 — guard facts on the mint** (Epic 12 Phase A, amended per §6).
+**Phase 3 — guard facts on the mint** (check-guards landed on the import
+rather than the mint, `adr/type-constraints.md`; this phase moves them
+onto the minted symbol).
 
 **Phase 4 — the isa projection rides the bag.** `ProjectionStep::
 ConstrainedInner`; `visit_has_call` publishes `Symbol(accessor) →
@@ -474,12 +478,3 @@ re-exports Types::Standard's. Under this model:
 - **Declined folds** (`Enum`, `Dict`, `Tuple`, `HasMethods`, …) type as
   constraints with no inner — visible as "constraint, inner unknown" in
   `--dump-package` provenance, never as silence.
-
-## 12. Corrections to the current record
-
-- `epics/12-type-tiny-completeness.md` mission item 2 describes the gate
-  as global; it is import-scoped (`f256c679`). This brief deletes it, so
-  the item closes rather than lands.
-- The same epic's Phase C calls `completion-typetiny-imported-blessed`
-  an xfail to promote; the fixture row's status is `gold`.
-- `adr/type-constraints.md` "Both isa spellings agree" — they agre

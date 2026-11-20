@@ -334,7 +334,7 @@ it is immune to both failure modes.
 
 A use-map class registers its identity (`App\Models\User`) in `all_defs` and
 the name slot, and its leaf (`User`) in `IndexCore::leaf_defs`, the widening
-relation (`docs/prompt-class-identity.md`, decision 6). The leaf costs one
+relation (`docs/adr/class-identity.md`, decision 6). The leaf costs one
 `Arc<CachedModule>` clone per class, a leaf derivation per registration and
 unregistration, and nothing in `ModuleEdgeIndexes`: edges stay keyed by
 identity alone. Not yet measured on a large php corpus (WordPress core,

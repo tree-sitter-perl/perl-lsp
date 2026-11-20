@@ -9,6 +9,19 @@ why parked, what unblocks it. Prune on landing.
 All entries below re-ratified by the tighten-2 drain (2026-07-17) unless
 marked otherwise; the drain re-derived each rationale against current code.
 
+- **The raw-CST long tail in the builder visitors** (~400 pokes, recorded
+  2026-06; re-count before sizing it). A standing strangler rule, not a
+  schedulable slice: migrate a visitor's `kind()` / `child_by_field_name`
+  chains to `cst.rs` when touching it (CLAUDE.md rule #1). Densest:
+  `visit_use` / `visit_class_tiny_use` (import-list walking),
+  `visit_has_call` (Moo option walking), `visit_assignment` (RHS shape
+  dispatch), `extract_params` / `extract_signature_params`. `typed_node!`
+  wrappers exist only for `MethodCall`, `FunctionCall` and
+  `AmbiguousFunctionCall`; `SubDecl` (name/body/lexical), `VariableDecl`
+  (the paren-list trap), `Assignment` (the field-returns-paren trap),
+  `AnonHash` and `UseStatement` are added with the first migrated call
+  site that uses them, never ahead of one.
+
 - **Dead node-kind comparisons — a silent-no-op correctness class, not
   tidiness** (found 2026-08-17). A `kind()` comparison against a string
   the grammar doesn't have never matches, and beside a working sibling
@@ -181,6 +194,14 @@ marked otherwise; the drain re-derived each rationale against current code.
 
 ## Feature tier (each is a fireable slice)
 
+- **Type::Tiny beyond the folded vocabulary** — coercions (`to_X`,
+  `coerce => …`) are recognised as exports for suppression only;
+  `Enum[…]` / `Dict[…]` / `Tuple[…]` decline cleanly (a constraint with no
+  inner) and each is its own design; `ArrayRef[T]` / `HashRef[T]` element
+  typing waits on sequence types (`docs/prompt-sequence-types.md`). House
+  libraries that generate their exports at runtime stay on the bring-your-own
+  `SyntheticUse` plugin (`docs/adr/type-constraints.md`); static execution is
+  not attempted.
 - **Perl domain typing** — needs a constant-group / Type::Tiny enum-domain
   model (`docs/adr/field-projections.md`).
 - **Type-constrained completion** — the cpp domain slot (`op_type == |` →

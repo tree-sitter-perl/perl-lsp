@@ -1,6 +1,6 @@
 # Epic 10 — CLI analysis subcommands + `--migrate`
 
-> **Status:** Phase A.1 landed as `--completion` (audited 2026-11-12);
+> **Status:** Phase A.1 landed as `--completion` (audited 2026-11-19);
 > the rest is open.
 > **Design owner-doc:** `docs/prompt-cli-tools.md` §"Analysis
 > subcommands still missing" and §"`--migrate`" (targets table,

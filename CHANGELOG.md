@@ -4,6 +4,115 @@ All notable changes to perl-lsp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the published
 crate / VS Code extension versions.
 
+## v0.10.0 — 2026-11-20
+
+The headline is control flow. Types now follow the paths a program can
+take: through branches, loops, early exits, closures and `try`/`catch`,
+in Perl and in every pack language. PHP gets its dependency tier, so
+classes from Composer's `vendor/` resolve.
+
+### Control flow (every language)
+
+- **Branches and loops join.** After an `if`/`else`, a ternary or a
+  loop, a variable reads as every value that can reach it,
+  not only the last write. A loop's body sees what the previous
+  iteration left, iterated to a fixed point. (#447, #469, #472, #483,
+  #492)
+- **A path that leaves is no path.** An arm that returns, dies, `next`s
+  or `last`s does not reach the code after it, and what a test proves
+  holds past a block that always exits. A loop narrows after it unless
+  a `break`/`last` aimed at it leaves. (#462, #463, #465, #473, #474,
+  #501, #505)
+- **Calls say how they end.** A sub whose every path `die`s or
+  `exit`s ends the path that calls it, whether it is in the same file,
+  in another file, or an override a method call can reach. Code after
+  it is not read as reachable for narrowing. (#452, #457, #458, #460,
+  #484–#488, #518, #519)
+- **Closures and later-running bodies.** A sub, closure or lambda reads
+  outer variables as they can be when it runs, and its writes reach the
+  variable outside it. A capture says how it binds (`use`, `use (&$x)`,
+  Python `nonlocal`). (#490, #491, #493)
+- **`try`, `catch`, `finally` and `eval`.** A tried body unwinds only
+  where it may raise, and only paths that complete go on past a
+  `finally`. Python `del` and an `except … as e` name unbind it. (#496,
+  #499, #504)
+- **`delete`, `undef` and `local`** write `undef` to the place they act
+  on. (#503)
+- **Open unions.** Where one path is typed and another isn't, hover and
+  completion offer the typed part as `Foo | …` instead of nothing.
+  Diagnostics never treat an open union as proof. (#510, #511)
+- **`null` is a value.** The null literal types as no value in PHP,
+  Python, C++ and R, so `?Foo` and `Foo|null` behave like Perl's
+  `undef` checks. (#500)
+- **New `readonly-write` case:** a `readonly` member the constructor
+  already set is reported where it is set again. (#494)
+
+### Perl
+
+- **Declared types bound a variable** instead of outranking its writes,
+  and a statement modifier's condition reads before its statement.
+  (#443, #444)
+- **Type::Tiny check functions narrow.** `is_Int($x)`, `Str->check($x)`
+  and the checks a type library declares guard their operand. (#449,
+  #450, #475)
+- `__SUB__`, `__FILE__`, `__LINE__` and `__PACKAGE__` type where they are
+  written; `shift @_` reads like a bare `shift`; a quoted hash key reads
+  its content in any quote flavour; `ref`/`blessed` strings name their
+  operand's class. (#453, #454, #456, #459, #466, #467, #471)
+- **Dependencies are registered by file.** Every file `@INC` provides
+  for a module name is indexed, the project's own copy shadows an
+  installed one, and carton's `local/` is read as dependencies, not
+  project code. An inherited `import` (Data::Printer via DDP) answers
+  its exports at query time. (#512, #513, #515, #516, #517, #521)
+- **Parser: tree-sitter-perl 2.1.2** (via 2.0.6 and 2.1.0). New node
+  `unterminated_quote`: a half-typed quote no longer turns the rest of
+  the file inside out. A multi-line `"…"` whose closer is glued to `:`
+  (`$c ? "a\nb":"c\nd"`) closes again, which 2.1.0 had broken.
+  (#466, #495, #544)
+
+### PHP, Python and C++ (feature builds only)
+
+**PHP** (`--features php`, `perl-lsp --lang php`):
+
+- **Composer dependencies resolve.** The classmap, PSR-4, PSR-0 and
+  `files` autoload entries are read into a dependency map, kept between
+  runs while `composer.json`, `installed.json` and the classmap hold,
+  and every class a file names is landed from `vendor/`. Classes that
+  used to resolve only by their short name (`resolved-by-widening`) now
+  resolve exactly. (#522, #525, #537, #538)
+- **`use` paths complete** from the dependency map, including a line
+  typed before its semicolon. (#540, #542)
+
+**Python**: virtual environments (any `pyvenv.cfg` under the root) are
+read for `site-packages`; `from pkg import Member` reaches the class in
+the module that defines it; import paths complete. (#523, #525, #540,
+#542)
+
+**C++**: a redis stack overflow in the effect walk is fixed. (#518)
+
+### Performance
+
+- `--check` runs every language through one parallel sweep, compiles
+  each query document once per process, and decodes stored blobs on one
+  zstd context per thread. A warm PHP check of firefly-iii goes from
+  1.04 s / 345 MB to 0.35 s / 75 MB. (#506–#509, #526, #527, #533,
+  #534, #536)
+- Dependencies are parsed ahead in parallel and landed in order. (#535)
+- Grammar fields and node kinds are read by id. (#529–#531)
+- On the nine Perl corpora, `--check` is 9–37% faster cold and flat to
+  32% faster warm than 0.9.2, and peak memory is 6–53% lower on eight of
+  them (Webmin and Znuny about half). FHEM, with 31k dependency modules,
+  uses 14–18% more memory.
+
+### Upgrading
+
+- The analysis cache format changed. The first start after upgrading
+  re-indexes the project once.
+- **A cache write that fails now stops the server** with one message
+  naming the store, the error and the remedy (exit status 74), instead
+  of silently answering less. A full disk under `~/.cache/perl-lsp` is
+  the usual cause. (#539)
+
 ## v0.9.2 — 2026-11-12
 
 ### Perl

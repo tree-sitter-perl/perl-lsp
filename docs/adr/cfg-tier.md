@@ -1,11 +1,10 @@
 # ADR: The CFG tier — joins on the bag, control in the document, effects on the callee
 
-Status: accepted for 0.10.0, being built as one topic stack. The long-form
-review, the alternatives and the sizing are in the sprint design
-(`/mnt/project-files/design/cfg-sprint-design.md`); `docs/prompt-cfg-tier.md`
-stays the background brief. This page is the contract the stack builds to.
+Status: accepted. `docs/prompt-cfg-tier.md` is the background brief (the
+options weighed, the path-symbolic payloads P1/P2); this page is the contract
+the tier is built to.
 
-## The two constraints (unchanged from the brief)
+## The two constraints
 
 - **Spans are the only program-point currency.** No `BlockId` is ever a
   consumer key; an arm names a point, never a block.
@@ -177,8 +176,8 @@ top, where a later pass carries it (`FileAnalysis::in_completion_view`).
 
 Joins answer ordinary type queries (hover, completion, narrowing), not only
 diagnostics. A diagnostic that reports on a narrowed type asks
-`place_state_at`, which also says whether every path was accounted for, and
-stays silent when it was not.
+`FileAnalysis::place_type_at` and stays silent where the answer is open
+(`X|…`).
 
 ## Try
 
@@ -341,16 +340,11 @@ every value fold (`//`, ternaries, `or return`, return arms) without any
 fold asking the effect lane. A short-circuit whose fallback can only
 leave (`$x // die`, `shift or croak`) peels to its left side the same way.
 
-## What it retires
+## Runtime functions that never return
 
-`is_exit_expression`'s name list, PHP's name-matched `die`/`exit` calls,
-`narrow_block_remainder`, `@narrow.exit`'s region rule, #434's single-block
-`fall_through`, the `@ctl.loop` on PHP's `while`, the per-level reset markers' `Unknown`
-in `fold.rs`, and every `TODO(cfg-exit-join)`, `TODO(cross-file-noreturn)` and
-`TODO(cfg-loop-locals)`. A pack's runtime functions that never return
-(`sys.exit`, `std::abort`) wait on the pack runtime-function document
-(`TODO(noreturn-callee)`); PHP's `die` and `exit` are reserved words, so
-its document spells them.
+A pack's runtime functions that never return (`sys.exit`, `std::abort`) wait
+on the pack runtime-function document (`TODO(noreturn-callee)`); PHP's `die`
+and `exit` are reserved words, so its document spells them.
 
 ## Not in this tier yet
 
@@ -359,4 +353,5 @@ polarity (`TODO(cfg-loop-polarity)`: an `until` body runs where its test
 fails), R's `<<-` (`TODO(write-capture-declarations)`: a write capture
 nothing states yet, so the write binds a local), a comprehension's `:=`, effects through a wrapper in
 another file (waits on the whole-program engine's `EffectsOf` key), and the
-epic's original diagnostics (must/may use-after-move, the cpp D-codes, D9).
+diagnostics that wait on the tier (must/may use-after-move, the cpp D-codes, D9:
+`docs/epics/16-cfg-tier.md` Phase D).
