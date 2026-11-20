@@ -43,12 +43,12 @@ impl ModuleIndex {
     }
 
     /// Notify the resolver thread of the workspace root (from LSP initialize).
-    pub fn set_workspace_root(&self, root: Option<&str>) {
+    pub fn set_workspace_root(&self, root: Option<&crate::util::canonical_path::WorkspaceRoot>) {
         let mut guard = self.core.workspace_root.root.lock().unwrap();
         if root.is_none() {
             log::warn!("No workspace root from client; using global module cache");
         }
-        *guard = Some(root.map(String::from));
+        *guard = Some(root.cloned());
         self.core.workspace_root.condvar.notify_one();
         drop(guard);
         // Everything below reads `modules.db`. A pack process's store is
@@ -57,9 +57,9 @@ impl ModuleIndex {
             return;
         }
         // The hub's relational-ref-index reader: the SAME cache key the
-        // resolver thread writes under (both spell it as this root string),
-        // so retrieval and shred always address one DB.
-        let key = root.map(String::from);
+        // resolver thread writes under, so retrieval and shred always
+        // address one DB.
+        let key = root.map(|r| r.cache_key().to_owned());
         {
             let key = key.clone();
             self.set_ref_rows_opener(Arc::new(move || {
@@ -147,8 +147,8 @@ impl ModuleIndex {
         ));
     }
 
-    /// Get the workspace root URI if set.
-    pub fn workspace_root(&self) -> Option<String> {
+    /// The workspace root, if set.
+    pub fn workspace_root(&self) -> Option<crate::util::canonical_path::WorkspaceRoot> {
         self.core.workspace_root.root.lock().ok()
             .and_then(|guard| guard.as_ref().and_then(|opt| opt.clone()))
     }
@@ -229,7 +229,7 @@ impl ModuleIndex {
     /// The manifests the served language's dependency map is read from,
     /// reading the map if nothing has yet.
     pub fn dependency_map_inputs(&self) -> Vec<std::path::PathBuf> {
-        let root = self.workspace_root().and_then(|u| module_resolver::uri_to_path(&u));
+        let root = self.workspace_root().map(|r| r.dir().to_path_buf());
         let served = crate::build::language_driver::LanguageRegistry::served();
         self.core
             .dependency_map_for(served, root.as_deref())

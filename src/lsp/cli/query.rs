@@ -742,10 +742,7 @@ fn run_one(
             let text = crate::util::text::read_source(file)
                 .map_err(|e| format!("Cannot read {}: {}", file, e))?;
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
-            let root = idx
-                .workspace_root()
-                .and_then(|r| tower_lsp::lsp_types::Url::parse(&r).ok())
-                .and_then(|u| u.to_file_path().ok());
+            let root = idx.workspace_root().map(|r| r.dir().to_path_buf());
             let links = symbols::document_links(
                 &text,
                 abs.parent(),

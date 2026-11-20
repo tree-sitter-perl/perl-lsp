@@ -222,7 +222,7 @@ impl IndexCore {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
             .flatten()
-            .and_then(|u| crate::index::module_resolver::uri_to_path(&u));
+            .map(|r| r.dir().to_path_buf());
         let extensions = crate::build::language_driver::LanguageRegistry::served().extensions();
         let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
         crate::util::ghost_stats::timed("resolver.list_names", || {
@@ -312,8 +312,8 @@ impl IndexCore {
         if !driver.has_dependency_map() {
             return None;
         }
-        let key = self.workspace_root.root.lock().unwrap_or_else(|e| e.into_inner()).clone()??;
-        crate::index::module_cache::open_cache_db(Some(&key), driver.id())
+        let root = self.workspace_root.root.lock().unwrap_or_else(|e| e.into_inner()).clone()??;
+        crate::index::module_cache::open_cache_db(Some(root.cache_key()), driver.id())
     }
 
     /// Re-read the map after one of its manifests moved. `true` when the

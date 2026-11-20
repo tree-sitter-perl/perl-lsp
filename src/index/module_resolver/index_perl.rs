@@ -129,8 +129,9 @@ pub fn index_workspace_with_index(
     // copies are refs/bag-stripped like every other index tier. The cache
     // key is the hub's workspace-root spelling, the SAME one the resolver
     // thread and the hub's readers hash, so all three address one DB.
-    let cache_key = idx.workspace_root();
-    let conn = module_cache::open_cache_db(cache_key.as_deref(), "perl");
+    let ws_root = idx.workspace_root();
+    let cache_key = ws_root.as_ref().map(|r| r.cache_key());
+    let conn = module_cache::open_cache_db(cache_key, "perl");
     // Validate-and-stamp the plugin fingerprint BEFORE writing: the resolver
     // thread runs the same (atomic) check concurrently on this DB, and an
     // unstamped fresh DB reads as a mismatch there — it would hard-clear the

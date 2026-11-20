@@ -5,6 +5,7 @@ use crate::build::{language_driver, plugin};
 use crate::index::{document, open_docs, module_cache, module_index, module_resolver, resolve};
 use crate::lsp::{backend, symbols};
 use crate::model::{file_analysis, witnesses};
+use crate::util::canonical_path::WorkspaceRoot;
 use crate::util::timings;
 
 /// Time one CLI query step — `tphase!("completion_items", expr)` prints a
@@ -264,22 +265,6 @@ fn parse_point(line_str: &str, col_str: &str) -> tree_sitter::Point {
     tree_sitter::Point::new(line, col)
 }
 
-/// Canonicalize `root` and produce the matching `file://...` URI.
-/// Returns both because callers usually want the path (for `@INC`
-/// project-lib discovery, file walking) AND the URI (the cache hash
-/// key, since the LSP server's `cache_dir_for_workspace` is fed the
-/// initialize request's `root_uri` string verbatim — `file://...`).
-/// Falls back to the raw input if `canonicalize` fails (path doesn't
-/// exist, permissions): same string lands in both halves so the
-/// caller's downstream "does this dir exist?" check still fires.
-fn canonical_root_and_uri(root: &str) -> (std::path::PathBuf, String) {
-    let path = std::path::Path::new(root)
-        .canonicalize()
-        .unwrap_or_else(|_| std::path::PathBuf::from(root));
-    let uri = format!("file://{}", path.display());
-    (path, uri)
-}
-
 /// Full CLI workspace setup: index the workspace, then ask the dependency
 /// tier for what the project's files name and wait for the resolver thread
 /// to land it. Mirrors the LSP server's startup, synchronously: a one-shot
@@ -289,10 +274,11 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
     // `--check --timings` already flipped this on; the env var lets any
     // startup-driven CLI mode (dump-package, etc.) opt in too.
     timings::enable_from_env();
-    let (root_path, root_uri) = canonical_root_and_uri(root);
+    let ws_root = WorkspaceRoot::resolve(root);
+    let root_path = ws_root.dir().to_path_buf();
     // Pin repo-local `.perl-lsp/` plugin discovery to the same root the
     // cache keys on, before the first build() (workspace indexing) fires.
-    plugin::rhai_host::set_workspace_root(Some(&root_uri));
+    plugin::rhai_host::set_workspace_root(Some(&ws_root));
 
     // Register workspace files INTO the module index (not just a OpenDocs)
     // so their plugin bridges + package names participate in cross-file
@@ -303,7 +289,7 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
     module_index.mark_long_lived_from_env();
     // Wake the headless resolver: it blocks on this channel for the
     // map's name listing + SQLite warm.
-    module_index.set_workspace_root(Some(root_uri.as_str()));
+    module_index.set_workspace_root(Some(&ws_root));
     let ws = open_docs::OpenDocs::new();
     // Only the served language's tree is walked — the same choice the
     // server's `didOpen` latch makes.
@@ -317,7 +303,7 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
             module_resolver::index_pack_language(
                 served,
                 &root_path,
-                Some(&root_uri),
+                Some(ws_root.cache_key()),
                 &module_index,
                 None,
                 crate::lsp::backend::max_cache_mb_default() as usize * 1024 * 1024,
@@ -390,11 +376,11 @@ fn severity_rank(s: &str) -> u8 {
 /// insert on a stale snapshot instead; that race is untested, so this still
 /// runs only when the caller knows nothing else is writing.
 pub(crate) fn cli_gc_cache(root: &str) {
-    let (_, root_uri) = canonical_root_and_uri(root);
+    let ws_root = WorkspaceRoot::resolve(root);
     // The served language's store: a pack's dependency rows and kept map
     // live in its own, never in Perl's.
     let lang = crate::build::language_driver::LanguageRegistry::served().id();
-    let Some(conn) = module_cache::open_cache_db(Some(&root_uri), lang) else {
+    let Some(conn) = module_cache::open_cache_db(Some(ws_root.cache_key()), lang) else {
         eprintln!("No cache database for {root}");
         exit_with(1, "exit");
     };
@@ -439,11 +425,9 @@ pub(crate) fn cli_gc_cache(root: &str) {
 /// touched. With `<root>`: only the per-project cache dir
 /// (`<base>/<workspace_hash>`) is removed; other projects keep theirs.
 ///
-/// `<root>` is canonicalized and joined with `file://` to match the
-/// hash key the LSP server and `cli_full_startup` write under (the
-/// initialize request hands a `file://` URI; both CLI and server feed
-/// that string into `cache_dir_for_workspace`). Without canonicalizing
-/// here a relative path would hash to a different bucket and silently
+/// `<root>` is resolved as a `WorkspaceRoot`, the value the LSP server and
+/// `cli_full_startup` key their store under; a relative or symlinked
+/// spelling would otherwise hash to a different bucket and silently
 /// "clear" a non-existent dir.
 ///
 /// On the next LSP start the cache is recreated from scratch — the
@@ -452,10 +436,7 @@ pub(crate) fn cli_gc_cache(root: &str) {
 /// removed so it's obvious whether anything happened.
 pub(crate) fn cli_clear_cache(root: Option<&str>) {
     let target = match root {
-        Some(r) => {
-            let (_, root_uri) = canonical_root_and_uri(r);
-            module_cache::cache_dir_for_workspace(Some(&root_uri))
-        }
+        Some(r) => module_cache::cache_dir_for_workspace(Some(WorkspaceRoot::resolve(r).cache_key())),
         None => module_cache::cache_base_dir(),
     };
     let Some(path) = target else {
