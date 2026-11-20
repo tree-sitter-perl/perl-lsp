@@ -4,7 +4,7 @@ All notable changes to perl-lsp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the published
 crate / VS Code extension versions.
 
-## v0.10.0 — 2026-11-DD
+## v0.10.0 — 2026-11-20
 
 The headline is control flow. Types now follow the paths a program can
 take: through branches, loops, early exits, closures and `try`/`catch`,
