@@ -71,7 +71,7 @@ tower = { version = "0.4", default-features = false }
 futures = "0.3"
 tokio = { version = "1", features = ["full"] }
 tree-sitter = "0.25"
-ts-parser-perl = "2.1.0"
+ts-parser-perl = "2.1.2"
 ts-parser-pod = "1"
 dashmap = "6"
 ahash = "0.8"
@@ -102,7 +102,7 @@ tree-sitter-php = { version = "0.24", optional = true }
 # linked grammar's own tables, so a name the grammar lacks fails the build.
 [build-dependencies]
 tree-sitter = "0.25"
-ts-parser-perl = "2.1.0"
+ts-parser-perl = "2.1.2"
 ts-parser-pod = "1"
 
 [dev-dependencies]
