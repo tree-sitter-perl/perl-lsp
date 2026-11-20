@@ -64,9 +64,11 @@ classes from Composer's `vendor/` resolve.
   installed one, and carton's `local/` is read as dependencies, not
   project code. An inherited `import` (Data::Printer via DDP) answers
   its exports at query time. (#512, #513, #515, #516, #517, #521)
-- **Parser: tree-sitter-perl 2.1.0** (via 2.0.6). New node
+- **Parser: tree-sitter-perl 2.1.2** (via 2.0.6 and 2.1.0). New node
   `unterminated_quote`: a half-typed quote no longer turns the rest of
-  the file inside out. (#466, #495)
+  the file inside out. A multi-line `"…"` whose closer is glued to `:`
+  (`$c ? "a\nb":"c\nd"`) closes again, which 2.1.0 had broken.
+  (#466, #495, #544)
 
 ### PHP, Python and C++ (feature builds only)
 
