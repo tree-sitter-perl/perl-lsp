@@ -97,7 +97,10 @@ the module that defines it; import paths complete. (#523, #525, #540,
   #534, #536)
 - Dependencies are parsed ahead in parallel and landed in order. (#535)
 - Grammar fields and node kinds are read by id. (#529–#531)
-- RESULTS-PLACEHOLDER
+- On the nine Perl corpora, `--check` is 9–37% faster cold and flat to
+  32% faster warm than 0.9.2, and peak memory is 6–53% lower on eight of
+  them (Webmin and Znuny about half). FHEM, with 31k dependency modules,
+  uses 14–18% more memory.
 
 ### Upgrading
 
