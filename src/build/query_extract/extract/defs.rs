@@ -153,18 +153,12 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     // done (`resolve_returns`): a spelling at its site, a relative mark
     // through the class body the def is written in, which only the walk
     // knows; outside every class body the mark names none.
-    let mut written_return = false;
     let return_type = match mine(Capture::RetType) {
         Some(t) if names_relative(ad, t).is_some() => {
             st.minted[ix].return_home = super::scopes::enclosing_class(st).map(str::to_string);
-            written_return = st.minted[ix].return_home.is_some();
             None
         }
-        Some(t) => {
-            let t = (pack.annot_type)(&t.text);
-            written_return = t.is_some();
-            t.map(crate::model::witnesses::ReturnExpr::Concrete)
-        }
+        Some(t) => (pack.annot_type)(&t.text).map(crate::model::witnesses::ReturnExpr::Concrete),
         None => None,
     };
     // Flags another pattern states about the def's name token
@@ -223,25 +217,24 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             _ => None,
         }),
         never_returns: on_name.iter().any(|t| t.cap == Capture::EndsNever),
+        body: None,
     };
     match through {
         Some(receiver) => st.out.slot_writes.push(SlotWrite { symbol, receiver }),
         None => {
-            if written_return {
-                st.minted[ix].return_row = Some(st.out.symbols.len());
-            }
+            st.minted[ix].def_row = Some(st.out.symbols.len());
+            st.minted[ix].def_name = name_ix;
             st.out.symbols.push(symbol);
         }
     }
 }
 
 /// Resolve each written return to the identities it names at its site, the
-/// way a parameter's declared type is. Runs before dedup, while a symbol's
-/// index is still where its def pushed it.
+/// way a parameter's declared type is.
 pub(super) fn resolve_returns(st: &mut ExtractState) {
     let ad = st.adorned;
     for (ix, e) in ad.events().iter().enumerate() {
-        let Some(i) = st.minted[ix].return_row else { continue };
+        let Some(i) = st.minted[ix].def_row else { continue };
         let Some(written) = ad.in_match(e.match_id, Capture::RetType) else { continue };
         let t = match names_relative(ad, written) {
             Some(rel) => {
@@ -279,10 +272,19 @@ pub(super) fn names_relative(ad: &Adorned, t: &Event) -> Option<RelativeClass> {
 /// Every other write is a `var_writes` row of the declaration it reaches.
 pub(super) fn unify_assigned(st: &mut ExtractState) {
     use crate::model::file_analysis::{latest_in_force, write_lookup_chain, InView, ScopeId, SymKind, VariableDecl};
-    let out = &mut st.out;
-    if !out.symbols.iter().any(|s| s.kind == DefCap::Assigned) {
+    if !st.out.symbols.iter().any(|s| s.kind == DefCap::Assigned) {
         return;
     }
+    // Every assigned def still here writes its name token, as the
+    // declaration or as a write of one: a read on that token is the write.
+    for ix in 0..st.minted.len() {
+        if let (Some(row), Some(name)) = (st.minted[ix].def_row, st.minted[ix].def_name) {
+            if st.out.symbols[row].kind == DefCap::Assigned {
+                st.minted[name].assigned = true;
+            }
+        }
+    }
+    let out = &mut st.out;
     // Every other Variable def declares where it is written, from its token
     // on. A free constant is no variable: `$X` is another name than `X`.
     let mut decls: HashMap<String, Vec<(ScopeId, VariableDecl<'static, ()>)>> = HashMap::new();
@@ -314,8 +316,7 @@ pub(super) fn unify_assigned(st: &mut ExtractState) {
             out.symbols[i].scope = home;
         }
     }
-    let mut it = keep.iter();
-    out.symbols.retain(|_| *it.next().unwrap());
+    st.retain_symbols(&keep);
 }
 
 /// Template params joined to their owner class — the owner shaped like a
@@ -342,7 +343,7 @@ pub(super) fn join_template_params(st: &mut ExtractState) {
 /// trailing-return function matches both its leading-`auto` pattern and the
 /// trailing sibling (keep the rettype-bearing copy).
 pub(super) fn dedup(st: &mut ExtractState) {
-    let symbols = &mut st.out.symbols;
+    let symbols = &st.out.symbols;
     // The defs a pair declares at one token are both kept, and stand in
     // for any other match's def of the same model kind there.
     let paired: std::collections::HashSet<(usize, usize, crate::model::file_analysis::SymKind)> = symbols
@@ -376,8 +377,7 @@ pub(super) fn dedup(st: &mut ExtractState) {
             }
         }
     }
-    let mut it = keep.iter();
-    symbols.retain(|_| *it.next().unwrap());
+    st.retain_symbols(&keep);
 }
 
 /// typedef / using aliases, then object-like `#define X body` aliases →

@@ -1019,6 +1019,7 @@ fn inject_member_blocks(
                 flags: Default::default(),
                 member_space: None,
                 never_returns: false,
+                body: None,
             });
             // The role member states the SAME declared bound an expanded field
             // does: the `TypeName` edge is canonical (the hover leaf and the
@@ -1153,8 +1154,6 @@ fn remap_spans(
         super_parents: _,
         var_reads,
         var_writes,
-        write_sites,
-        init_sites,
         label_refs,
         flow_edges,
         moved_from,
@@ -1215,6 +1214,7 @@ fn remap_spans(
             flags: _,
             member_space: _,
             never_returns: _,
+            body: _,
         } = s;
         *start = r(*start);
         *end = r(*end);
@@ -1241,6 +1241,7 @@ fn remap_spans(
             spaces: _,
             qualifier: _,
             spelled,
+            access: _,
         } = rf;
         (*start, *end) = remap_span(*start, *end);
         // The invocant span is consumed via `expr_type_at_span` (member
@@ -1261,9 +1262,6 @@ fn remap_spans(
         read.token = rspan(read.token);
     }
     for (_, _, span) in var_writes.iter_mut() {
-        *span = rspan(*span);
-    }
-    for span in write_sites.iter_mut().chain(init_sites.iter_mut()) {
         *span = rspan(*span);
     }
     // Call-site spans feed the call-value edge (`into_file_analysis`, after

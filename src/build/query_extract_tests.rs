@@ -1043,6 +1043,7 @@ fn sksym(src: &str, kind: DefCap, name: &str, occ: usize, package: Option<&str>)
         member_space: None,
         flags: Default::default(),
         never_returns: false,
+        body: None,
     }
 }
 

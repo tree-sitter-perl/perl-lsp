@@ -230,9 +230,20 @@ struct Minted {
     /// A member read: what a place written here projects, so a write
     /// lands where the read looks.
     projects: Option<Box<MemberRead>>,
-    /// On a def node: the `symbols` row it pushed, whose written return
-    /// resolves once every row is in (`defs::resolve_returns`).
-    return_row: Option<usize>,
+    /// On a def node: the `symbols` row it pushed, while that row is kept
+    /// (`ExtractState::retain_symbols`).
+    def_row: Option<usize>,
+    /// On a def node: the event of the token that names it.
+    def_name: Option<usize>,
+    /// The name token of a def whose row is kept: a type reference on it
+    /// is the declaration.
+    names_symbol: bool,
+    /// The name token of a kept `@def.assigned`: a read on it is the write.
+    assigned: bool,
+    /// The `refs` row minted on this event.
+    ref_row: Option<usize>,
+    /// On a read's name token: the `var_reads` row it names.
+    var_read: Option<usize>,
     /// On a def node whose written return names a class by where it is
     /// written (`@type.<relative>`): the class body the def is written in.
     return_home: Option<String>,
@@ -243,7 +254,10 @@ struct Minted {
 struct MemberRead {
     receiver: Span,
     member: String,
-    token: Span,
+    /// The event of the token that names the member.
+    token: usize,
+    /// Its `member_reads` row.
+    row: usize,
     /// The namespaces the member may live in (`@space.*` on its token).
     spaces: crate::model::file_analysis::SpaceAsk,
 }
@@ -378,6 +392,26 @@ impl ExtractState<'_, '_> {
     /// The class a def minted on `e`'s node names, as its def filed it.
     fn class_on(&self, e: &Event) -> Option<&str> {
         self.adorned.on_ixs(e).find_map(|ix| self.minted[ix].class.as_deref())
+    }
+
+    /// Drop the `symbols` rows `keep` marks false, keeping each def node's
+    /// link to its row.
+    fn retain_symbols(&mut self, keep: &[bool]) {
+        let mut kept = 0;
+        let moved: Vec<Option<usize>> = keep
+            .iter()
+            .map(|&k| {
+                k.then(|| {
+                    kept += 1;
+                    kept - 1
+                })
+            })
+            .collect();
+        for m in &mut self.minted {
+            m.def_row = m.def_row.and_then(|row| moved[row]);
+        }
+        let mut it = keep.iter();
+        self.out.symbols.retain(|_| *it.next().unwrap());
     }
 
     fn bind_scope(&self) -> ScopeId {
@@ -637,7 +671,7 @@ pub fn extract_in(
         match family(e.cap) {
             Family::Scopes => scopes::handle(&mut st, e),
             Family::Defs => defs::handle(&mut st, ix, e),
-            Family::Refs => refs::handle(&mut st, e),
+            Family::Refs => refs::handle(&mut st, ix, e),
             // Read through the match (`@member.recv`, `@member.op`) or the
             // node (`@member.op.<which>`, `@arity.spread`) they tag.
             Family::Members => {}
@@ -670,6 +704,8 @@ pub fn extract_in(
     // The narrowing cutoff reads the flow edges.
     narrowing::finish(&mut st);
     members::finish(&mut st);
+    // Reads each ref's row, so no pass after it may.
+    refs::drop_declarations(&mut st);
     dump_for_equivalence(source, &language, file_module, &st.out);
     Ok(st.out)
 }

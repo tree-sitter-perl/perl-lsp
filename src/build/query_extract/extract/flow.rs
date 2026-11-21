@@ -101,11 +101,17 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             // declaration in into_file_analysis (goto-def + hover). Where the
             // document names the read's name token, that token is the
             // reference and the name; the node stays the value.
-            let (name, ref_span) = match ad.in_match(e.match_id, Capture::Expr(ExprCap::ReadVarName)) {
-                Some(token) => ((pack.shape_name)(&token.text), token.span()),
-                None => ((pack.shape_name)(&e.text), span),
-            };
-            out.var_reads.push(crate::build::query_extract::VarRead { name: name.clone(), scope: cur_scope, span, token: ref_span });
+            let token_ix = ad.in_match_ix(e.match_id, Capture::Expr(ExprCap::ReadVarName)).unwrap_or(ix);
+            let token = &ad.events()[token_ix];
+            let (name, ref_span) = ((pack.shape_name)(&token.text), token.span());
+            st.minted[token_ix].var_read = Some(out.var_reads.len());
+            out.var_reads.push(crate::build::query_extract::VarRead {
+                name: name.clone(),
+                scope: cur_scope,
+                span,
+                token: ref_span,
+                written: false,
+            });
             out.witnesses.push(skeleton_witness(
                 WitnessAttachment::Expr(span),
                 "skeleton",
@@ -320,6 +326,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                     spaces: None,
                     qualifier: None,
                     spelled: None,
+                    access: crate::model::file_analysis::AccessKind::Read,
                 });
             }
         }
@@ -353,17 +360,23 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             // a `ValueHop` dispatched on the receiver's type at query time,
             // so a chain (`a.b.c`) hops through each receiver's own `Expr`.
             let in_match = |cap: Capture| ad.in_match(e.match_id, cap);
-            if let (Some(name), Some(recv)) =
-                (in_match(Capture::Ref(RefCap::MemberValue)), in_match(Capture::Member(MemberCap::Recv)))
+            if let (Some(name_ix), Some(recv)) =
+                (ad.in_match_ix(e.match_id, Capture::Ref(RefCap::MemberValue)), in_match(Capture::Member(MemberCap::Recv)))
             {
+                let name = &ad.events()[name_ix];
                 let span = e.span();
                 let member = (pack.shape_name)(&name.text);
                 // The namespaces the member token's `@space.*` captures
                 // state; untagged, where a value read lands.
                 let spaces = super::refs::space_ask(ad.on(name))
                     .unwrap_or(crate::model::file_analysis::SpaceAsk::only(pack.member_spaces.values));
-                st.minted[ix].projects =
-                    Some(Box::new(MemberRead { receiver: recv.span(), member: member.clone(), token: name.span(), spaces }));
+                st.minted[ix].projects = Some(Box::new(MemberRead {
+                    receiver: recv.span(),
+                    member: member.clone(),
+                    token: name_ix,
+                    row: out.member_reads.len(),
+                    spaces,
+                }));
                 out.member_reads.push(crate::build::query_extract::MemberRead {
                     span,
                     receiver: recv.span(),
@@ -442,6 +455,12 @@ pub(super) fn finish(st: &mut ExtractState) {
     let f = &mut st.flow;
     let out = &mut st.out;
     let classes = &st.scopes;
+    // A read on a token an assignment writes denotes the place written.
+    for (ix, e) in ad.events().iter().enumerate() {
+        if let Some(row) = st.minted[ix].var_read {
+            out.var_reads[row].written = ad.on_ixs(e).any(|on| st.minted[on].assigned);
+        }
+    }
     // A class/struct DATA MEMBER is visible throughout its class body
     // regardless of declaration order (C++ member lookup is not sequential:
     // a method reads a field declared later in a `private:` section below
@@ -591,20 +610,18 @@ pub(super) fn finish(st: &mut ExtractState) {
     // projected place is written, not read, whether or not a value flows in
     // (a compound assignment states none: `$o->n += 1`), and once however
     // many patterns name it: a plain `=` is both a write and a write of a
-    // value. The read itself is marked written here, while its span is still
-    // its own node's: a macro remap can fold the spans of an expansion onto
-    // one another.
-    let mut written = std::collections::HashSet::new();
-    let reads: std::collections::HashMap<Span, usize> =
-        out.member_reads.iter().enumerate().map(|(i, m)| (m.span, i)).collect();
+    // value. The read and the references on its member token are marked
+    // here, on their own rows.
+    use crate::model::file_analysis::AccessKind;
+    let refs_on = |token: usize| ad.on_ixs(&ad.events()[token]).filter_map(|i| st.minted[i].ref_row);
     for place in ad.by_match().filter(|e| e.cap == Capture::Flow(FlowCap::Place)) {
         let Some(read) = ad.on_ixs(place).filter_map(|i| st.minted[i].projects.as_deref()).last() else { continue };
-        if written.insert(place.span()) {
-            out.write_sites.push(read.token);
-            out.place_writes.push((place.span(), written_at(ad, place).0));
-            if let Some(&i) = reads.get(&place.span()) {
-                out.member_reads[i].written = true;
+        if !out.member_reads[read.row].written {
+            out.member_reads[read.row].written = true;
+            for row in refs_on(read.token) {
+                out.refs[row].access = AccessKind::Write;
             }
+            out.place_writes.push((place.span(), written_at(ad, place).0));
         }
         if let Some(value) = source_value_span(ad, place.match_id) {
             out.member_writes.push(crate::build::query_extract::MemberWrite {
@@ -617,8 +634,13 @@ pub(super) fn finish(st: &mut ExtractState) {
         }
     }
     for init in ad.by_match().filter(|e| e.cap == Capture::Flow(FlowCap::Init)) {
+        // A write that only fills an empty member.
         if let Some(read) = ad.on_ixs(init).filter_map(|i| st.minted[i].projects.as_deref()).last() {
-            out.init_sites.push(read.token);
+            for row in refs_on(read.token) {
+                if out.refs[row].access == AccessKind::Write {
+                    out.refs[row].access = AccessKind::WriteIfUnset;
+                }
+            }
         }
     }
     // Bind-shape rebinds (loop vars): no inflowing value, recorded for the

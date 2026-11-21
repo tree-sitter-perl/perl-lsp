@@ -60,6 +60,9 @@ pub struct SkelSymbol {
     /// The declaration says a call never comes back (`@ends.never` on the
     /// name token).
     pub never_returns: bool,
+    /// The body scope a callable's def opens on its own node (`@scope.sub`
+    /// beside `@def.sub` / `@def.method`): the scope this def owns.
+    pub body: Option<crate::model::file_analysis::ScopeId>,
 }
 
 impl crate::model::file_analysis::ScopeClasses for Vec<SkelSymbol> {
@@ -103,6 +106,10 @@ pub struct SkelRef {
     /// The whole written spelling's span where `@ref.spelled` names one
     /// (`\Lib\X` around `X`): the node a read of the name is the value of.
     pub spelled: Option<Span>,
+    /// A write where an assignment writes the member this token names
+    /// (a `@flow.place` its read projects), one that only fills an empty
+    /// member where the write is a `@flow.init`.
+    pub access: crate::model::file_analysis::AccessKind,
 }
 
 /// One `@expr.call` site.
@@ -197,12 +204,6 @@ pub struct SkeletonAnalysis {
     /// `@def.assigned` that is not its name's first): (name, scope, name
     /// token span). Each resolves like a read and is minted as a write.
     pub var_writes: Vec<(String, crate::model::file_analysis::ScopeId, crate::model::file_analysis::Span)>,
-    /// The member tokens assignments write (a `@flow.place` whose read
-    /// projects a member): the reference at each is a write.
-    pub write_sites: Vec<crate::model::file_analysis::Span>,
-    /// The member tokens of `write_sites` whose write only fills an empty
-    /// member (`@flow.init`): the reference at each is a `WriteIfUnset`.
-    pub init_sites: Vec<crate::model::file_analysis::Span>,
     /// `goto LABEL` refs (`@ref.label`): (name, scope, span). Resolve to the
     /// `LABEL:` def (a Variable symbol from `@def.label`) function-wide —
     /// scope-chain walk WITHOUT the declared-before constraint (a forward
@@ -367,12 +368,16 @@ pub struct VarRead {
     pub scope: crate::model::file_analysis::ScopeId,
     pub span: crate::model::file_analysis::Span,
     pub token: crate::model::file_analysis::Span,
+    /// The token is one an assignment writes (the name token of a
+    /// `@def.assigned`): the read denotes the place written, and the
+    /// token's reference is the write's.
+    pub written: bool,
 }
 
 impl VarRead {
     /// A read whose token is its whole value.
     pub fn token(name: String, scope: crate::model::file_analysis::ScopeId, span: crate::model::file_analysis::Span) -> Self {
-        VarRead { name, scope, span, token: span }
+        VarRead { name, scope, span, token: span, written: false }
     }
 }
 
@@ -884,21 +889,12 @@ impl SkeletonAnalysis {
                 s.kind = SymKind::Method;
             }
         }
-        // A callable's body scope names the callable (`Scope::owner`). The
-        // document mints `@scope.sub` and `@def.sub` / `@def.method` on the
-        // same `function_definition` node, so the spans are equal; a shape
-        // that declares on another node keeps no owner.
-        {
-            let by_span: std::collections::HashMap<(Point, Point), SymbolId> = symbols
-                .iter()
-                .rev()
-                .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method))
-                .map(|s| ((s.span.start, s.span.end), s.id))
-                .collect();
-            for sc in &mut self.scopes {
-                if matches!(sc.kind, crate::model::file_analysis::ScopeKind::Sub { .. }) {
-                    sc.owner = by_span.get(&(sc.span.start, sc.span.end)).copied();
-                }
+        // A callable's body scope names the callable (`Scope::owner`): the
+        // def that opened it on its own node, the first where two did. A
+        // shape that declares on another node keeps no owner.
+        for (s, skel) in symbols.iter().zip(&self.symbols).rev() {
+            if let (SymKind::Sub | SymKind::Method, Some(body)) = (&s.kind, skel.body) {
+                self.scopes[body.0 as usize].owner = Some(s.id);
             }
         }
         // The class whose method each scope is the body of, or sits inside:
@@ -1466,18 +1462,6 @@ impl SkeletonAnalysis {
                 crate::model::file_analysis::VariableUse::Global { .. } | crate::model::file_analysis::VariableUse::GatedOur => None,
             }
         };
-        // A token an assignment writes is that write, not a read of it.
-        let written: std::collections::HashSet<(Point, Point)> = self
-            .var_writes
-            .iter()
-            .map(|(_, _, sp)| (sp.start, sp.end))
-            .chain(
-                self.symbols
-                    .iter()
-                    .filter(|s| s.kind == DefCap::Assigned)
-                    .map(|s| (s.name_start, s.name_end)),
-            )
-            .collect();
         for (name, write_scope, write_span) in &self.var_writes {
             local_refs.push(crate::model::file_analysis::Ref {
                 kind: crate::model::file_analysis::RefKind::Variable,
@@ -1496,10 +1480,10 @@ impl SkeletonAnalysis {
                 evaluated_before: None,
             });
         }
-        for super::VarRead { name, scope: read_scope, span: value_span, token: read_span } in &self.var_reads {
+        for super::VarRead { name, scope: read_scope, span: value_span, token: read_span, written } in &self.var_reads {
             // A written token denotes the place it writes, which the places
             // below need; its ref is the write's.
-            let is_write = written.contains(&(read_span.start, read_span.end));
+            let is_write = *written;
             let chain = if is_write {
                 crate::model::file_analysis::write_lookup_chain(&self.scopes, *read_scope, name)
             } else {
@@ -1581,31 +1565,9 @@ impl SkeletonAnalysis {
             }
         }
 
-        // A `@ref.type` on a def's OWN name token (class/enum/typedef
-        // declaring itself) is the declaration, not a use — suppress by
-        // exact selection-span match so the Symbol stays the only claimant.
-        let decl_name_spans: std::collections::HashSet<(usize, usize, usize, usize)> = symbols
-            .iter()
-            .map(|s| {
-                (
-                    s.selection_span.start.row,
-                    s.selection_span.start.column,
-                    s.selection_span.end.row,
-                    s.selection_span.end.column,
-                )
-            })
-            .collect();
-        let write_sites: std::collections::HashSet<(Point, Point)> =
-            self.write_sites.iter().map(|sp| (sp.start, sp.end)).collect();
-        let init_sites: std::collections::HashSet<(Point, Point)> =
-            self.init_sites.iter().map(|sp| (sp.start, sp.end)).collect();
         let member_reads = std::mem::take(&mut self.member_reads);
         let places = super::places::PackPlaces::new(var_at, &member_reads);
         let place_writes = std::mem::take(&mut self.place_writes);
-        // A written member place's member token is a write: references and
-        // highlight tell it from a read.
-        let written_members: std::collections::HashSet<Span> =
-            member_reads.iter().filter(|m| m.written).map(|m| m.token).collect();
         let move_sites: Vec<crate::model::file_analysis::MoveSite> = std::mem::take(&mut self.moved_from)
             .into_iter()
             .filter_map(|m| {
@@ -1713,11 +1675,13 @@ impl SkeletonAnalysis {
             .refs
             .iter()
             .filter_map(|r| {
-                use crate::model::file_analysis::{AccessKind, RefBinding, RefKind};
+                use crate::model::file_analysis::{RefBinding, RefKind};
                 use super::vocab::RefCap;
                 let span = Span { start: r.start, end: r.end };
                 let mut binding = None;
-                let mut access = AccessKind::Read;
+                // A written member's token is a write: references and
+                // highlight tell it from a read.
+                let access = r.access;
                 let kind = match r.kind {
                     // Under a use-map a call, and an imported name, is pinned
                     // to its function's namespace (`\Lib\f()` → `Lib`).
@@ -1773,9 +1737,6 @@ impl SkeletonAnalysis {
                         let (inv_span, invocant) = r.invocant.clone()?;
                         let place = places.access(inv_span, &valued).or_else(|| places.access(inv_span, &tracked)).map(Box::new);
                         let invocant = places.receiver(inv_span, invocant, &valued);
-                        if written_members.contains(&span) {
-                            access = AccessKind::Write;
-                        }
                         RefKind::FieldAccess {
                             invocant,
                             invocant_span: Some(inv_span),
@@ -1803,17 +1764,7 @@ impl SkeletonAnalysis {
                     // A type-position name (`Widget w;`, `struct op* o`, a
                     // base-class clause): the same PackageRef a Perl package
                     // use carries, so type gd/gr ride the Package machinery.
-                    RefCap::Type => {
-                        if decl_name_spans.contains(&(
-                            r.start.row,
-                            r.start.column,
-                            r.end.row,
-                            r.end.column,
-                        )) {
-                            return None;
-                        }
-                        RefKind::PackageRef
-                    }
+                    RefCap::Type => RefKind::PackageRef,
                     // The object a method runs on, named where its body
                     // spells it: a read of that method's receiver, which
                     // declares nothing and is no variable of the body's. A
@@ -1829,13 +1780,6 @@ impl SkeletonAnalysis {
                     | RefCap::Var
                     | RefCap::Key => return None,
                 };
-                let site = (r.start, r.end);
-                if write_sites.contains(&site) {
-                    access = AccessKind::Write;
-                }
-                if matches!(access, AccessKind::Write) && init_sites.contains(&site) {
-                    access = AccessKind::WriteIfUnset;
-                }
                 Some(crate::model::file_analysis::Ref {
                     kind,
                     span,
