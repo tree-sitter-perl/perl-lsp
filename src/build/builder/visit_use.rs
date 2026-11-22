@@ -1342,7 +1342,7 @@ impl<'a> Builder<'a> {
                 // rvalue's `InferredType`. Specifically:
                 // `my $cb = sub {...}` needs `coderef_return_edge_for`
                 // to see the (anon) Symbol already in
-                // `anon_sub_symbol_by_span`, so the TC for `$cb`
+                // `anon_sub_symbols`, so the TC for `$cb`
                 // carries `CodeRef { return_edge: Symbol(_) }` —
                 // uniform attachment shape with named subs, so
                 // `ReturnExprReducer` claims arity-arm and Receiver-

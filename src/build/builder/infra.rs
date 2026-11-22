@@ -455,7 +455,7 @@ impl<'a> Builder<'a> {
     ///
     /// Three recognized shapes:
     ///   - `anonymous_subroutine_expression` → `Symbol(sub_id)`,
-    ///     looked up in `anon_sub_symbol_by_span`. The bag's
+    ///     looked up in `anon_sub_symbols`. The bag's
     ///     symbol-keyed reducers (`ReturnExprReducer`,
     ///     `SubReturnReducer`) all see anon subs the same way they
     ///     see named subs — uniform attachment shape, no
@@ -481,8 +481,8 @@ impl<'a> Builder<'a> {
         match node.kind_of() {
             Kind::AnonymousSubroutineExpression => {
                 // The only caller (`expr_payload`) mints the symbol first.
-                self.anon_sub_symbol_by_span
-                    .get(&node_to_span(node))
+                self.anon_sub_symbols
+                    .get(&self.syntax.lift(node)?.id())
                     .map(|sym_id| crate::model::witnesses::WitnessAttachment::Symbol(*sym_id))
             }
             Kind::RefgenExpression => {

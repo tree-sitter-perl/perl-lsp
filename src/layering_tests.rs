@@ -1970,14 +1970,14 @@ fn build_facts_are_not_keyed_by_position() {
         }
     }
     let allow: &[(&str, usize, &str)] = &[
-        ("build/builder/fold.rs", 1, "the hash-key fixup's per-pass snapshot of typed variables, by position"),
+        ("build/builder/fold.rs", 1, "a per-pass index over the bag's typed-variable witnesses, by the point each lands at: a witness is model data with a span and no node"),
         ("build/builder/joins.rs", 2, "a join minted once per place, construct and role: the construct's span is the `Join` attachment's own key; span-keyed joins move onto the tree together"),
-        ("build/builder/mod.rs", 6, "slot-write RHS and anonymous-sub symbols by span; use, dispatch and method-call emissions deduplicated by span; the arms a test narrows a place over, by the arm's span (a join's key: span-keyed joins move onto the tree together)"),
-        ("build/builder/pattern_dispatch.rs", 3, "plugin matches deduplicated by span (walk and fold); a pattern's owner by pattern index, not a position"),
+        ("build/builder/mod.rs", 5, "a slot write's stored value by the key's span, read back from the write's ref, which holds a span and no node (TODO(ref-site-links)); `use`, dispatch and method-call emissions deduplicated by the span the emission names, a plugin's own data with no node behind it; the arms a test narrows a place over, by the arm's span (a join's key: span-keyed joins move onto the tree together)"),
+        ("build/builder/pattern_dispatch.rs", 3, "a match seen again in a later round, by the union of its captures' spans, which is no one node (walk and fold); a pattern's owner by pattern index, not a position"),
         ("build/cpp_reparse/defs.rs", 1, "a sorted keyword table, not a position"),
         ("build/cpp_reparse/mod.rs", 1, "the splice map: a transformed byte offset to the source's, a map between two texts"),
         ("build/dependency_map.rs", 1, "a dependency map's name table, searched by name, not a position"),
-        ("build/language_driver.rs", 3, "the line index (a byte to its row, text not tree); macro expansion sites by span"),
+        ("build/language_driver.rs", 3, "the line index (a byte to its row, text not tree); macro expansion sites by span, which cross from an expansion to its call site (the macro rework's)"),
         ("build/query_extract/extract/narrowing.rs", 1, "how far past each construct a test's join holds, by the construct's span (a join's key: span-keyed joins move onto the tree together)"),
         ("build/query_extract/skeleton.rs", 5, "call arguments and claimed refs, which cross from a macro's expansion to its call site (the macro rework's); how far past each construct a test's join holds (a join's key: span-keyed joins move onto the tree together)"),
     ];

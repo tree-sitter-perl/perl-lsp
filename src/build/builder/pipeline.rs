@@ -428,7 +428,7 @@ fn build_once(
         rebinds: Default::default(),
         guard_sites: Vec::new(),
         arrow_deref_sites: Vec::new(),
-        anon_sub_symbol_by_span: std::collections::HashMap::new(),
+        anon_sub_symbols: std::collections::HashMap::new(),
         modifier_invocant_pos: None,
         expr_type_depth: 0,
         walk_stack: Vec::new(),
