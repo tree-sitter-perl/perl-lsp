@@ -1978,11 +1978,8 @@ fn build_facts_are_not_keyed_by_position() {
         ("build/cpp_reparse/mod.rs", 1, "the splice map: a transformed byte offset to the source's, a map between two texts"),
         ("build/dependency_map.rs", 1, "a dependency map's name table, searched by name, not a position"),
         ("build/language_driver.rs", 3, "the line index (a byte to its row, text not tree); macro expansion sites by span"),
-        ("build/query_extract/extract/defs.rs", 2, "duplicate defs settled by their name's start"),
-        ("build/query_extract/extract/flow.rs", 3, "reassigned names, declaration sites and constants by start point"),
         ("build/query_extract/extract/narrowing.rs", 1, "how far past each construct a test's join holds, by the construct's span (a join's key: span-keyed joins move onto the tree together)"),
-        ("build/query_extract/places.rs", 4, "the place a name or member read denotes, by the read's span"),
-        ("build/query_extract/skeleton.rs", 10, "the skeleton joins capture facts by span: receiver classes, read places, settled writes, a readonly member's stored values and read tokens; call arguments and claimed refs, which cross from a macro's expansion to its call site (the macro rework's); how far past each construct a test's join holds (a join's key: span-keyed joins move onto the tree together)"),
+        ("build/query_extract/skeleton.rs", 5, "call arguments and claimed refs, which cross from a macro's expansion to its call site (the macro rework's); how far past each construct a test's join holds (a join's key: span-keyed joins move onto the tree together)"),
     ];
     let drift = allowlist_drift("position-keyed side indexes", &seen, allow);
     assert!(

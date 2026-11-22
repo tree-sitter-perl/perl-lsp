@@ -244,9 +244,21 @@ struct Minted {
     ref_row: Option<usize>,
     /// On a read's name token: the `var_reads` row it names.
     var_read: Option<usize>,
+    /// On the first event of a node: the id the rows naming it share
+    /// (`expr_on`).
+    expr: Option<ExprId>,
+    /// The name token of a `@def.assigned` that writes a variable an
+    /// earlier def declares: a value flowing in replaces the one it held.
+    reassigns: bool,
     /// On a def node whose written return names a class by where it is
     /// written (`@type.<relative>`): the class body the def is written in.
     return_home: Option<String>,
+}
+
+/// The id of `e`'s node, minted the first time a row names it.
+fn expr_on(ad: &Adorned, minted: &mut [Minted], out: &mut SkeletonAnalysis, e: &Event) -> ExprId {
+    let first = ad.on_ixs(e).start;
+    *minted[first].expr.get_or_insert_with(|| out.mint_expr())
 }
 
 /// A member read (`@expr.member`): the receiver it reads through, the

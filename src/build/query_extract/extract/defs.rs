@@ -284,6 +284,12 @@ pub(super) fn unify_assigned(st: &mut ExtractState) {
             }
         }
     }
+    let mut name_of: Vec<Option<usize>> = vec![None; st.out.symbols.len()];
+    for m in &st.minted {
+        if let (Some(row), Some(name)) = (m.def_row, m.def_name) {
+            name_of[row] = Some(name);
+        }
+    }
     let out = &mut st.out;
     // Every other Variable def declares where it is written, from its token
     // on. A free constant is no variable: `$X` is another name than `X`.
@@ -310,6 +316,9 @@ pub(super) fn unify_assigned(st: &mut ExtractState) {
         if seen {
             keep[i] = false;
             out.var_writes.push((s.name.clone(), s.scope, Span { start: s.name_start, end: s.name_end }));
+            if let Some(name) = name_of[i] {
+                st.minted[name].reassigns = true;
+            }
         } else {
             let home = chain.scopes().last().unwrap_or(s.scope);
             decls.entry(s.name.clone()).or_default().push((home, decl(s.name_start, true)));
@@ -343,36 +352,45 @@ pub(super) fn join_template_params(st: &mut ExtractState) {
 /// trailing-return function matches both its leading-`auto` pattern and the
 /// trailing sibling (keep the rettype-bearing copy).
 pub(super) fn dedup(st: &mut ExtractState) {
+    let ad = st.adorned;
     let symbols = &st.out.symbols;
-    // The defs a pair declares at one token are both kept, and stand in
-    // for any other match's def of the same model kind there.
-    let paired: std::collections::HashSet<(usize, usize, crate::model::file_analysis::SymKind)> = symbols
-        .iter()
-        .filter(|s| s.pair.is_some())
-        .map(|s| (s.name_start.row, s.name_start.column, s.kind.sym_kind()))
+    // Each row with the node its def is named at (a nameless def's own
+    // node), so the rows of one name token are one run, in row order.
+    let mut named_at: Vec<(crate::cst::NodeId, usize)> = (0..st.minted.len())
+        .filter_map(|ix| {
+            let row = st.minted[ix].def_row?;
+            Some((ad.events()[st.minted[ix].def_name.unwrap_or(ix)].site, row))
+        })
         .collect();
-    let mut best: HashMap<(usize, usize, Option<DefCap>), usize> = HashMap::new();
+    named_at.sort_by_key(|&(site, row)| (site.index(), row));
     let mut keep = vec![true; symbols.len()];
-    for (i, sym) in symbols.iter().enumerate() {
-        if sym.pair.is_none() && paired.contains(&(sym.name_start.row, sym.name_start.column, sym.kind.sym_kind())) {
-            keep[i] = false;
-            continue;
-        }
-        let key = (sym.name_start.row, sym.name_start.column, sym.pair.map(|_| sym.kind));
-        match best.get(&key) {
-            None => {
-                best.insert(key, i);
+    for run in named_at.chunk_by(|a, b| a.0 == b.0) {
+        // The defs a pair declares at one token are both kept, and stand in
+        // for any other match's def of the same model kind there.
+        let paired = |kind: DefCap| {
+            run.iter().any(|&(_, j)| symbols[j].pair.is_some() && symbols[j].kind.sym_kind() == kind.sym_kind())
+        };
+        // The row kept so far for each paired kind, and for the unpaired.
+        let mut best: Vec<(Option<DefCap>, usize)> = Vec::new();
+        for &(_, i) in run {
+            let sym = &symbols[i];
+            if sym.pair.is_none() && paired(sym.kind) {
+                keep[i] = false;
+                continue;
             }
-            Some(&j) => {
-                let (gen_i, gen_j) = (symbols[i].kind.is_general(), symbols[j].kind.is_general());
-                let upgrade_ret = symbols[i].kind == symbols[j].kind
-                    && symbols[i].return_type.is_some()
-                    && symbols[j].return_type.is_none();
-                if (gen_j && !gen_i) || upgrade_ret {
-                    keep[j] = false;
-                    best.insert(key, i);
-                } else {
-                    keep[i] = false;
+            let key = sym.pair.map(|_| sym.kind);
+            match best.iter_mut().find(|(k, _)| *k == key) {
+                None => best.push((key, i)),
+                Some((_, j)) => {
+                    let (gen_i, gen_j) = (sym.kind.is_general(), symbols[*j].kind.is_general());
+                    let upgrade_ret =
+                        sym.kind == symbols[*j].kind && sym.return_type.is_some() && symbols[*j].return_type.is_none();
+                    if (gen_j && !gen_i) || upgrade_ret {
+                        keep[*j] = false;
+                        *j = i;
+                    } else {
+                        keep[i] = false;
+                    }
                 }
             }
         }

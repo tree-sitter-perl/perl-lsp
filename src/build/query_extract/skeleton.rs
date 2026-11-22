@@ -83,7 +83,8 @@ pub struct SkelRef {
     /// is a written name or an expression. `into_file_analysis` puts it on a
     /// `RefKind::MethodCall`/`FieldAccess`, whose invocant types query-time
     /// via `expr_type_at_span(span)`. `None` for plain calls / var refs.
-    pub invocant: Option<(crate::model::file_analysis::Span, crate::model::conventions::Invocant)>,
+    /// The third is the receiver's node, which `PackPlaces` roots.
+    pub invocant: Option<(crate::model::file_analysis::Span, crate::model::conventions::Invocant, ExprId)>,
     /// The written member operator (`.`/`->`) + its span, mapped from the
     /// `@member.op.<which>` capture on the operator token, `Some` only when the
     /// IMMEDIATE receiver is a simple variable. Rides onto the MethodCall ref
@@ -123,6 +124,9 @@ pub struct CallSite {
     pub callee_at: tree_sitter::Point,
     /// A member call's receiver expression; `None` for a free call.
     pub receiver: Option<Span>,
+    /// The receiver's node, which a `@receiver.*` token on it names a
+    /// class by.
+    pub receiver_expr: Option<ExprId>,
     /// The scope the call is written in, which says whether a bare callee
     /// may be a member of the body's class.
     pub scope: crate::model::file_analysis::ScopeId,
@@ -144,6 +148,7 @@ pub struct CallSite {
 #[derive(Debug, Clone)]
 pub struct ReceiverSite {
     pub span: Span,
+    pub expr: ExprId,
     pub scope: crate::model::file_analysis::ScopeId,
     pub names: super::vocab::ReceiverCap,
     /// The token as written: the spelling a `Class` receiver resolves.
@@ -153,8 +158,23 @@ pub struct ReceiverSite {
     pub object: bool,
 }
 
+/// A node an access reads, writes or asks about, minted once per node
+/// where the extractor holds it: the rows that name one node carry one id,
+/// so assembly links a read to its receiver, a write to its place and a
+/// guard to its subject without the tree and without comparing spans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExprId(pub u32);
+
+impl ExprId {
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct SkeletonAnalysis {
+    /// How many `ExprId`s are minted: every id is below it.
+    pub exprs: u32,
     pub symbols: Vec<SkelSymbol>,
     pub refs: Vec<SkelRef>,
     pub imports: Vec<String>,
@@ -283,7 +303,7 @@ pub struct SkeletonAnalysis {
     /// the parameter's name token). `into_file_analysis` types each as its
     /// method's class, once the scopes know their callables. An undeclared
     /// receiver (`this`) is a `receiver_sites` entry.
-    pub receivers: Vec<(crate::model::file_analysis::ScopeId, Span)>,
+    pub receivers: Vec<(crate::model::file_analysis::ScopeId, Span, ExprId)>,
     /// Callable parameter arities keyed by parameter_list span (`@arity.sig`).
     /// Associated to def symbols by span containment in `into_file_analysis`.
     pub param_sigs: Vec<(crate::model::file_analysis::Span, crate::model::file_analysis::ParamArity)>,
@@ -300,9 +320,8 @@ pub struct SkeletonAnalysis {
     /// makes the access a place (`PackPlaces`).
     pub member_reads: Vec<MemberRead>,
     /// Places an access writes (`obj.x = …`, `obj.x.clear()`, `head_ = …`),
-    /// by the written token's span, value or not, and where the write lands:
-    /// what ends a narrowing or a move of that place.
-    pub place_writes: Vec<(crate::model::file_analysis::Span, tree_sitter::Point)>,
+    /// value or not: what ends a narrowing or a move of that place.
+    pub place_writes: Vec<PlaceWrite>,
     /// Guard narrowings whose subject is a member read: rooted, cut off and
     /// attached to their place in `into_file_analysis`.
     pub place_narrowings: Vec<PlaceNarrowing>,
@@ -342,8 +361,19 @@ pub struct MemberWrite {
     /// token), resolved like a read of it.
     pub spaces: crate::model::file_analysis::SpaceAsk,
     pub value: crate::model::file_analysis::Span,
+    /// The value's node: two patterns stating one write name one value.
+    pub value_expr: ExprId,
     /// The access written, one of `place_writes`.
-    pub place: crate::model::file_analysis::Span,
+    pub place: ExprId,
+}
+
+/// A written place: the written token, where the write lands, and the
+/// token's node, whose read denotes the place.
+#[derive(Debug, Clone, Copy)]
+pub struct PlaceWrite {
+    pub token: crate::model::file_analysis::Span,
+    pub lands: tree_sitter::Point,
+    pub expr: ExprId,
 }
 
 /// A member read (`recv.x`, `recv->x`): the whole access, the receiver
@@ -352,7 +382,9 @@ pub struct MemberWrite {
 #[derive(Debug, Clone)]
 pub struct MemberRead {
     pub span: crate::model::file_analysis::Span,
+    pub expr: ExprId,
     pub receiver: crate::model::file_analysis::Span,
+    pub receiver_expr: ExprId,
     pub member: String,
     pub token: crate::model::file_analysis::Span,
     pub written: bool,
@@ -368,6 +400,8 @@ pub struct VarRead {
     pub scope: crate::model::file_analysis::ScopeId,
     pub span: crate::model::file_analysis::Span,
     pub token: crate::model::file_analysis::Span,
+    /// The value expression's node.
+    pub expr: ExprId,
     /// The token is one an assignment writes (the name token of a
     /// `@def.assigned`): the read denotes the place written, and the
     /// token's reference is the write's.
@@ -376,8 +410,8 @@ pub struct VarRead {
 
 impl VarRead {
     /// A read whose token is its whole value.
-    pub fn token(name: String, scope: crate::model::file_analysis::ScopeId, span: crate::model::file_analysis::Span) -> Self {
-        VarRead { name, scope, span, token: span, written: false }
+    pub fn token(name: String, scope: crate::model::file_analysis::ScopeId, span: crate::model::file_analysis::Span, expr: ExprId) -> Self {
+        VarRead { name, scope, span, token: span, expr, written: false }
     }
 }
 
@@ -386,7 +420,7 @@ impl VarRead {
 #[derive(Debug, Clone)]
 pub struct MoveCall {
     pub spelling: String,
-    pub subject: crate::model::file_analysis::Span,
+    pub subject: ExprId,
     pub call: crate::model::file_analysis::Span,
     pub scope: crate::model::file_analysis::ScopeId,
 }
@@ -395,7 +429,7 @@ pub struct MoveCall {
 /// what it holds over the arm, and the arm the guard enters.
 #[derive(Debug, Clone)]
 pub struct PlaceNarrowing {
-    pub subject: crate::model::file_analysis::Span,
+    pub subject: ExprId,
     pub refined: crate::model::witnesses::WitnessPayload,
     pub region: crate::model::file_analysis::Span,
 }
@@ -406,6 +440,8 @@ pub struct PlaceNarrowing {
 #[derive(Debug, Clone)]
 pub struct GuardRecord {
     pub subject: crate::model::file_analysis::Span,
+    /// The subject's node, which roots a member subject's place.
+    pub subject_expr: ExprId,
     /// The name the subject reads, unless it is surely a member.
     pub variable: Option<String>,
     pub scope: crate::model::file_analysis::ScopeId,
@@ -556,6 +592,12 @@ impl SkeletonAnalysis {
             crate::model::conventions::register_conventions(pack.id, || pack.conventions());
         }
         SkeletonAnalysis { language: pack.id, names: pack.names.clone(), free_names: pack.free_names, ..Default::default() }
+    }
+
+    /// A fresh node id, for a node no row has named yet.
+    pub fn mint_expr(&mut self) -> ExprId {
+        self.exprs += 1;
+        ExprId(self.exprs - 1)
     }
 
     /// Re-anchor members that lost their enclosing container to a tree-sitter
@@ -925,7 +967,7 @@ impl SkeletonAnalysis {
         let mut receiver_witnesses: Vec<crate::model::witnesses::Witness> = Vec::new();
         {
             use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
-            for &(_, span) in &self.receivers {
+            for &(_, span, _) in &self.receivers {
                 let Some(sym) = symbols.iter_mut().find(|s| s.selection_span == span) else { continue };
                 sym.flags |= crate::model::file_analysis::SymbolFlags::RECEIVER;
                 let Some(class) = method_class.get(sym.scope.0 as usize).cloned().flatten() else { continue };
@@ -1037,9 +1079,9 @@ impl SkeletonAnalysis {
             }
             map
         };
-        // The class each `@receiver.*` token names, by its span: its value's
+        // The class each `@receiver.*` token names, by its node: its value's
         // class where no call says otherwise.
-        let mut receiver_class: std::collections::HashMap<Span, String> = std::collections::HashMap::new();
+        let mut receiver_class: Vec<Option<String>> = vec![None; self.exprs as usize];
         // Writeback-lite: route method returns through Member so
         // `box.getInner().` chains, inherited returns, and cross-file all
         // resolve via the SAME chase Perl uses — no bypass. Declared
@@ -1287,7 +1329,7 @@ impl SkeletonAnalysis {
                         .map(|s| s.name.clone()),
                 };
                 let Some(class) = class else { continue };
-                receiver_class.insert(r.span, class.clone());
+                receiver_class[r.expr.index()] = Some(class.clone());
                 bag.push(Witness {
                     attachment: WA::Expr(r.span),
                     source: WitnessSource::Builder("receiver_class".into()),
@@ -1348,9 +1390,9 @@ impl SkeletonAnalysis {
                 // method's own receiver: the object the call running that
                 // method was made on, its class where no call says.
                 let forward = site
-                    .receiver
+                    .receiver_expr
                     .filter(|_| site.forwards)
-                    .and_then(|recv| receiver_class.get(&recv).cloned())
+                    .and_then(|recv| receiver_class[recv.index()].clone())
                     .zip(owning_method.get(site.scope.0 as usize).copied().flatten())
                     .and_then(|(class, m)| Some((class, m, symbols[m.0 as usize].package.clone()?)));
                 if let Some((class, m, receiver_of)) = forward {
@@ -1438,13 +1480,13 @@ impl SkeletonAnalysis {
             }
         }
         let mut local_refs: Vec<crate::model::file_analysis::Ref> = Vec::new();
-        // The place each name read denotes, by the read's value span (what a
+        // The place each name read denotes, by the read's value node (what a
         // member read names as its receiver), with the read's token: the
         // root of the places built on it. A name no declaration in reach
         // claims, in a body that elides its receiver, is a member of that
         // receiver — C++'s lookup order, locals before members.
-        let mut var_at: std::collections::HashMap<Span, (crate::model::file_analysis::Place, Span)> =
-            std::collections::HashMap::new();
+        let mut var_at: Vec<Option<super::places::VarPlace>> = Vec::new();
+        var_at.resize_with(self.exprs as usize, || None);
         // Reads that found no LOCAL decl — a Variable ref is still minted for
         // each (below, once call/member spans are known) so query-time
         // cross-file resolution can chase it by name (a file-scope value like
@@ -1480,7 +1522,7 @@ impl SkeletonAnalysis {
                 evaluated_before: None,
             });
         }
-        for super::VarRead { name, scope: read_scope, span: value_span, token: read_span, written } in &self.var_reads {
+        for super::VarRead { name, scope: read_scope, span: value_span, token: read_span, expr, written } in &self.var_reads {
             // A written token denotes the place it writes, which the places
             // below need; its ref is the write's.
             let is_write = *written;
@@ -1499,7 +1541,7 @@ impl SkeletonAnalysis {
                 }),
             };
             if let Some(place) = place {
-                var_at.insert(*value_span, (place, *read_span));
+                var_at[expr.index()] = Some(super::places::VarPlace { place, token: *read_span, at: value_span.start });
             }
             if is_write {
                 continue;
@@ -1524,9 +1566,14 @@ impl SkeletonAnalysis {
         // document states names the enclosing class) is its method's
         // wherever it is written: `this->x` and a bare `x` are one place.
         use crate::model::file_analysis::{Binding, Place};
-        for &(scope, span) in &self.receivers {
+        let receiver_place = |m, token: Span| super::places::VarPlace {
+            place: Place::variable(Binding::Receiver(m)),
+            token,
+            at: token.start,
+        };
+        for &(scope, span, expr) in &self.receivers {
             if let Some(m) = elided_receiver.get(scope.0 as usize).copied().flatten() {
-                var_at.entry(span).or_insert_with(|| (Place::variable(Binding::Receiver(m)), span));
+                var_at[expr.index()].get_or_insert_with(|| receiver_place(m, span));
             }
         }
         for r in self
@@ -1539,7 +1586,7 @@ impl SkeletonAnalysis {
             // method, which a class-level method has too.
             let method = if r.object { &object_of } else { &owning_method };
             if let Some(m) = method.get(r.scope.0 as usize).copied().flatten() {
-                var_at.entry(r.span).or_insert_with(|| (Place::variable(Binding::Receiver(m)), r.span));
+                var_at[r.expr.index()].get_or_insert_with(|| receiver_place(m, r.span));
             }
         }
         // `goto LABEL` → the `LABEL:` def, function-wide: first matching
@@ -1600,7 +1647,7 @@ impl SkeletonAnalysis {
             .map(|g| {
                 use crate::model::file_analysis::Binding;
                 places
-                    .at(g.subject)
+                    .at(g.subject_expr)
                     .filter(|p| !p.is_variable() && !matches!(p.root, Binding::Package(..) | Binding::Arguments(_)))
             })
             .collect();
@@ -1618,23 +1665,25 @@ impl SkeletonAnalysis {
                 .filter(|s| s.kind == SymKind::Field && s.flags.contains(SymbolFlags::READONLY))
                 .filter_map(|s| Some((s.package.as_deref()?, s.name.as_str())))
                 .collect();
-            let stored: std::collections::HashMap<Span, Span> = member_writes.iter().map(|w| (w.place, w.value)).collect();
-            let tokens: std::collections::HashMap<Span, Span> = member_reads.iter().map(|m| (m.span, m.token)).collect();
+            let mut stored: Vec<Option<Span>> = vec![None; self.exprs as usize];
+            for w in &member_writes {
+                stored[w.place.index()] = Some(w.value);
+            }
             place_writes
                 .iter()
                 .filter(|_| !write_once.is_empty())
-                .filter_map(|&(w, at)| {
-                    let place = places.at(w)?;
+                .filter_map(|&super::PlaceWrite { token: w, lands: at, expr }| {
+                    let place = places.at(expr)?;
                     let (Binding::Receiver(m), [PathStep::Member(name)]) = (&place.root, place.path.as_slice()) else {
                         return None;
                     };
                     let owner = symbols.get(m.0 as usize).filter(|s| s.id == *m).or_else(|| symbols.iter().find(|s| s.id == *m))?;
                     let class = owner.package.as_deref()?;
                     write_once.contains(&(class, name.as_str())).then(|| crate::model::file_analysis::MemberStore {
-                        token: tokens.get(&w).copied().unwrap_or(w),
+                        token: places.member_token(expr).unwrap_or(w),
                         place,
                         at,
-                        value: stored.get(&w).copied(),
+                        value: stored[expr.index()],
                     })
                 })
                 .collect()
@@ -1734,9 +1783,9 @@ impl SkeletonAnalysis {
                     // invocant types query-time via
                     // `expr_type_at_span(invocant_span)`.
                     RefCap::MemberValue => {
-                        let (inv_span, invocant) = r.invocant.clone()?;
-                        let place = places.access(inv_span, &valued).or_else(|| places.access(inv_span, &tracked)).map(Box::new);
-                        let invocant = places.receiver(inv_span, invocant, &valued);
+                        let (inv_span, invocant, recv) = r.invocant.clone()?;
+                        let place = places.access(recv, &valued).or_else(|| places.access(recv, &tracked)).map(Box::new);
+                        let invocant = places.receiver(recv, invocant, &valued);
                         RefKind::FieldAccess {
                             invocant,
                             invocant_span: Some(inv_span),
@@ -1750,8 +1799,8 @@ impl SkeletonAnalysis {
                     // Perl `$obj->m`; `find_definition`/`refs_to`/hover all
                     // flow from it.
                     RefCap::MemberCall => {
-                        let (inv_span, invocant) = r.invocant.clone()?;
-                        let invocant = places.receiver(inv_span, invocant, &valued);
+                        let (inv_span, invocant, recv) = r.invocant.clone()?;
+                        let invocant = places.receiver(recv, invocant, &valued);
                         RefKind::MethodCall {
                             invocant,
                             invocant_span: Some(inv_span),
@@ -2376,7 +2425,7 @@ fn settle_rounds(
     fa: &mut crate::model::file_analysis::FileAnalysis,
     writes: &[MemberWrite],
     class_scopes: &[(String, crate::model::file_analysis::ScopeId)],
-    stated: &mut std::collections::HashSet<(crate::model::witnesses::WitnessAttachment, Span)>,
+    stated: &mut std::collections::HashSet<(crate::model::witnesses::WitnessAttachment, ExprId)>,
 ) -> u64 {
     use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
     let mut rounds = 0u64;
@@ -2412,7 +2461,7 @@ fn settle_rounds(
                     class_scopes.iter().find(|(c, _)| *c == class).map(|&(_, scope)| scope),
                 ),
             };
-            if !stated.insert((attachment.clone(), w.value)) {
+            if !stated.insert((attachment.clone(), w.value_expr)) {
                 continue;
             }
             values.push(Witness {

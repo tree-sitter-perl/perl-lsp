@@ -366,6 +366,7 @@ pub(super) fn finish(st: &mut ExtractState) {
         let node = ad.in_match(mid, Capture::Narrow(NarrowCap::Var));
         let member = node.is_some_and(|v| ad.on_ixs(v).any(|i| st.minted[i].projects.is_some()));
         let Some(v) = node else { continue };
+        let subject_expr = expr_on(ad, &mut st.minted, out, v);
         // What the atom proves of its subject where the condition is `holds`,
         // read where the test leaves control (`at`).
         let proof = |holds: bool, at: Point, path: &[Connective]| {
@@ -386,6 +387,7 @@ pub(super) fn finish(st: &mut ExtractState) {
         };
         let record = |of: Span, fact: GuardFact| GuardRecord {
             subject: v.span(),
+            subject_expr,
             variable: (!member).then(|| subject.clone()),
             scope,
             of,
@@ -398,7 +400,7 @@ pub(super) fn finish(st: &mut ExtractState) {
                 decided = true;
                 guards.push(record(of, GuardFact::Narrowed(region)));
                 narrowings.push(crate::build::query_extract::PlaceNarrowing {
-                    subject: v.span(),
+                    subject: subject_expr,
                     refined: refined.clone(),
                     region,
                 });
@@ -464,9 +466,10 @@ pub(super) fn finish(st: &mut ExtractState) {
     for &(mid, span, scope) in &n.move_calls {
         if text(mid, MoveCap::Scope) == Some("std") && text(mid, MoveCap::Name) == Some("move") {
             if let Some(v) = ad.in_match(mid, Capture::Move(MoveCap::Var)) {
+                let subject = expr_on(ad, &mut st.minted, out, v);
                 out.moved_from.push(crate::build::query_extract::MoveCall {
                     spelling: v.text.clone(),
-                    subject: v.span(),
+                    subject,
                     call: span,
                     scope,
                 });

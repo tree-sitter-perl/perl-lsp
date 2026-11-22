@@ -16,8 +16,9 @@ struct Target {
     at: Point,
     /// Whether the write resets the binding where it lands.
     resets: bool,
-    /// The target token.
+    /// The target token, and its event.
     token: Span,
+    ix: usize,
     /// A `@type.<relative>` annotation's mark and the class body it is
     /// written in; outside every class body the mark names none.
     relative: Option<(RelativeClass, Option<String>)>,
@@ -38,8 +39,8 @@ pub(super) struct State {
     /// Rebind shapes with no inflowing value (loop vars: `for x in …`,
     /// `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
     /// cutoff sees them, exactly like Perl's `foreach` var. By name, scope,
-    /// where the write lands, and the token.
-    pub(super) flow_rebinds: Vec<(String, ScopeId, Point, Span)>,
+    /// where the write lands, and the token's event.
+    pub(super) flow_rebinds: Vec<(String, ScopeId, Point, usize)>,
     /// Usage-site evidence awaiting the rebind cutoff, which reads the
     /// finished flow edges (`narrowing::finish`): the observed name, its
     /// scope, the observation, and its region before the cutoff.
@@ -105,11 +106,13 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             let token = &ad.events()[token_ix];
             let (name, ref_span) = ((pack.shape_name)(&token.text), token.span());
             st.minted[token_ix].var_read = Some(out.var_reads.len());
+            let expr = expr_on(ad, &mut st.minted, out, e);
             out.var_reads.push(crate::build::query_extract::VarRead {
                 name: name.clone(),
                 scope: cur_scope,
                 span,
                 token: ref_span,
+                expr,
                 written: false,
             });
             out.witnesses.push(skeleton_witness(
@@ -123,7 +126,8 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             ));
         }
         Capture::Receiver => {
-            out.receivers.push((cur_scope, e.span()));
+            let expr = expr_on(ad, &mut st.minted, out, e);
+            out.receivers.push((cur_scope, e.span(), expr));
         }
         Capture::Expr(ExprCap::ReturnValue) => {
             // The returned expression's own general-rule witness (literal
@@ -156,7 +160,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                 _ => None,
             });
             let constant = ad.on(e).any(|t| t.cap == Capture::Mark(MarkCap::Constant));
-            let target = Target { name, scopes: target_scopes, at, resets, token: e.span(), relative, space, constant };
+            let target = Target { name, scopes: target_scopes, at, resets, token: e.span(), ix, relative, space, constant };
             f.flow_targets.insert(e.match_id, target);
         }
         Capture::Flow(FlowCap::Unbind) => {
@@ -169,14 +173,14 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                 payload: WitnessPayload::Unbind,
                 span: Span { start: at, end: at },
             });
-            f.flow_rebinds.push((name, cur_scope, at, e.span()));
+            f.flow_rebinds.push((name, cur_scope, at, ix));
         }
         Capture::Flow(FlowCap::Rebind) => {
             let (at, resets) = written_at(ad, e);
             if resets {
                 reset(&mut out.witnesses, (pack.shape_name)(&e.text), cur_scope, at);
             }
-            f.flow_rebinds.push(((pack.shape_name)(&e.text), cur_scope, at, e.span()));
+            f.flow_rebinds.push(((pack.shape_name)(&e.text), cur_scope, at, ix));
         }
         Capture::AnonAggMember => {
             // A field typed by an anonymous aggregate: its members are
@@ -268,9 +272,11 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                 .or_else(|| {
                     let name = in_match(Capture::Ref(RefCap::MemberCall))?;
                     let recv = in_match(Capture::Member(MemberCap::Recv))?;
-                    Some((name, Some(recv.span())))
+                    Some((name, Some(recv)))
                 });
-            if let Some((token, receiver)) = callee {
+            if let Some((token, recv)) = callee {
+                let receiver_expr = recv.map(|recv| expr_on(ad, &mut st.minted, out, recv));
+                let receiver = recv.map(Event::span);
                 // the callee as the match spells it, as its reference reads it
                 let written = in_match(Capture::RefSpelled).map_or(&token.text, |s| &s.text);
                 let (callee, callee_at) = ((pack.shape_name)(written), token.start);
@@ -281,6 +287,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                     callee,
                     callee_at,
                     receiver,
+                    receiver_expr,
                     scope: cur_scope,
                     args,
                     constructs: false,
@@ -299,18 +306,20 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                 let span = e.span();
                 let args = super::members::call_args(ad, e.match_id);
                 let arg_count = args.as_ref().map(Vec::len);
+                let recv_expr = expr_on(ad, &mut st.minted, out, recv);
                 out.call_sites.push(crate::build::query_extract::CallSite {
                     span,
                     callee: recv.text.clone(),
                     callee_at: recv.start,
                     receiver: Some(recv.span()),
+                    receiver_expr: Some(recv_expr),
                     scope: cur_scope,
                     args,
                     constructs: true,
                     forwards: false,
                 });
                 let invocant = match recv.payload.as_deref() {
-                    Some(Payload::Recv(i)) => Some((recv.span(), i.clone())),
+                    Some(Payload::Recv(i)) => Some((recv.span(), i.clone(), recv_expr)),
                     _ => None,
                 };
                 out.refs.push(SkelRef {
@@ -377,9 +386,13 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                     row: out.member_reads.len(),
                     spaces,
                 }));
+                let expr = expr_on(ad, &mut st.minted, out, e);
+                let receiver_expr = expr_on(ad, &mut st.minted, out, recv);
                 out.member_reads.push(crate::build::query_extract::MemberRead {
                     span,
+                    expr,
                     receiver: recv.span(),
+                    receiver_expr,
                     member: member.clone(),
                     token: name.span(),
                     written: false,
@@ -398,8 +411,10 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         Capture::NamedReceiver(names) => {
             // Which class the token names is answered once the use-map and
             // the callables' owners are in (`into_file_analysis`).
+            let expr = expr_on(ad, &mut st.minted, out, e);
             out.receiver_sites.push(crate::build::query_extract::ReceiverSite {
                 span: e.span(),
+                expr,
                 scope: cur_scope,
                 names,
                 text: e.text.clone(),
@@ -481,10 +496,12 @@ pub(super) fn finish(st: &mut ExtractState) {
         .filter_map(|s| out.scopes.get(s.scope.0 as usize).map(|sc| ((s.name.clone(), s.scope), sc.span)))
         .collect();
     // A write of a name some earlier def declares replaces its value.
-    let reassigned: std::collections::HashSet<(&str, Point)> =
-        out.var_writes.iter().map(|(n, _, sp)| (n.as_str(), sp.start)).collect();
-    let reassigns = |name: &str, token: &Point| reassigned.contains(&(name, *token));
-    let mut edges = Vec::new();
+    let reassigns = |minted: &[Minted], token: usize| ad.on_ixs(&ad.events()[token]).any(|on| minted[on].reassigns);
+    // Each edge with the declaration its target token makes, if it makes
+    // one: the scope, token and name its facts are filed by, the member or
+    // constant they attach to, and whether it declares a constant.
+    let mut edges: Vec<(crate::model::file_analysis::FlowEdge, Option<(ScopeId, Point, String, WitnessAttachment, bool)>)> =
+        Vec::new();
     // Match-id order (deterministic) — two captures targeting the same
     // `Variable{name, scope}` slot land witnesses in this order, and the
     // latest wins.
@@ -494,10 +511,10 @@ pub(super) fn finish(st: &mut ExtractState) {
     // them to the place of the symbol that token declares. Their fallback
     // attachment is the member, owned by the class its scope names — the one
     // the declaring symbol is filed under (`defs::handle`).
-    let mut decl_sites: HashMap<(ScopeId, Point), (ScopeId, Point, String, WitnessAttachment)> = HashMap::new();
-    for (mid, Target { name, at, resets, token, relative, space, constant, .. }, scope) in targets {
+    for (mid, Target { name, at, resets, token, ix, relative, space, constant, .. }, scope) in targets {
         let owner = classes.class_of(*scope).filter(|_| field_scope_span.contains_key(&(name.clone(), *scope)));
         let decl = (owner.is_some() || *constant).then(|| (*scope, token.start, name.clone()));
+        let declares = decl.is_some();
         let var = match owner {
             Some(owner) => {
                 let space = st.pack.member_spaces.of_decl(crate::model::file_analysis::SymKind::Field, *space);
@@ -505,9 +522,6 @@ pub(super) fn finish(st: &mut ExtractState) {
             }
             _ => WitnessAttachment::Variable { name: name.clone(), scope: *scope },
         };
-        if decl.is_some() {
-            decl_sites.insert((*scope, *at), (*scope, token.start, name.clone(), var.clone()));
-        }
         // A data member's write in its class body is its initializer, not a
         // step in a sequence: its declared type holds class-wide, so nothing
         // there retires it.
@@ -584,22 +598,25 @@ pub(super) fn finish(st: &mut ExtractState) {
             // Mint a value-flow edge (cpp init is `Whole`); the witness is its
             // lowering, so type inference sees the same `Variable → Edge(Expr)`
             // it always did — now with the source span kept for provenance.
-            edges.push(crate::model::file_analysis::FlowEdge {
+            let edge = crate::model::file_analysis::FlowEdge {
                 target_name: name.clone(),
                 target_scope: *scope,
                 target_at: *at,
                 target_token: Some(*token),
                 source: target_span,
                 extraction: crate::model::file_analysis::Extraction::Whole,
-                reassigns: reassigns(name, &token.start),
-            });
+                reassigns: reassigns(&st.minted, *ix),
+            };
+            let declares = declares.then(|| (*scope, token.start, name.clone(), var.clone(), *constant));
+            edges.push((edge, declares));
         }
     }
     // A name a value flows into is written where the write lands; its token
     // denotes the place written.
     for (&mid, t) in &f.flow_targets {
         if source_value_span(ad, mid).is_some() {
-            out.place_writes.push((t.token, t.at));
+            let expr = expr_on(ad, &mut st.minted, out, &ad.events()[t.ix]);
+            out.place_writes.push(crate::build::query_extract::PlaceWrite { token: t.token, lands: t.at, expr });
         }
     }
     // A place is whatever its own read projects. A member read's target is
@@ -613,30 +630,43 @@ pub(super) fn finish(st: &mut ExtractState) {
     // value. The read and the references on its member token are marked
     // here, on their own rows.
     use crate::model::file_analysis::AccessKind;
-    let refs_on = |token: usize| ad.on_ixs(&ad.events()[token]).filter_map(|i| st.minted[i].ref_row);
+    fn refs_on<'a>(ad: &'a Adorned, minted: &'a [Minted], token: usize) -> impl Iterator<Item = usize> + 'a {
+        ad.on_ixs(&ad.events()[token]).filter_map(|i| minted[i].ref_row)
+    }
     for place in ad.by_match().filter(|e| e.cap == Capture::Flow(FlowCap::Place)) {
+        if !ad.on_ixs(place).any(|i| st.minted[i].projects.is_some()) {
+            continue;
+        }
+        let expr = expr_on(ad, &mut st.minted, out, place);
+        let source = ad.in_match(place.match_id, Capture::Flow(FlowCap::Source));
+        let value_expr = source.map(|v| expr_on(ad, &mut st.minted, out, v));
         let Some(read) = ad.on_ixs(place).filter_map(|i| st.minted[i].projects.as_deref()).last() else { continue };
         if !out.member_reads[read.row].written {
             out.member_reads[read.row].written = true;
-            for row in refs_on(read.token) {
+            for row in refs_on(ad, &st.minted, read.token) {
                 out.refs[row].access = AccessKind::Write;
             }
-            out.place_writes.push((place.span(), written_at(ad, place).0));
+            out.place_writes.push(crate::build::query_extract::PlaceWrite {
+                token: place.span(),
+                lands: written_at(ad, place).0,
+                expr,
+            });
         }
-        if let Some(value) = source_value_span(ad, place.match_id) {
+        if let (Some(value), Some(value_expr)) = (source, value_expr) {
             out.member_writes.push(crate::build::query_extract::MemberWrite {
                 receiver: read.receiver,
                 member: read.member.clone(),
                 spaces: read.spaces,
-                value,
-                place: place.span(),
+                value: value.span(),
+                value_expr,
+                place: expr,
             });
         }
     }
     for init in ad.by_match().filter(|e| e.cap == Capture::Flow(FlowCap::Init)) {
         // A write that only fills an empty member.
         if let Some(read) = ad.on_ixs(init).filter_map(|i| st.minted[i].projects.as_deref()).last() {
-            for row in refs_on(read.token) {
+            for row in refs_on(ad, &st.minted, read.token) {
                 if out.refs[row].access == AccessKind::Write {
                     out.refs[row].access = AccessKind::WriteIfUnset;
                 }
@@ -645,39 +675,41 @@ pub(super) fn finish(st: &mut ExtractState) {
     }
     // Bind-shape rebinds (loop vars): no inflowing value, recorded for the
     // narrowing cutoff (`Rebind` lowers to nothing — provenance only).
-    for (name, scope, at, token) in std::mem::take(&mut f.flow_rebinds) {
-        out.place_writes.push((token, at));
-        edges.push(crate::model::file_analysis::FlowEdge {
-            reassigns: reassigns(&name, &token.start),
+    for (name, scope, at, ix) in std::mem::take(&mut f.flow_rebinds) {
+        let event = &ad.events()[ix];
+        let token = event.span();
+        let expr = expr_on(ad, &mut st.minted, out, event);
+        out.place_writes.push(crate::build::query_extract::PlaceWrite { token, lands: at, expr });
+        let edge = crate::model::file_analysis::FlowEdge {
+            reassigns: reassigns(&st.minted, ix),
             target_name: name,
             target_scope: scope,
             target_at: at,
             target_token: Some(token),
             source: Span { start: at, end: at },
             extraction: crate::model::file_analysis::Extraction::Rebind,
-        });
+        };
+        edges.push((edge, None));
     }
-    out.flow_edges.extend(edges);
     // Lower the value-flow edges to type-tier witnesses (the bag is canonical
     // for types; the edges are the provenance tier above it).
     // A constant holds its value wherever it is read, a read written above
     // its declaration included.
     let file_span = out.scopes.first().map(|s| s.span);
-    let constants: std::collections::HashSet<(ScopeId, Point)> =
-        f.flow_targets.values().filter(|t| t.constant).flat_map(|t| t.scopes.iter().map(|s| (*s, t.at))).collect();
-    for fe in &out.flow_edges {
+    for (fe, declares) in edges {
         if let Some(mut w) = fe.lower_to_witness() {
-            match decl_sites.get(&(fe.target_scope, fe.target_at)) {
-                Some((scope, token, name, att)) => {
-                    w.attachment = att.clone();
-                    if let Some(file) = file_span.filter(|_| constants.contains(&(fe.target_scope, fe.target_at))) {
+            match declares {
+                Some((scope, token, name, att, constant)) => {
+                    w.attachment = att;
+                    if let Some(file) = file_span.filter(|_| constant) {
                         w.span = file;
                     }
-                    out.decl_facts.push((*scope, *token, name.clone(), w));
+                    out.decl_facts.push((scope, token, name, w));
                 }
                 None => out.witnesses.push(w),
             }
         }
+        out.flow_edges.push(fe);
     }
 }
 

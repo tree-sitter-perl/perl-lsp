@@ -46,12 +46,12 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     let ad = st.adorned;
     let recv = ad.in_match(e.match_id, Capture::Member(MemberCap::Recv));
     let invocant = recv.and_then(|r| match r.payload.as_deref() {
-        Some(Payload::Recv(i)) => Some((r.span(), i.clone())),
+        Some(Payload::Recv(i)) => Some((r.span(), i.clone(), expr_on(ad, &mut st.minted, &mut st.out, r))),
         _ => None,
     });
     // op-DX applies only to a written-name receiver (its deref_stack
     // resolves by name); a wrapper/chain doesn't.
-    let simple = matches!(invocant, Some((_, crate::model::conventions::Invocant::Name(_))));
+    let simple = matches!(invocant, Some((_, crate::model::conventions::Invocant::Name(_), _)));
     let member_op = simple.then(|| super::members::op_of(ad, e.match_id)).flatten();
     let arg_count = super::members::call_args(ad, e.match_id).map(|a| a.len());
     let qualifier = match e.payload.as_deref() {
