@@ -86,7 +86,7 @@ pub(super) fn class_scope_rows(st: &ExtractState) -> Vec<(String, ScopeId)> {
     rows
 }
 
-pub(super) fn handle(st: &mut ExtractState, e: &Event) {
+pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     let pack = st.pack;
     match e.cap {
         // `@scope` = a plain lexical Block; `@scope.sub` = sub-body
@@ -95,9 +95,10 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         // `scope_within_sub_body` reads to shield params/locals from the
         // outline and the class-content lane. Pack subs carry no name on
         // the scope (the Symbol holds identity); the callable it is the body
-        // of is joined as its `owner` at assembly.
+        // of names it (`SkelSymbol::body`).
         Capture::Scope(scope_cap) => {
             let id = ScopeId(st.out.scopes.len() as u32);
+            st.minted[ix].opens = Some(id);
             // A header is code of the scope around its def's own (the file,
             // for a header the file scope holds).
             let around = match scope_cap {
@@ -111,6 +112,15 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 }
                 None => (st.cur_scope, st.package.clone()),
             };
+            // A callable's body scope and its def are captured on one node:
+            // the def names the scope it opens.
+            if matches!(scope_cap, ScopeCap::Sub | ScopeCap::SubImplicitReceiver | ScopeCap::SubClosed) {
+                for on in st.adorned.on_ixs(e) {
+                    if let Some(row) = st.minted[on].def_row {
+                        st.out.symbols[row].body = Some(id);
+                    }
+                }
+            }
             st.out.scopes.push(Scope {
                 id,
                 parent: Some(parent),

@@ -37,6 +37,7 @@ pub(super) fn finish(st: &mut ExtractState) {
             spaces: None,
             qualifier: None,
             spelled: None,
+            access: crate::model::file_analysis::AccessKind::Read,
         });
     }
 }

@@ -942,7 +942,7 @@ impl<'a> Builder<'a> {
     /// `return_edge: Symbol(_)` from the start) and `visit_anonymous_sub`
     /// (covers anon subs that aren't on the rhs of an assignment —
     /// `helper(name => sub {...})`, `Carp::confess(sub {...}->())`,
-    /// etc.). Keyed by node span, so re-entries for the same node
+    /// etc.). Keyed by node, so re-entries for the same node
     /// return the existing id.
     pub(super) fn ensure_anon_sub_symbol(
         &mut self,
@@ -950,7 +950,8 @@ impl<'a> Builder<'a> {
         params: &[ParamInfo],
     ) -> SymbolId {
         let span = node_to_span(node);
-        if let Some(id) = self.anon_sub_symbol_by_span.get(&span) {
+        let key = self.syntax.lift(node).map(|n| n.id());
+        if let Some(id) = key.and_then(|key| self.anon_sub_symbols.get(&key)) {
             return *id;
         }
         let sym_id = self.add_symbol(
@@ -969,7 +970,9 @@ impl<'a> Builder<'a> {
         );
         // Not a nameable entity — resolvable, never listed.
         self.presentation_mut(sym_id).hide_in_outline = true;
-        self.anon_sub_symbol_by_span.insert(span, sym_id);
+        if let Some(key) = key {
+            self.anon_sub_symbols.insert(key, sym_id);
+        }
         sym_id
     }
 

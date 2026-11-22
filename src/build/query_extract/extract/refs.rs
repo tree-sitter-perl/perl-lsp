@@ -27,7 +27,7 @@ pub(super) fn flatten_spelled<'t>(
     }
 }
 
-pub(super) fn handle(st: &mut ExtractState, e: &Event) {
+pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     let Capture::Ref(ref_kind) = e.cap else { return };
     let pack = st.pack;
     if ref_kind == RefCap::Label {
@@ -37,8 +37,8 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     // A "reference" on a def's own name token is the declaration, not
     // a use. Only the name: a def node's last token is often a use
     // (python's `def f(o): return o.count` ends at `count`). `ref.type`
-    // is exempt; its decl-name overlap is suppressed precisely (exact
-    // selection-span match) in `into_file_analysis`.
+    // is exempt: one on the very token a kept def is named by is dropped
+    // once the defs are settled (`drop_declarations`).
     let inside_def = ref_kind != RefCap::Type && st.around(e).any(|a| st.minted[a].declares);
     if inside_def {
         return;
@@ -46,12 +46,12 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     let ad = st.adorned;
     let recv = ad.in_match(e.match_id, Capture::Member(MemberCap::Recv));
     let invocant = recv.and_then(|r| match r.payload.as_deref() {
-        Some(Payload::Recv(i)) => Some((r.span(), i.clone())),
+        Some(Payload::Recv(i)) => Some((r.span(), i.clone(), expr_on(ad, &mut st.minted, &mut st.out, r))),
         _ => None,
     });
     // op-DX applies only to a written-name receiver (its deref_stack
     // resolves by name); a wrapper/chain doesn't.
-    let simple = matches!(invocant, Some((_, crate::model::conventions::Invocant::Name(_))));
+    let simple = matches!(invocant, Some((_, crate::model::conventions::Invocant::Name(_), _)));
     let member_op = simple.then(|| super::members::op_of(ad, e.match_id)).flatten();
     let arg_count = super::members::call_args(ad, e.match_id).map(|a| a.len());
     let qualifier = match e.payload.as_deref() {
@@ -59,6 +59,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         _ => None,
     };
     let spelled = ad.in_match(e.match_id, Capture::RefSpelled);
+    st.minted[ix].ref_row = Some(st.out.refs.len());
     st.out.refs.push(SkelRef {
         kind: ref_kind,
         // `@ref.spelled`: the name as the match spells it, where that is
@@ -74,7 +75,29 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         spaces: space_ask(ad.on(e)),
         qualifier,
         spelled: spelled.map(Event::span),
+        access: crate::model::file_analysis::AccessKind::Read,
     });
+}
+
+/// A `@ref.type` on a def's own name token (a class, enum or typedef
+/// declaring itself) is the declaration, not a use: the symbol stays the
+/// token's only claimant.
+pub(super) fn drop_declarations(st: &mut ExtractState) {
+    for ix in 0..st.minted.len() {
+        if let (Some(_), Some(name)) = (st.minted[ix].def_row, st.minted[ix].def_name) {
+            st.minted[name].names_symbol = true;
+        }
+    }
+    let ad = st.adorned;
+    let mut keep = vec![true; st.out.refs.len()];
+    for (ix, e) in ad.events().iter().enumerate() {
+        let Some(row) = st.minted[ix].ref_row else { continue };
+        if st.out.refs[row].kind == RefCap::Type && ad.on_ixs(e).any(|on| st.minted[on].names_symbol) {
+            keep[row] = false;
+        }
+    }
+    let mut it = keep.iter();
+    st.out.refs.retain(|_| *it.next().unwrap());
 }
 
 /// The namespaces the `@space.*` captures on a member token state.

@@ -324,6 +324,11 @@ struct Builder<'a> {
     /// through (`$obj`; `None` for a named hash). `populate_witness_bag`
     /// reads it to seed the slot's value. Hash-element LHS only; plain
     /// variable assignments never enter it.
+    ///
+    /// TODO(ref-site-links): the reader holds the write's ref, not its
+    /// node, so the join is by span. It becomes a fact on the ref's own
+    /// site when the builder's ref-index tables (`method_call_refs`,
+    /// `method_call_invocant`, `method_call_args`) move onto `CallSite`.
     slot_write_rhs_span: std::collections::HashMap<Span, SlotWriteSite>,
     /// Assignments where RHS is a function call — resolved in return-type post-pass.
     call_bindings: Vec<CallBinding>,
@@ -702,7 +707,7 @@ struct Builder<'a> {
     /// diagnostics.
     arrow_deref_sites: Vec<crate::model::file_analysis::ArrowDerefSite>,
 
-    /// Span (of the `anonymous_subroutine_expression` node) →
+    /// The `anonymous_subroutine_expression` node →
     /// SymbolId of the synthesized `(anon)` Sub symbol. Populated by
     /// `visit_anonymous_sub`; read by `coderef_return_edge_for` so
     /// the edge for `sub { ... }` literals lands on
@@ -711,7 +716,7 @@ struct Builder<'a> {
     /// sees anon-sub arity arms and substitutes Receiver
     /// placeholders without any per-shape dispatch in the chase
     /// site.
-    anon_sub_symbol_by_span: std::collections::HashMap<Span, SymbolId>,
+    anon_sub_symbols: std::collections::HashMap<crate::cst::NodeId, SymbolId>,
 
     /// Invocant parameter index for the next anonymous sub to be visited.
     /// Set by `visit_function_call` when it detects a Moose/Moo method
