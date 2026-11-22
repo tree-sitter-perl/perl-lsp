@@ -482,6 +482,17 @@ impl Sigil {
     }
 }
 
+/// How an `@_` unpack's variable takes its arguments: an array collects the
+/// rest by place, a hash the rest as pairs, a scalar its one place.
+pub fn unpacked_param_pass(name: &str) -> crate::model::file_analysis::ParamPass {
+    use crate::model::file_analysis::ParamPass;
+    match name.chars().next() {
+        Some(c) if c == Sigil::Array.char() => ParamPass::RestPositional,
+        Some(c) if c == Sigil::Hash.char() => ParamPass::RestNamed,
+        _ => ParamPass::Positional,
+    }
+}
+
 /// `__PACKAGE__` — the compile-time token for the enclosing package. Perl's
 /// own word: a pack mints the class its receiver names, never this token
 /// (`layering_tests::packs_do_not_borrow_perls_current_package_token`).

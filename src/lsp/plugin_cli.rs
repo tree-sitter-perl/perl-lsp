@@ -343,7 +343,7 @@ fn symbol_to_snapshot(s: &Symbol) -> Value {
                 "params": params.iter().map(|p| json!({
                     "name": p.name,
                     "is_invocant": p.is_invocant,
-                    "is_slurpy": p.is_slurpy,
+                    "is_slurpy": p.pass.is_rest(),
                     "default": p.default,
                 })).collect::<Vec<_>>(),
                 "is_method": is_method,
@@ -360,7 +360,7 @@ fn symbol_to_snapshot(s: &Symbol) -> Value {
                 "params": params.iter().map(|p| json!({
                     "name": p.name,
                     "is_invocant": p.is_invocant,
-                    "is_slurpy": p.is_slurpy,
+                    "is_slurpy": p.pass.is_rest(),
                 })).collect::<Vec<_>>(),
                 "display": format!("{:?}", s.presentation.display.unwrap_or_default()),
                 "hide_in_outline": s.presentation.hide_in_outline,

@@ -1434,7 +1434,8 @@ impl Symbol {
 
     /// This callable's declared parameter arity, from whichever source carries
     /// it: the pack-minted `arity` field, else the Perl `SymbolDetail::Sub`
-    /// param list (`is_slurpy` → variadic, a `default` → optional). One
+    /// param list (a rest or a by-name parameter → variadic, a `default` →
+    /// optional; only a parameter a position reaches counts). One
     /// question, both answers — overload ranking asks the symbol, never the
     /// shape (rule #10). `None` for non-callables.
     pub fn param_arity(&self) -> Option<ParamArity> {
@@ -1442,12 +1443,12 @@ impl Symbol {
             return Some(a);
         }
         if let SymbolDetail::Sub { params, .. } = &self.detail {
-            let total = params.iter().filter(|p| !p.is_slurpy && !p.is_invocant).count();
-            let required = params
-                .iter()
-                .filter(|p| !p.is_slurpy && !p.is_invocant && p.default.is_none())
-                .count();
-            let variadic = params.iter().any(|p| p.is_slurpy);
+            // A by-name parameter is not a place in the argument list: its
+            // key and value ride in whatever count the call passes.
+            let placed = |p: &&ParamInfo| p.pass.takes_position() && !p.pass.is_rest() && !p.is_invocant;
+            let total = params.iter().filter(placed).count();
+            let required = params.iter().filter(placed).filter(|p| p.default.is_none()).count();
+            let variadic = params.iter().any(|p| p.pass.is_rest() || p.pass == ParamPass::Named);
             return Some(ParamArity { total, required, variadic });
         }
         None
@@ -1908,7 +1909,10 @@ impl DeclKind {
 pub struct ParamInfo {
     pub name: String,
     pub default: Option<String>,
-    pub is_slurpy: bool,
+    /// How a call's arguments reach this parameter. Minted by the
+    /// extractor from the signature's own syntax (rule #11): a consumer asks
+    /// the mode, never the name's sigil.
+    pub pass: ParamPass,
     /// True when this param is the implicit receiver of the call,
     /// supplied by the caller via `$obj->method(...)` rather than
     /// written in the argument list. Sig help, hover, and outline
@@ -1925,6 +1929,44 @@ pub struct ParamInfo {
     /// value, a plugin-declared signature) — nothing in the source binds it.
     #[serde(default, with = "point_opt_serde")]
     pub binding_site: Option<Point>,
+}
+
+/// How a call's arguments bind to a parameter: by place, by name, or as
+/// the rest of one kind or both. A parameter list is a positional sequence
+/// plus a keyed carrier, and the mode says which of the two a parameter sits
+/// in (`Either` sits in both). See `docs/adr/named-arguments.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum ParamPass {
+    /// Bound by place only: Perl's `$x` in a signature or an `@_` unpack.
+    #[default]
+    Positional,
+    /// Bound by place or by name: a PHP parameter, a plain Python one.
+    Either,
+    /// Bound by name only: Perl's `:$name`, Python's after a bare `*`.
+    Named,
+    /// Collects the positional arguments left over: `@rest`, `*args`.
+    RestPositional,
+    /// Collects the named arguments left over: `%opts`, `**kwargs`.
+    RestNamed,
+    /// Collects every argument left over, both kinds: PHP's `...$args`.
+    Rest,
+}
+
+impl ParamPass {
+    /// Whether the parameter collects what the other parameters leave.
+    pub fn is_rest(self) -> bool {
+        matches!(self, ParamPass::RestPositional | ParamPass::RestNamed | ParamPass::Rest)
+    }
+
+    /// Whether a positional argument can land here.
+    pub fn takes_position(self) -> bool {
+        matches!(self, ParamPass::Positional | ParamPass::Either | ParamPass::RestPositional | ParamPass::Rest)
+    }
+
+    /// Whether a named argument can land here.
+    pub fn takes_name(self) -> bool {
+        matches!(self, ParamPass::Either | ParamPass::Named | ParamPass::RestNamed | ParamPass::Rest)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

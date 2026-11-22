@@ -47,7 +47,10 @@ pub span: Span,
 pub struct EmittedParam {
 pub name: String,
 pub default: Option<String>,
+#[serde(default)]
 pub is_slurpy: bool,
+#[serde(default)]
+pub pass: ParamPass,
 #[serde(default)]
 pub is_invocant: bool,
 }

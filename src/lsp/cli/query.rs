@@ -1514,7 +1514,7 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
                 serde_json::json!({
                     "name": p.name,
                     "is_invocant": p.is_invocant,
-                    "is_slurpy": p.is_slurpy,
+                    "is_slurpy": p.pass.is_rest(),
                     "default": p.default,
                     "inferred_type": inferred,
                 })

@@ -429,7 +429,7 @@ pub(super) fn extract_data_section_params(sub_node: Node, source: &[u8]) -> Vec<
                 params.push(ParamInfo {
                     name: text.to_string(),
                     default: None,
-                    is_slurpy: matches!(p.kind_of(), Kind::Array | Kind::Hash),
+                    pass: super::visit_decl::slurpy_pass(p),
                     is_invocant: false,
                     binding_site: None,
                 });

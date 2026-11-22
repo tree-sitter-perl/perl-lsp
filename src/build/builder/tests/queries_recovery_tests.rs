@@ -910,7 +910,7 @@ fn test_shift_then_list_assign() {
     );
     assert_eq!(sig.params[0].name, "$file");
     assert_eq!(sig.params[1].name, "@opts");
-    assert!(sig.params[1].is_slurpy);
+    assert!(sig.params[1].pass.is_rest());
 
     // Check raw params
     let sub_sym = fa.symbols().iter().find(|s| s.name == "process").unwrap();

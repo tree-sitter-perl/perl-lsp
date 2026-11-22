@@ -406,7 +406,7 @@ impl<'a> Builder<'a> {
                                 params: vec![ParamInfo {
                                     name: "$val".into(),
                                     default: None,
-                                    is_slurpy: false,
+                                    pass: ParamPass::Positional,
                     is_invocant: false,
                     binding_site: None,
                                 }],
@@ -448,7 +448,7 @@ impl<'a> Builder<'a> {
                                 params: vec![ParamInfo {
                                     name: "$val".into(),
                                     default: None,
-                                    is_slurpy: false,
+                                    pass: ParamPass::Positional,
                     is_invocant: false,
                     binding_site: None,
                                 }],
@@ -563,7 +563,7 @@ impl<'a> Builder<'a> {
                             params: vec![ParamInfo {
                                 name: "$val".into(),
                                 default: None,
-                                is_slurpy: false,
+                                pass: ParamPass::Positional,
                     is_invocant: false,
                     binding_site: None,
                             }],

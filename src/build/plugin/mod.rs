@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::file_analysis::{
-    AccessKind, Bridge, HandlerDisplay, HandlerOwner, HashKeyOwner, InferredType, ParamInfo, Span,
+    AccessKind, Bridge, HandlerDisplay, HandlerOwner, HashKeyOwner, InferredType, ParamInfo, ParamPass, Span,
     SymKind, SymbolDetail,
 };
 
@@ -259,7 +259,14 @@ pub struct ImportWord {
 pub struct EmittedParam {
     pub name: String,
     pub default: Option<String>,
+    /// Shorthand for a rest parameter: the name's sigil says which rest
+    /// (`@` the leftover places, `%` the leftover pairs). Wins over `pass`
+    /// only when `pass` names no rest.
+    #[serde(default)]
     pub is_slurpy: bool,
+    /// How a call's arguments reach the parameter (`"Named"`, `"Either"`, …).
+    #[serde(default)]
+    pub pass: ParamPass,
     /// Set on params that the user never types at the call site
     /// (`$self` for Perl methods, `$c` for Mojolicious helpers, …).
     /// Whoever emits the params decides — the core never infers
@@ -270,10 +277,17 @@ pub struct EmittedParam {
 
 impl From<EmittedParam> for ParamInfo {
     fn from(p: EmittedParam) -> Self {
+        let pass = match (p.is_slurpy, p.pass.is_rest()) {
+            (true, false) => match crate::model::conventions::unpacked_param_pass(&p.name) {
+                ParamPass::Positional => ParamPass::RestPositional,
+                rest => rest,
+            },
+            _ => p.pass,
+        };
         ParamInfo {
             name: p.name,
             default: p.default,
-            is_slurpy: p.is_slurpy,
+            pass,
             is_invocant: p.is_invocant,
             // A plugin-declared signature: nothing in the source binds it.
             binding_site: None,
@@ -2103,6 +2117,7 @@ mod tests {
             name: "$val".into(),
             default: None,
             is_slurpy: false,
+            pass: ParamPass::Positional,
             is_invocant: false,
         };
         let pi: ParamInfo = ep.into();

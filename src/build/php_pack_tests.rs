@@ -5572,7 +5572,7 @@ function load(string $p) { $p = realpath($p); return file($p); }
     let token = at(src, "$p)", 1);
     let decl = fa.symbols().iter().find(|s| s.kind == SymKind::Variable && s.selection_span.start == token);
     assert!(decl.is_some(), "the parameter's declaration sits at its token");
-    let param = ParamInfo { name: "p".into(), default: None, is_slurpy: false, is_invocant: false, binding_site: Some(token) };
+    let param = ParamInfo { name: "p".into(), default: None, pass: crate::model::file_analysis::ParamPass::Positional, is_invocant: false, binding_site: Some(token) };
     assert_eq!(fa.param_declared_type(&param, None), Some(T::String));
     assert_ne!(fa.inferred_type_via_bag("p", at(src, "return", 0)), Some(T::String), "the body holds the rebinding");
 }

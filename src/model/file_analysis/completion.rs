@@ -508,7 +508,7 @@ impl FileAnalysis {
             };
             let hashish = params
                 .iter()
-                .find(|p| p.is_slurpy && p.name.starts_with('%'))
+                .find(|p| p.pass == ParamPass::RestNamed)
                 .or_else(|| params
                     .last()
                     .filter(|p| !p.is_invocant && p.name.starts_with('$')));
@@ -719,7 +719,7 @@ impl FileAnalysis {
                 //     worked; every "options-hashref" sub missed out.
                 let hashish = params
                     .iter()
-                    .find(|p| p.is_slurpy && p.name.starts_with('%'))
+                    .find(|p| p.pass == ParamPass::RestNamed)
                     .or_else(|| params
                         .last()
                         .filter(|p| !p.is_invocant && p.name.starts_with('$')));
@@ -762,7 +762,7 @@ impl FileAnalysis {
             }
             ResolvedSub::CrossFile { hash_keys, params, .. } => {
                 // Check if any param is slurpy %hash
-                let has_slurpy = params.iter().any(|p| p.is_slurpy && p.name.starts_with('%'));
+                let has_slurpy = params.iter().any(|p| p.pass == ParamPass::RestNamed);
                 if !has_slurpy || hash_keys.is_empty() {
                     return Vec::new();
                 }

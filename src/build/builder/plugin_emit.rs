@@ -781,7 +781,8 @@ impl<'a> Builder<'a> {
             .map(|p| plugin::EmittedParam {
                 name: p.name,
                 default: p.default,
-                is_slurpy: p.is_slurpy,
+                is_slurpy: false,
+                pass: p.pass,
                 is_invocant: false,
             })
             .collect()

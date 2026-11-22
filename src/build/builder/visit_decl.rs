@@ -1029,8 +1029,8 @@ impl<'a> Builder<'a> {
                             let at_params: Vec<ParamInfo> = self.collect_vars_from_decl(left)
                                 .into_iter()
                                 .map(|(name, span)| {
-                                    let is_slurpy = name.starts_with('@') || name.starts_with('%');
-                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false, binding_site: Some(span.start) }
+                                    let pass = crate::model::conventions::unpacked_param_pass(&name);
+                                    ParamInfo { name, default: None, pass, is_invocant: false, binding_site: Some(span.start) }
                                 })
                                 .collect();
                             // Combine any preceding shift params with @_ params
@@ -1057,8 +1057,8 @@ impl<'a> Builder<'a> {
                             let list_params: Vec<ParamInfo> = self.collect_vars_from_decl(left)
                                 .into_iter()
                                 .map(|(name, span)| {
-                                    let is_slurpy = name.starts_with('@') || name.starts_with('%');
-                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false, binding_site: Some(span.start) }
+                                    let pass = crate::model::conventions::unpacked_param_pass(&name);
+                                    ParamInfo { name, default: None, pass, is_invocant: false, binding_site: Some(span.start) }
                                 })
                                 .collect();
                             if !list_params.is_empty() {
@@ -1078,7 +1078,7 @@ impl<'a> Builder<'a> {
                         shift_params.push(ParamInfo {
                             name: var_name,
                             default,
-                            is_slurpy: false,
+                            pass: ParamPass::Positional,
                             is_invocant: false,
                             binding_site,
                         });
@@ -1090,7 +1090,7 @@ impl<'a> Builder<'a> {
                         shift_params.push(ParamInfo {
                             name: var_name,
                             default: None,
-                            is_slurpy: false,
+                            pass: ParamPass::Positional,
                             is_invocant: false,
                             binding_site,
                         });
@@ -1185,7 +1185,7 @@ impl<'a> Builder<'a> {
                 match param.kind_of() {
                     Kind::MandatoryParameter => {
                         if let Some(var) = self.first_var_child(param) {
-                            params.push(ParamInfo { name: var, default: None, is_slurpy: false, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { name: var, default: None, pass: ParamPass::Positional, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     Kind::OptionalParameter => {
@@ -1198,18 +1198,26 @@ impl<'a> Builder<'a> {
                             .and_then(|d| d.utf8_text(self.source).ok())
                             .map(|s| s.to_string());
                         if let Some(name) = var {
-                            params.push(ParamInfo { name, default, is_slurpy: false, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { name, default, pass: ParamPass::Positional, is_invocant: false, binding_site: Some(param.start_position()) });
+                        }
+                    }
+                    Kind::NamedParameter => {
+                        if let Some(name) = self.first_var_child(param) {
+                            let default = param.field(Field::Default)
+                                .and_then(|d| d.utf8_text(self.source).ok())
+                                .map(|s| s.to_string());
+                            params.push(ParamInfo { name, default, pass: ParamPass::Named, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     Kind::SlurpyParameter => {
                         if let Some(var) = self.first_var_child(param) {
-                            params.push(ParamInfo { name: var, default: None, is_slurpy: true, is_invocant: false, binding_site: Some(param.start_position()) });
+                            let pass = slurpy_pass(param);
+                            params.push(ParamInfo { name: var, default: None, pass, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     Kind::Scalar | Kind::Array | Kind::Hash => {
                         if let Ok(text) = param.utf8_text(self.source) {
-                            let is_slurpy = matches!(param.kind_of(), Kind::Array | Kind::Hash);
-                            params.push(ParamInfo { name: text.to_string(), default: None, is_slurpy, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { name: text.to_string(), default: None, pass: slurpy_pass(param), is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     _ => {}
@@ -1617,7 +1625,7 @@ impl<'a> Builder<'a> {
                             params: vec![ParamInfo {
                                 name: format!("${}", bare_name),
                                 default: None,
-                                is_slurpy: false,
+                                pass: ParamPass::Positional,
                                 is_invocant: false,
                                 binding_site: None,
                             }],
@@ -1811,5 +1819,21 @@ impl<'a> Builder<'a> {
                 kind: FoldKind::Region,
             });
         }
+    }
+}
+
+/// The rest a signature's array or hash collects: an array the leftover
+/// places, a hash the leftover pairs. A scalar takes its one place.
+pub(super) fn slurpy_pass(param: Node<'_>) -> ParamPass {
+    let var = if param.is(Kind::SlurpyParameter) {
+        param.elements().find(|c| matches!(c.kind_of(), Kind::Array | Kind::Hash))
+    } else {
+        Some(param)
+    };
+    match var.map(|v| v.kind_of()) {
+        Some(Kind::Array) => ParamPass::RestPositional,
+        Some(Kind::Hash) => ParamPass::RestNamed,
+        _ if param.is(Kind::SlurpyParameter) => ParamPass::RestPositional,
+        _ => ParamPass::Positional,
     }
 }
