@@ -1020,6 +1020,8 @@ fn inject_member_blocks(
                 flags: Default::default(),
                 member_space: None,
                 never_returns: false,
+                inner: None,
+                enum_of: None,
                 body: None,
             });
             // The role member states the SAME declared bound an expanded field
@@ -1177,7 +1179,6 @@ fn remap_spans(
         return_sites,
         class_returns,
         receivers,
-        param_sigs,
         // Populated later (enrich_skeleton) already in original coords — no remap.
         macro_body_member_reads: _,
         language: _,
@@ -1217,18 +1218,14 @@ fn remap_spans(
             flags: _,
             member_space: _,
             never_returns: _,
+            inner: _,
+            enum_of: _,
             body: _,
         } = s;
         *start = r(*start);
         *end = r(*end);
         *name_start = r(*name_start);
         *name_end = r(*name_end);
-    }
-    // Parameter-list spans feed the def-arity association (`into_file_analysis`,
-    // which runs after this remap) — they must speak original coords like the
-    // symbol spans they're matched against.
-    for (span, _) in param_sigs.iter_mut() {
-        *span = rspan(*span);
     }
     for rf in refs.iter_mut() {
         let crate::build::query_extract::SkelRef {

@@ -240,6 +240,8 @@ struct Minted {
     names_symbol: bool,
     /// The name token of a kept `@def.assigned`: a read on it is the write.
     assigned: bool,
+    /// The scope this event opened.
+    opens: Option<ScopeId>,
     /// The `refs` row minted on this event.
     ref_row: Option<usize>,
     /// On a read's name token: the `var_reads` row it names.
@@ -681,7 +683,7 @@ pub fn extract_in(
         st.cur_scope = st.scope_stack.last().unwrap().1;
         st.package = st.context_stack.last().map(|(.., p)| p.clone());
         match family(e.cap) {
-            Family::Scopes => scopes::handle(&mut st, e),
+            Family::Scopes => scopes::handle(&mut st, ix, e),
             Family::Defs => defs::handle(&mut st, ix, e),
             Family::Refs => refs::handle(&mut st, ix, e),
             // Read through the match (`@member.recv`, `@member.op`) or the

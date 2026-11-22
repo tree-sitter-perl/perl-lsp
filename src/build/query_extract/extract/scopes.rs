@@ -86,7 +86,7 @@ pub(super) fn class_scope_rows(st: &ExtractState) -> Vec<(String, ScopeId)> {
     rows
 }
 
-pub(super) fn handle(st: &mut ExtractState, e: &Event) {
+pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     let pack = st.pack;
     match e.cap {
         // `@scope` = a plain lexical Block; `@scope.sub` = sub-body
@@ -98,6 +98,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         // of names it (`SkelSymbol::body`).
         Capture::Scope(scope_cap) => {
             let id = ScopeId(st.out.scopes.len() as u32);
+            st.minted[ix].opens = Some(id);
             // A header is code of the scope around its def's own (the file,
             // for a header the file scope holds).
             let around = match scope_cap {

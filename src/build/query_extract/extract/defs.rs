@@ -218,6 +218,8 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         }),
         never_returns: on_name.iter().any(|t| t.cap == Capture::EndsNever),
         body: None,
+        inner: None,
+        enum_of: None,
     };
     match through {
         Some(receiver) => st.out.slot_writes.push(SlotWrite { symbol, receiver }),

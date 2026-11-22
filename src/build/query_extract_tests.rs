@@ -1043,6 +1043,8 @@ fn sksym(src: &str, kind: DefCap, name: &str, occ: usize, package: Option<&str>)
         member_space: None,
         flags: Default::default(),
         never_returns: false,
+        inner: None,
+        enum_of: None,
         body: None,
     }
 }
@@ -1208,15 +1210,14 @@ fn cpp_param_arity_reads_each_parameter() {
     let skel = cpp_skel(
         "void a(int x, int y);\nvoid b(int x, /* c */ int y = 2, ...);\ntemplate<class... T> void c(T... xs);\nvoid d(void (*cb)(int, int));\n",
     );
-    let arity = |row: usize| {
-        // the row's outermost list: the callable's own, not a callback's
-        let (_, a) = skel.param_sigs.iter().filter(|(span, _)| span.start.row == row).min_by_key(|(span, _)| span.start.column).unwrap();
+    let arity = |name: &str| {
+        let a = skel.symbols.iter().find(|s| s.name == name).and_then(|s| s.arity).unwrap();
         (a.total, a.required, a.variadic)
     };
-    assert_eq!(arity(0), (2, 2, false));
-    assert_eq!(arity(1), (2, 1, true), "a comment is no parameter; `...` makes it variadic");
-    assert_eq!(arity(2), (0, 0, true), "a template pack takes any number, counting none");
-    assert_eq!(arity(3), (1, 1, false), "the callback's own list is a separate signature");
+    assert_eq!(arity("a"), (2, 2, false));
+    assert_eq!(arity("b"), (2, 1, true), "a comment is no parameter; `...` makes it variadic");
+    assert_eq!(arity("c"), (0, 0, true), "a template pack takes any number, counting none");
+    assert_eq!(arity("d"), (1, 1, false), "the callback's own list is a separate signature");
 }
 
 #[test]

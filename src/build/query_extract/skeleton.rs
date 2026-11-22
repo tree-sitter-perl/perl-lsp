@@ -63,6 +63,12 @@ pub struct SkelSymbol {
     /// The body scope a callable's def opens on its own node (`@scope.sub`
     /// beside `@def.sub` / `@def.method`): the scope this def owns.
     pub body: Option<crate::model::file_analysis::ScopeId>,
+    /// The first scope a class's def opens inside its own node: the body
+    /// of a struct a typedef names after it.
+    pub inner: Option<crate::model::file_analysis::ScopeId>,
+    /// The enum an enumerator is written in: the nearest class def around
+    /// it.
+    pub enum_of: Option<String>,
 }
 
 impl crate::model::file_analysis::ScopeClasses for Vec<SkelSymbol> {
@@ -304,9 +310,6 @@ pub struct SkeletonAnalysis {
     /// method's class, once the scopes know their callables. An undeclared
     /// receiver (`this`) is a `receiver_sites` entry.
     pub receivers: Vec<(crate::model::file_analysis::ScopeId, Span, ExprId)>,
-    /// Callable parameter arities keyed by parameter_list span (`@arity.sig`).
-    /// Associated to def symbols by span containment in `into_file_analysis`.
-    pub param_sigs: Vec<(crate::model::file_analysis::Span, crate::model::file_analysis::ParamArity)>,
     /// Writes through a receiver (`obj.x = …`, `@def.slot`), undecided: a
     /// slot each, if `declare_slots` finds its owner and no declaration of
     /// the name there.
@@ -723,100 +726,9 @@ impl SkeletonAnalysis {
         let slot_writes = std::mem::take(&mut self.slot_writes);
         let member_writes = std::mem::take(&mut self.member_writes);
         let class_scopes = std::mem::take(&mut self.class_scopes);
-        // A NAMED typedef `typedef struct N {...} N;` matches both the
-        // struct_specifier and the type_definition → two `class N` AT THE
-        // SAME SPAN (one node, two capture patterns — e.g. the bodied
-        // pattern and the inheritance pattern both fire for `class Circle :
-        // public Shape {...}`). Key on (name, name span) rather than name
-        // alone: two class_specifiers that happen to share a
-        // bare name at DIFFERENT spans (forward decl + definition, same
-        // short name in different scopes) are genuinely distinct symbols and
-        // must both survive — only an exact same-span re-capture is the
-        // duplicate-emission bug. "class" and "union" are one type-kind
-        // family (a bodied named union matches both the generic class
-        // pattern and the union-tagged one); the union-tagged row wins at a
-        // shared span so the "union" attribute survives.
-        {
-            type ClassKey = (String, (usize, usize), (usize, usize));
-            let key_of = |s: &SkelSymbol| -> ClassKey {
-                (
-                    s.name.clone(),
-                    (s.name_start.row, s.name_start.column),
-                    (s.name_end.row, s.name_end.column),
-                )
-            };
-            let union_keys: std::collections::HashSet<ClassKey> = self
-                .symbols
-                .iter()
-                .filter(|s| s.kind == DefCap::Union)
-                .map(key_of)
-                .collect();
-            let mut seen = std::collections::HashSet::new();
-            self.symbols.retain(|s| match s.kind {
-                DefCap::Class => !union_keys.contains(&key_of(s)) && seen.insert(key_of(s)),
-                DefCap::Union => seen.insert(key_of(s)),
-                _ => true,
-            });
-        }
-        // A free function matches both the rettype-carrying and the rettype-free
-        // `@def.sub` pattern (a type-less constructor/K&R def only the latter),
-        // and a trailing-return function/method matches both its leading-`auto`
-        // pattern and the trailing sibling — one node, two SkelSymbols. Keep
-        // the one WITH a return type; dedup by the name span (same node →
-        // identical span). Per kind, so a sub and a method never cross-dedup.
-        {
-            use std::collections::HashMap;
-            let dedup = |k: DefCap| matches!(k, DefCap::Sub | DefCap::Method);
-            type Key = (DefCap, usize, usize, usize, usize);
-            let key_of = |s: &SkelSymbol| -> Key {
-                (s.kind, s.name_start.row, s.name_start.column, s.name_end.row, s.name_end.column)
-            };
-            let mut resolved: HashMap<Key, bool> = HashMap::new();
-            for s in &self.symbols {
-                if dedup(s.kind) {
-                    let has = s.return_type.is_some();
-                    resolved.entry(key_of(s)).and_modify(|v| *v |= has).or_insert(has);
-                }
-            }
-            let mut kept: std::collections::HashSet<Key> = Default::default();
-            self.symbols.retain(|s| {
-                if !dedup(s.kind) {
-                    return true;
-                }
-                let key = key_of(s);
-                // Keep the rettype-bearing copy; if none has one, keep the first.
-                if resolved.get(&key) == Some(&true) && s.return_type.is_none() {
-                    return false;
-                }
-                kept.insert(key)
-            });
-        }
         let mut bag = crate::model::witnesses::WitnessBag::default();
         for w in std::mem::take(&mut self.witnesses) {
             bag.push(w);
-        }
-        // Associate each callable def with its parameter arity: the def's OWN
-        // parameter list is the one span-contained in the def and starting
-        // earliest at/after the name token (a nested function-pointer decl or
-        // lambda param list starts later). `@arity.sig` fires a separate match
-        // from the def name, so this join is by span, not match_id.
-        {
-            let param_sigs = std::mem::take(&mut self.param_sigs);
-            let after = |a: Point, b: Point| (a.row, a.column) >= (b.row, b.column);
-            for s in self.symbols.iter_mut() {
-                if !matches!(s.kind, DefCap::Sub | DefCap::Method) {
-                    continue;
-                }
-                s.arity = param_sigs
-                    .iter()
-                    .filter(|(sp, _)| {
-                        after(sp.start, s.name_end)
-                            && after(s.end, sp.end)
-                            && after(sp.start, s.start)
-                    })
-                    .min_by_key(|(sp, _)| (sp.start.row, sp.start.column))
-                    .map(|(_, ar)| *ar);
-            }
         }
         let mut symbols: Vec<Symbol> = self
             .symbols
@@ -845,19 +757,9 @@ impl SkeletonAnalysis {
         // via @context.class are skipped).
         let class_bodies: Vec<(crate::model::file_analysis::ScopeId, String)> = symbols
             .iter()
-            .filter(|s| matches!(s.kind, SymKind::Class))
-            .filter_map(|c| {
-                let cs = c.span;
-                self.scopes
-                    .iter()
-                    .find(|s| {
-                        s.span != cs
-                            && (s.span.start.row, s.span.start.column)
-                                >= (cs.start.row, cs.start.column)
-                            && (s.span.end.row, s.span.end.column) <= (cs.end.row, cs.end.column)
-                    })
-                    .map(|s| (s.id, c.name.clone()))
-            })
+            .zip(&self.symbols)
+            .filter(|(c, _)| matches!(c.kind, SymKind::Class))
+            .filter_map(|(c, skel)| Some((skel.inner?, c.name.clone())))
             .collect();
         for (body, cname) in class_bodies {
             for s in &mut symbols {
@@ -870,35 +772,18 @@ impl SkeletonAnalysis {
         // Enum members carry their parent enum as BOTH container (package)
         // and type: `enum Color { RED }` → RED's package + type is `Color`,
         // so hover renders `RED: Color` the same `name: type` way a struct
-        // field does. The enum is the smallest Class whose span contains the
-        // enumerator (span-, not scope-contained: C enumerators leak into the
-        // enclosing scope, so they stay there — the query mints no @scope for
-        // the enum body — and a bare `x = RED` still resolves).
+        // field does. The enum is the class def the enumerator is written in
+        // (`SkelSymbol::enum_of`), not its scope: C enumerators leak into
+        // the enclosing scope, so they stay there — the query mints no
+        // @scope for the enum body — and a bare `x = RED` still resolves.
         {
             use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
-            let class_spans: Vec<(Span, String)> = symbols
-                .iter()
-                .filter(|s| matches!(s.kind, SymKind::Class))
-                .map(|s| (s.span, s.name.clone()))
-                .collect();
-            let contains = |o: &Span, i: &Span| {
-                (o.start.row, o.start.column) <= (i.start.row, i.start.column)
-                    && (i.end.row, i.end.column) <= (o.end.row, o.end.column)
-            };
             for idx in 0..symbols.len() {
                 if self.symbols[idx].kind != DefCap::Enumerator {
                     continue;
                 }
                 let esp = symbols[idx].span;
-                // Innermost containing Class = the parent enum (latest start).
-                let Some(enum_name) = class_spans
-                    .iter()
-                    .filter(|(cs, _)| contains(cs, &esp))
-                    .max_by_key(|(cs, _)| (cs.start.row, cs.start.column))
-                    .map(|(_, n)| n.clone())
-                else {
-                    continue;
-                };
+                let Some(enum_name) = self.symbols[idx].enum_of.clone() else { continue };
                 // The enum is the tightest container, tighter than any
                 // enclosing namespace the sticky context may have tagged.
                 symbols[idx].package = Some(enum_name.clone());

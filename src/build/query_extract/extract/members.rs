@@ -66,15 +66,42 @@ fn arity_of(ad: &Adorned, sig: &Event) -> ParamArity {
     arity
 }
 
-/// Callable parameter arities by parameter_list span, in match order;
-/// associated to the def symbol by span containment in
-/// `into_file_analysis` (`@arity.sig` fires a separate match from the def
-/// name).
+/// What each kept def holds inside its own node, read off the tree where
+/// a separate match captured it:
+///
+/// - a callable's arity is its own parameter list's (`@arity.sig`): the
+///   first one inside the def after the name token, a nested
+///   function-pointer declarator's or a lambda's coming later;
+/// - a class's inner scope is the first scope opened inside its def;
+/// - an enumerator's enum is the nearest class def around it. Its body
+///   opens no scope, so the enumerators stay in the scope around the enum.
 pub(super) fn finish(st: &mut ExtractState) {
+    use crate::model::file_analysis::SymKind;
     let ad = st.adorned;
-    st.out.param_sigs = ad
-        .by_match()
-        .filter(|e| e.cap == Capture::Arity(ArityCap::Sig))
-        .map(|sig| (sig.span(), arity_of(ad, sig)))
-        .collect();
+    let before = |a: Point, b: Point| (a.row, a.column) < (b.row, b.column);
+    for (ix, e) in ad.events().iter().enumerate() {
+        let Some(row) = st.minted[ix].def_row else { continue };
+        let kind = st.out.symbols[row].kind;
+        match kind.sym_kind() {
+            _ if matches!(kind, DefCap::Sub | DefCap::Method) => {
+                let name_end = st.out.symbols[row].name_end;
+                st.out.symbols[row].arity = ad
+                    .within(e)
+                    .map(|i| &ad.events()[i])
+                    .find(|t| t.cap == Capture::Arity(ArityCap::Sig) && !before(t.start, name_end))
+                    .map(|sig| arity_of(ad, sig));
+            }
+            SymKind::Class => {
+                st.out.symbols[row].inner =
+                    ad.within(e).filter(|&i| ad.events()[i].site != e.site).find_map(|i| st.minted[i].opens);
+            }
+            SymKind::Enumerator => {
+                st.out.symbols[row].enum_of = ad.around(e).find_map(|i| {
+                    let class = &st.out.symbols[st.minted[i].def_row?];
+                    (class.kind.sym_kind() == SymKind::Class).then(|| class.name.clone())
+                });
+            }
+            _ => {}
+        }
+    }
 }
