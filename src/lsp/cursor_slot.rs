@@ -79,6 +79,11 @@ pub enum Slot {
     /// (`Slot::sigil` decodes it — the fact is data on the slot, not a
     /// shape a consumer re-derives from the tree).
     Identifier { prefix: String },
+    /// `f(ti|` / `f(a: 1, |` — a bare word written as a call's argument,
+    /// which may be a value OR the label of a named argument: the
+    /// identifier universe plus the callee's named inputs. `prefix` is as
+    /// in `Identifier`.
+    Label { prefix: String, site: crate::build::query_extract::LabelSite },
     /// `use Foo qw(|` — the named module's import surface.
     Import { module: Option<String> },
     /// `use |` (typing the module name) or `Foo::|` (a qualified-path
@@ -130,6 +135,8 @@ pub enum DetectorArm {
     QualifiedPath,
     DomainCompare,
     CallArg,
+    /// A pack call's argument written as a bare word (`Slot::Label`).
+    CallLabel,
     General,
 }
 
@@ -275,6 +282,14 @@ pub fn detect_slot(
     // dependency map may place unparsed, so it completes from the listing.
     if let Some(prefix) = sp.as_ref().and_then(|sp| crate::build::cursor_sentinel::identity_prefix(sp, &lang_pack)) {
         return DetectedSlot { slot: Slot::ModulePath { prefix }, arm: DetectorArm::UseModule };
+    }
+    // `f(ti|` — a bare word in a call's arguments may be a label; the
+    // identifier universe still answers, the callee's named inputs join it.
+    if let Some(site) = sp.as_ref().and_then(|sp| crate::build::cursor_sentinel::label_site(sp, &lang_pack)) {
+        return DetectedSlot {
+            slot: Slot::Label { prefix: identifier_prefix(source, cursor).to_string(), site },
+            arm: DetectorArm::CallLabel,
+        };
     }
     // `field == |` — the equality's field operand carries an enum DOMAIN.
     // The slot hands that expected type to completion so the domain's

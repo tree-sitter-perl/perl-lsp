@@ -5787,3 +5787,49 @@ fn a_named_argument_fills_no_place() {
     let call = fa.refs().iter().find(|r| r.target_name == "f" && r.span.start.row == 2).unwrap();
     assert_eq!(call.arg_count, Some(1), "one place");
 }
+
+/// A bare word written as a call's argument may be a label: completion
+/// offers the callee's parameters as `name: ` (the ones not yet passed),
+/// alongside the names in scope. A value after a label is no label.
+#[cfg(feature = "php")]
+#[test]
+fn a_call_argument_completes_the_callees_labels() {
+    let labels = |src: &str| -> Vec<(String, Option<String>)> {
+        completion_items(src)
+            .into_iter()
+            .filter(|i| i.label.ends_with(':'))
+            .map(|i| (i.label, i.insert_text))
+            .collect()
+    };
+    let decl = "<?php\nfunction connect(string $host, int $timeout = 30, bool $retry = false) {}\n";
+    let at = |call: &str| format!("{}{}", decl, call);
+    assert_eq!(
+        labels(&at("connect(ti|);\n")),
+        vec![
+            ("host:".to_string(), Some("host: ".to_string())),
+            ("retry:".to_string(), Some("retry: ".to_string())),
+            ("timeout:".to_string(), Some("timeout: ".to_string())),
+        ],
+    );
+    let passed = labels(&at("connect(host: 'h', |);\n"));
+    assert_eq!(passed.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>(), ["retry:", "timeout:"]);
+    // The names in scope still answer the same word.
+    assert!(completion_items(&at("connect(|);\n")).iter().any(|i| i.label == "connect"));
+    assert!(labels(&at("connect(timeout: |);\n")).is_empty());
+    assert!(labels(&at("connect($x + |);\n")).is_empty());
+    // A method's labels, through the receiver's class.
+    let method = "<?php\nclass Db { function open(string $dsn, int $timeout = 0) {} }\n$db = new Db();\n$db->open(|);\n";
+    assert_eq!(labels(method).iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>(), ["dsn:", "timeout:"]);
+}
+
+/// A construction's labels are its constructor's parameters, promoted
+/// ones included, in this file or another.
+#[cfg(feature = "php")]
+#[test]
+fn a_construction_completes_its_constructors_labels() {
+    let labels = |src: &str| -> Vec<String> {
+        completion_items(src).into_iter().map(|i| i.label).filter(|l| l.ends_with(':')).collect()
+    };
+    let src = "<?php\nclass Point { function __construct(public int $x, private int $y = 0) {} }\n$p = new Point(y: 1, |);\n";
+    assert_eq!(labels(src), ["x:"]);
+}

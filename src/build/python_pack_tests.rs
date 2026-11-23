@@ -2508,3 +2508,59 @@ fn a_def_states_how_each_parameter_is_reached() {
         ]
     );
 }
+
+/// A bare word written as a call's argument may be a label: completion
+/// offers the callee's parameters as `name=` (the ones not yet passed and
+/// reachable by name), in its own file and through an import.
+#[cfg(feature = "python")]
+#[test]
+fn a_call_argument_completes_the_callees_labels() {
+    let db = "def connect(host, /, timeout=30, *, retry=False, **opts):\n    pass\n";
+    let app = "from pkg.db import connect\n\ndef local(name, size=1):\n    pass\n\nlocal(|)\nconnect(timeout=1, |)\n";
+    let at = app.find('|').unwrap();
+    let app_src = format!("{}{}", &app[..at], &app[at + 1..]);
+    let second = app_src.rfind(", ").unwrap() + 2;
+    let (t, idx) = indexed("pylabels", &[("pkg/__init__.py", ""), ("pkg/db.py", db), ("pkg/app.py", &app_src)]);
+    let path = t.0.join("pkg/app.py");
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_python::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(&app_src, None).unwrap();
+    let store = crate::index::open_docs::OpenDocs::new();
+    let canon = crate::util::canonical_path::CanonicalPath::resolve(path.clone());
+    let point_of = |byte: usize| {
+        let row = app_src[..byte].matches('\n').count();
+        Point::new(row, byte - app_src[..byte].rfind('\n').map_or(0, |n| n + 1))
+    };
+    let labels = |byte: usize| -> Vec<(String, Option<String>)> {
+        let (items, _) =
+            crate::lsp::backend::pack_completion(&store, &fa, &app_src, &tree, point_of(byte), "python", Some(&canon), &idx);
+        items.into_iter().filter(|i| i.label.ends_with('=')).map(|i| (i.label, i.insert_text)).collect()
+    };
+    assert_eq!(
+        labels(at),
+        vec![("name=".to_string(), Some("name=".to_string())), ("size=".to_string(), Some("size=".to_string()))],
+    );
+    // `host` is positional-only and `timeout` is passed; `**opts` names no
+    // key of its own.
+    assert_eq!(labels(second).into_iter().map(|(l, _)| l).collect::<Vec<_>>(), ["retry="]);
+}
+
+/// Calling a class constructs it: its labels are its `__init__`'s
+/// parameters after `self`.
+#[cfg(feature = "python")]
+#[test]
+fn calling_a_class_completes_its_init_labels() {
+    let src = "class Point:\n    def __init__(self, x, y=0):\n        pass\n\nPoint()\n";
+    let (t, idx) = indexed("pyctorlabels", &[("pkg/__init__.py", ""), ("pkg/m.py", src)]);
+    let path = t.0.join("pkg/m.py");
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_python::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(src, None).unwrap();
+    let store = crate::index::open_docs::OpenDocs::new();
+    let canon = crate::util::canonical_path::CanonicalPath::resolve(path.clone());
+    let (items, _) = crate::lsp::backend::pack_completion(&store, &fa, src, &tree, Point::new(4, 6), "python", Some(&canon), &idx);
+    let labels: Vec<String> = items.into_iter().map(|i| i.label).filter(|l| l.ends_with('=')).collect();
+    assert_eq!(labels, ["x=", "y="]);
+}

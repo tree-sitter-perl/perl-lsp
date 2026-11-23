@@ -311,8 +311,8 @@
 ((identifier) @expr.read.var
  (#not-has-parent? @expr.read.var attribute keyword_argument))
 (keyword_argument value: (identifier) @expr.read.var)
-; A keyword argument's name is a key the callee takes.
-(keyword_argument name: (identifier) @arity.label)
+; A keyword argument's name is a key the callee takes, written `a=`.
+((keyword_argument name: (identifier) @arity.label) (#set! label.written "="))
 (attribute object: (identifier) @expr.read.var)
 
 ; Parentheses hold the value they wrap.

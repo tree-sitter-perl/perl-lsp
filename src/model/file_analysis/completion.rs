@@ -672,6 +672,29 @@ impl FileAnalysis {
         candidates
     }
 
+    /// The labels a call to `callee` may still pass: each parameter it
+    /// takes by name (`ParamInfo::label`), less the `used` ones, each
+    /// followed by `sep` as the language writes it.
+    pub fn complete_call_labels(callee: &Symbol, used: &[String], sep: &str) -> Vec<CompletionCandidate> {
+        let SymbolDetail::Sub { params, .. } = &callee.detail else { return Vec::new() };
+        params
+            .iter()
+            .filter_map(ParamInfo::label)
+            .filter(|k| !used.iter().any(|u| u == k))
+            .map(|k| CompletionCandidate {
+                label: format!("{}{}", k, sep.trim_end()),
+                kind: SymKind::Variable,
+                is_static: false,
+                detail: Some(format!("{}({}{}…)", callee.name, k, sep)),
+                insert_text: Some(format!("{}{}", k, sep)),
+                sort_priority: PRIORITY_LOCAL,
+                additional_edits: vec![],
+                import_fact: None,
+                display_override: None,
+            })
+            .collect()
+    }
+
     /// Complete keyval args at a call site.
     /// Returns `key =>` completions for unused keys.
     pub fn complete_keyval_args(

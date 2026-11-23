@@ -1951,6 +1951,20 @@ pub struct ParamInfo {
     pub binding_site: Option<Point>,
 }
 
+impl ParamInfo {
+    /// The name a call may write this parameter's argument under
+    /// (`f(name: …)`): its key, where it takes one argument by name. A
+    /// collecting parameter (`**kw`) takes the names no parameter does,
+    /// so it has no label of its own, and the invocant is never written.
+    pub fn label(&self) -> Option<&str> {
+        if self.pass.takes_name() && !self.pass.is_rest() && !self.is_invocant {
+            self.key.as_deref()
+        } else {
+            None
+        }
+    }
+}
+
 /// How a call's arguments bind to a parameter: by place, by name, or as
 /// the rest of one kind or both. A parameter list is a positional sequence
 /// plus a keyed carrier, and the mode says which of the two a parameter sits

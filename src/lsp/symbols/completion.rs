@@ -142,7 +142,11 @@ pub(crate) fn finish_completion(
     live_prefix_gated_sources: bool,
 ) -> (Vec<CompletionItem>, bool) {
     let typed_prefix = match slot {
-        crate::lsp::cursor_slot::Slot::Identifier { prefix } if !sigil_active => prefix.as_str(),
+        crate::lsp::cursor_slot::Slot::Identifier { prefix } | crate::lsp::cursor_slot::Slot::Label { prefix, .. }
+            if !sigil_active =>
+        {
+            prefix.as_str()
+        }
         _ => "",
     };
     let capped = cap_completion_items(&mut items, typed_prefix);
@@ -627,8 +631,9 @@ fn completion_items_native(
         }
         // Perl's slot detector never produces these — ArgPosition is
         // `detect_call_slot`'s question (sig-help's), TypePosition has no
-        // Perl detector at all.
-        Slot::TypePosition { .. } | Slot::ArgPosition { .. } => Vec::new(),
+        // Perl detector at all, and Label is the pack sentinel's (Perl's
+        // labels ride the Identifier arm's call context above).
+        Slot::TypePosition { .. } | Slot::ArgPosition { .. } | Slot::Label { .. } => Vec::new(),
     });
 
     // Type-constrained ranking: when the cursor sits at a call arg whose

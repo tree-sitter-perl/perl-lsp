@@ -627,7 +627,7 @@
 ; A call's value is an Invoke of its callee on its arguments, and the
 ; argument list rides the callee's match. `...$xs` passes any number of
 ; values. A named argument (`f(a: 1)`) is one more argument in its written
-; place, and its name is a key the callee takes.
+; place, and its name is a key the callee takes, written `a: `.
 (function_call_expression
   function: (name) @ref.call
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
@@ -637,7 +637,7 @@
   function: (qualified_name (name) @ref.call) @ref.spelled
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
 (arguments (argument (variadic_unpacking)) @arity.spread)
-(argument name: (name) @arity.label)
+((argument name: (name) @arity.label) (#set! label.written ": "))
 
 ; ---- constants ----
 ; A name, bare or qualified, where a value is read is a constant: it

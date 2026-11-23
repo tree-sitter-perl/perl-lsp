@@ -560,6 +560,9 @@ spelled! {
         /// return, by identity: the language's own class, never a
         /// spelling the file's imports resolve.
         ReturnClass = "return.class",
+        /// What follows a call argument's label as written (`: `, `=`), set
+        /// on the `@arity.label` pattern: what label completion writes.
+        LabelWritten = "label.written",
     }
 }
 

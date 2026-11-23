@@ -35,6 +35,9 @@ use tree_sitter::{Language, Point, Query, QueryCursor, StreamingIterator, Tree};
 pub(crate) struct CompiledPack {
     pub(crate) query: Query,
     pub(crate) captures: Vec<Option<Capture>>,
+    /// What follows a label a call passes an argument under
+    /// (`#set! label.written`): what label completion writes.
+    pub(crate) label_written: Option<String>,
 }
 
 /// Compile each pack's skeleton query exactly once and reuse it.
@@ -79,7 +82,11 @@ fn compile(language: &Language, pack: &LangPack) -> Result<CompiledPack, String>
             format!("query: @link.from.{w} links for a walk whose root @{} the document never captures", w.root())
         }
     })?;
-    Ok(CompiledPack { query, captures })
+    let label_written = (0..query.pattern_count())
+        .flat_map(|p| query.property_settings(p).iter())
+        .find(|s| *s.key == *vocab::SettingKey::LabelWritten.spelling())
+        .and_then(|s| s.value.as_deref().map(str::to_string));
+    Ok(CompiledPack { query, captures, label_written })
 }
 
 /// Every capture `pack`'s document mints, through the extractor's own

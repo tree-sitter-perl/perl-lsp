@@ -215,4 +215,84 @@ impl<'t> CursorDocument<'t, '_> {
         }
         Some(if absolute { &typed[sep.len()..] } else { typed }.to_string())
     }
+
+    /// The call whose argument list holds byte `at`, where the argument
+    /// being written there is a bare word that may yet be a label: the
+    /// innermost `@arity.args` a callee token (`@ref.call`,
+    /// `@ref.member.call`, a construction's `@ref.type`) joins, the argument at `at` (an `@arity.arg`
+    /// whose whole text is the word `word_start..`), and the labels its
+    /// other arguments already pass (`@arity.label`). An argument already
+    /// past its word (`f(a: |`, `f(x + |`) is a value, never a label.
+    pub fn label_site_at(&self, at: usize, word_start: usize) -> Option<LabelSite> {
+        let mut best: Option<(Node<'t>, Node<'t>)> = None;
+        self.each_match(self.root, Some(at..at + 1), |_, caps| {
+            let Some(args) = caps
+                .iter()
+                .find(|(n, c)| *c == Capture::Arity(ArityCap::Args) && n.start_byte() < at && at < n.end_byte())
+                .map(|(n, _)| *n)
+            else {
+                return;
+            };
+            // A construction (`new Foo(…)`) calls the constructor of the
+            // class its type token names.
+            let constructs = caps.iter().any(|(_, c)| *c == Capture::Expr(ExprCap::Construct));
+            let Some(callee) = caps
+                .iter()
+                .find(|(_, c)| {
+                    matches!(c, Capture::Ref(RefCap::Call | RefCap::MemberCall))
+                        || (constructs && *c == Capture::Ref(RefCap::Type))
+                })
+                .map(|(n, _)| *n)
+            else {
+                return;
+            };
+            if best.is_none_or(|(b, _)| args.end_byte() - args.start_byte() < b.end_byte() - b.start_byte()) {
+                best = Some((args, callee));
+            }
+        });
+        let (args, callee) = best?;
+        // The arguments of this list (in any match that states it), the
+        // lists nested in it, whose arguments and labels are their own
+        // calls', and every label written inside it.
+        let mut own_args: Vec<Node<'t>> = Vec::new();
+        let mut nested: Vec<Node<'t>> = Vec::new();
+        let mut labels: Vec<Node<'t>> = Vec::new();
+        self.each_match(self.root, Some(args.start_byte()..args.end_byte()), |_, caps| {
+            let states_args = caps.iter().any(|(n, c)| *c == Capture::Arity(ArityCap::Args) && *n == args);
+            for (n, c) in caps {
+                let within = args.start_byte() <= n.start_byte() && n.end_byte() <= args.end_byte();
+                match c {
+                    Capture::Arity(ArityCap::Args) if *n != args && within => nested.push(*n),
+                    Capture::Arity(ArityCap::Arg) if states_args => own_args.push(*n),
+                    Capture::Arity(ArityCap::Label) if within => labels.push(*n),
+                    _ => {}
+                }
+            }
+        });
+        let inside = |n: &Node<'t>| nested.iter().any(|o| o.start_byte() <= n.start_byte() && n.end_byte() <= o.end_byte());
+        let arg = own_args.iter().find(|a| !inside(a) && a.start_byte() <= at && at <= a.end_byte())?;
+        let word_end = at + crate::build::cursor_sentinel::SENTINEL.len();
+        if arg.start_byte() != word_start || arg.end_byte() != word_end {
+            return None;
+        }
+        let text = |n: &Node<'t>| std::str::from_utf8(self.source.get(n.start_byte()..n.end_byte())?).ok().map(str::to_string);
+        Some(LabelSite {
+            written: self.compiled.label_written.clone()?,
+            callee: Span { start: callee.start_position(), end: callee.end_position() },
+            used: labels.iter().filter(|l| !inside(l) && !(l.start_byte() <= at && at <= l.end_byte())).filter_map(text).collect(),
+        })
+    }
+}
+
+/// A call argument being written as a bare word: where label completion
+/// offers the callee's named inputs (`CursorDocument::label_site_at`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LabelSite {
+    /// The callee token, at its place in the buffer as written (it lies
+    /// before the cursor, so the sentinel moved nothing).
+    pub callee: Span,
+    /// The labels the call's other arguments already pass.
+    pub used: Vec<String>,
+    /// What follows a label as written (`#set! label.written`).
+    pub written: String,
 }

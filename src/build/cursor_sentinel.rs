@@ -242,6 +242,21 @@ pub fn identity_prefix(sp: &SentinelParse<'_>, cfg: &crate::build::query_extract
     crate::build::query_extract::CursorDocument::new(&sp.tree, sp.patched.as_bytes(), cfg)?.identity_prefix_at(sp.cursor, cfg)
 }
 
+/// The call argument being written at the cursor as a bare word, where a
+/// label may go (`CursorDocument::label_site_at`): `f(ti|`, `f(a: 1, |`.
+pub fn label_site(
+    sp: &SentinelParse<'_>,
+    cfg: &crate::build::query_extract::LangPack,
+) -> Option<crate::build::query_extract::LabelSite> {
+    let bytes = sp.src.as_bytes();
+    let mut word_start = sp.cursor.min(bytes.len());
+    while word_start > 0 && (bytes[word_start - 1].is_ascii_alphanumeric() || bytes[word_start - 1] == b'_') {
+        word_start -= 1;
+    }
+    crate::build::query_extract::CursorDocument::new(&sp.tree, sp.patched.as_bytes(), cfg)?
+        .label_site_at(sp.cursor, word_start)
+}
+
 /// The completion context at a dangling member access: the receiver's type
 /// (for listing members) plus, when the typed operator disagrees with the
 /// receiver's pointer depth, the single-level `.`↔`->` fix to swap it. One
