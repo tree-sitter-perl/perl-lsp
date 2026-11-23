@@ -2478,3 +2478,33 @@ C().m(x=1)
     edits.sort();
     assert_eq!(edits, [(0, 9), (1, 11), (2, 5)]);
 }
+
+/// A `def` states each parameter and how a call reaches it: `/` places the
+/// ones before it, a bare `*` or `*args` names the ones after it, `*args`
+/// and `**kw` collect what is left, and `self` is the receiver.
+#[cfg(feature = "python")]
+#[test]
+fn a_def_states_how_each_parameter_is_reached() {
+    use crate::model::file_analysis::{ParamPass, SymbolDetail};
+    let fa = py_in("class C:\n    def m(self, a, b=1, /, c=2, *args, d, e=3, **kw):\n        return a\n", None);
+    let m = fa.symbols().iter().find(|s| s.name == "m").unwrap();
+    let SymbolDetail::Sub { params, .. } = &m.detail else { panic!("{:?}", m.detail) };
+    let got: Vec<(&str, ParamPass, Option<&str>, Option<&str>, bool)> = params
+        .iter()
+        .map(|p| (p.name.as_str(), p.pass, p.key.as_deref(), p.default.as_deref(), p.is_invocant))
+        .collect();
+    use ParamPass::*;
+    assert_eq!(
+        got,
+        [
+            ("self", Positional, None, None, true),
+            ("a", Positional, None, None, false),
+            ("b", Positional, None, Some("1"), false),
+            ("c", Either, Some("c"), Some("2"), false),
+            ("args", RestPositional, None, None, false),
+            ("d", Named, Some("d"), None, false),
+            ("e", Named, Some("e"), Some("3"), false),
+            ("kw", RestNamed, None, None, false),
+        ]
+    );
+}

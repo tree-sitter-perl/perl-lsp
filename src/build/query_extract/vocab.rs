@@ -662,6 +662,20 @@ spelled! {
         Required = "required",
         Optional = "optional",
         Variadic = "variadic",
+        /// How a call reaches the parameter (`ParamPass`), stated on it: by
+        /// place or by name (the default a language's parameters take), by
+        /// name only, by place only. A separator that narrows the default
+        /// (python's bare `*` and `/`) states the narrower mode on the
+        /// parameters it governs, and the narrower one wins.
+        Either = "either",
+        ByName = "by_name",
+        ByPlace = "by_place",
+        /// A variadic that collects only the places left (`*args`) or only
+        /// the names left (`**kw`); a bare `@arity.variadic` collects both.
+        RestPlaces = "rest_places",
+        RestNames = "rest_names",
+        /// An optional parameter's default value, as written.
+        Default = "default",
     }
 }
 

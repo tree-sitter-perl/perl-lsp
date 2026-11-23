@@ -218,6 +218,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         // Filled by span association in `into_file_analysis` — the
         // `@arity.sig` match fires separately from this def name.
         arity: None,
+        params: None,
         owner_stated,
         flags,
         member_space: on_name.iter().find_map(|t| match t.cap {

@@ -5573,7 +5573,7 @@ function load(string $p) { $p = realpath($p); return file($p); }
     let token = at(src, "$p)", 1);
     let decl = fa.symbols().iter().find(|s| s.kind == SymKind::Variable && s.selection_span.start == token);
     assert!(decl.is_some(), "the parameter's declaration sits at its token");
-    let param = ParamInfo { name: "p".into(), default: None, pass: crate::model::file_analysis::ParamPass::Positional, is_invocant: false, binding_site: Some(token) };
+    let param = ParamInfo { name: "p".into(), default: None, pass: crate::model::file_analysis::ParamPass::Positional, key: None, is_invocant: false, binding_site: Some(token) };
     assert_eq!(fa.param_declared_type(&param, None), Some(T::String));
     assert_ne!(fa.inferred_type_via_bag("p", at(src, "return", 0)), Some(T::String), "the body holds the rebinding");
 }
@@ -5737,4 +5737,25 @@ $p = new P(x: 1);
         edits.dedup();
         assert_eq!(edits, want, "from {from:?}");
     }
+}
+
+/// A PHP parameter is reached by place or by name, a variadic takes what is
+/// left of both, and a default is the value written.
+#[cfg(feature = "php")]
+#[test]
+fn a_php_callable_states_its_parameters() {
+    use crate::model::file_analysis::{ParamPass, SymbolDetail};
+    let fa = php("<?php\nclass P { function __construct(private int $x = 1, $y, ...$r) {} }\n");
+    let c = fa.symbols().iter().find(|s| s.name == "__construct").unwrap();
+    let SymbolDetail::Sub { params, .. } = &c.detail else { panic!("{:?}", c.detail) };
+    let got: Vec<(&str, ParamPass, Option<&str>, Option<&str>)> =
+        params.iter().map(|p| (p.name.as_str(), p.pass, p.key.as_deref(), p.default.as_deref())).collect();
+    assert_eq!(
+        got,
+        [
+            ("$x", ParamPass::Either, Some("x"), Some("1")),
+            ("$y", ParamPass::Either, Some("y"), None),
+            ("$r", ParamPass::Rest, None, None),
+        ]
+    );
 }

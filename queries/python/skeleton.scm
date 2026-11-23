@@ -136,6 +136,9 @@
 
 (parameters
   (identifier) @def.var.name @def.var)
+(parameters
+  [(list_splat_pattern (identifier) @def.var.name)
+   (dictionary_splat_pattern (identifier) @def.var.name)] @def.var)
 (typed_parameter . (identifier) @def.var.name @def.var)
 (default_parameter name: (identifier) @def.var.name @def.var)
 (typed_default_parameter name: (identifier) @def.var.name @def.var)
@@ -151,6 +154,24 @@
     [(typed_parameter . (identifier) @def.input.name @def.var.name)
      (default_parameter name: (identifier) @def.input.name @def.var.name)
      (typed_default_parameter name: (identifier) @def.input.name @def.var.name)] @def.input @def.var @def.pair))
+
+; A `def`'s parameter list, in order: a plain parameter is reached by
+; place or by name, required unless it has a default; `*args` collects the
+; places left and `**kw` the names. A bare `*` (or `*args`) makes the
+; parameters after it named only, a `/` the ones before it placed only.
+(function_definition parameters: (parameters) @arity.sig)
+(parameters [(identifier) (typed_parameter . (identifier))] @arity.required @arity.either)
+(parameters
+  [(default_parameter value: (_) @arity.default)
+   (typed_default_parameter value: (_) @arity.default)] @arity.optional @arity.either)
+(parameters [(list_splat_pattern) (typed_parameter (list_splat_pattern))] @arity.variadic @arity.rest_places)
+(parameters [(dictionary_splat_pattern) (typed_parameter (dictionary_splat_pattern))] @arity.variadic @arity.rest_names)
+(parameters
+  [(keyword_separator) (list_splat_pattern) (typed_parameter (list_splat_pattern))]
+  [(identifier) (typed_parameter . (identifier)) (default_parameter) (typed_default_parameter)] @arity.by_name)
+(parameters
+  [(identifier) (typed_parameter . (identifier)) (default_parameter) (typed_default_parameter)] @arity.by_place
+  (positional_separator))
 
 ; An annotated parameter holds a value of its annotation, as an annotated
 ; assignment's target does.

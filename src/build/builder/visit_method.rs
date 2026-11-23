@@ -539,7 +539,7 @@ impl<'a> Builder<'a> {
                         name: "$val".into(),
                         default: None,
                         pass: ParamPass::Positional,
-                        is_invocant: false,
+                        key: None, is_invocant: false,
                     binding_site: None,
                     }],
                     is_method: true,

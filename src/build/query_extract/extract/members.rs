@@ -78,6 +78,63 @@ fn arity_of(ad: &Adorned, sig: &Event) -> ParamArity {
     arity
 }
 
+/// A signature's parameters, in order. A parameter's name is the def its
+/// node declares; how a call reaches it is what the document states on it
+/// (`@arity.either` and its narrowings), by place where it states nothing.
+/// `None` when a parameter has no name.
+fn params_of(ad: &Adorned, sig: &Event) -> Option<Vec<crate::model::file_analysis::ParamInfo>> {
+    use crate::model::file_analysis::{ParamInfo, ParamPass};
+    let mut params = Vec::new();
+    for item in ad.list_items(sig) {
+        let required = match item.cap {
+            Capture::Arity(ArityCap::Required) => true,
+            Capture::Arity(ArityCap::Optional) | Capture::Arity(ArityCap::Variadic) => false,
+            _ => continue,
+        };
+        let stated = |cap| ad.on(item).any(|t| t.cap == Capture::Arity(cap));
+        let pass = if ad.on(item).any(|t| t.cap == Capture::Arity(ArityCap::Variadic)) {
+            if stated(ArityCap::RestPlaces) {
+                ParamPass::RestPositional
+            } else if stated(ArityCap::RestNames) {
+                ParamPass::RestNamed
+            } else {
+                ParamPass::Rest
+            }
+        } else if stated(ArityCap::ByName) {
+            ParamPass::Named
+        } else if stated(ArityCap::ByPlace) {
+            ParamPass::Positional
+        } else if stated(ArityCap::Either) {
+            ParamPass::Either
+        } else {
+            ParamPass::Positional
+        };
+        let name = ad.within(item).map(|i| &ad.events()[i]).find(|t| {
+            matches!(t.cap, Capture::Def { part: DefPart::Name, .. })
+        });
+        // A parameter the list does not name (C's `int f(int)`) leaves the
+        // list unstated: no call can name it, and a list missing it lies.
+        let name = name?;
+        let receiver = ad.on(name).any(|t| t.cap == Capture::Receiver);
+        let spelled = ad
+            .within(item)
+            .map(|i| &ad.events()[i])
+            .find(|t| matches!(t.cap, Capture::Def { part: DefPart::Spelled, .. }));
+        params.push(ParamInfo {
+            name: spelled.unwrap_or(name).text.clone(),
+            default: (!required && !pass.is_rest()).then(|| {
+                let written = ad.within(item).map(|i| &ad.events()[i]).find(|t| t.cap == Capture::Arity(ArityCap::Default));
+                written.map_or_else(|| "…".to_string(), |d| d.text.clone())
+            }),
+            key: (pass.takes_name() && !pass.is_rest() && !receiver).then(|| name.text.clone()),
+            pass,
+            is_invocant: receiver,
+            binding_site: Some(name.start),
+        });
+    }
+    Some(params)
+}
+
 /// What each kept def holds inside its own node, read off the tree where
 /// a separate match captured it:
 ///
@@ -97,11 +154,12 @@ pub(super) fn finish(st: &mut ExtractState) {
         match kind.sym_kind() {
             _ if matches!(kind, DefCap::Sub | DefCap::Method) => {
                 let name_end = st.out.symbols[row].name_end;
-                st.out.symbols[row].arity = ad
+                let sig = ad
                     .within(e)
                     .map(|i| &ad.events()[i])
-                    .find(|t| t.cap == Capture::Arity(ArityCap::Sig) && !before(t.start, name_end))
-                    .map(|sig| arity_of(ad, sig));
+                    .find(|t| t.cap == Capture::Arity(ArityCap::Sig) && !before(t.start, name_end));
+                st.out.symbols[row].arity = sig.map(|sig| arity_of(ad, sig));
+                st.out.symbols[row].params = sig.and_then(|sig| params_of(ad, sig));
             }
             SymKind::Class => {
                 st.out.symbols[row].inner =

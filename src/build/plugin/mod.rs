@@ -288,7 +288,7 @@ impl From<EmittedParam> for ParamInfo {
             name: p.name,
             default: p.default,
             pass,
-            is_invocant: p.is_invocant,
+            key: None, is_invocant: p.is_invocant,
             // A plugin-declared signature: nothing in the source binds it.
             binding_site: None,
         }

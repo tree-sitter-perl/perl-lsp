@@ -1039,6 +1039,7 @@ fn sksym(src: &str, kind: DefCap, name: &str, occ: usize, package: Option<&str>)
         deref_stack: Vec::new(),
         attributes: Vec::new(),
         arity: None,
+        params: None,
         owner_stated: false,
         member_space: None,
         flags: Default::default(),

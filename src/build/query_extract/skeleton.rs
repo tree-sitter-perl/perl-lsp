@@ -44,6 +44,9 @@ pub struct SkelSymbol {
     /// def's parameter list (`@arity.sig`). `None` for non-callables and defs
     /// whose parameter list the query didn't capture. Flows to `Symbol.arity`.
     pub arity: Option<crate::model::file_analysis::ParamArity>,
+    /// The parameters of that same list, in order, each with how a call
+    /// reaches it. `None` where the arity is.
+    pub params: Option<Vec<crate::model::file_analysis::ParamInfo>>,
     /// The `package` is the owner the syntax states, not the lexical/sticky
     /// context: an explicit `::` qualifier on an out-of-line def (`Ret
     /// Class::m(){}`), authoritative EVEN when the class body lives in
@@ -2422,6 +2425,15 @@ fn skel_symbol(i: usize, s: &SkelSymbol) -> crate::model::file_analysis::Symbol 
             (DefCap::Slot, Some(class)) => SymbolDetail::HashKeyDef {
                 owner: crate::model::file_analysis::HashKeyOwner::Class(class.clone()),
                 is_dynamic: false,
+            },
+            // A callable whose parameter list the document states.
+            (DefCap::Sub | DefCap::Method, _) if s.params.is_some() => SymbolDetail::Sub {
+                params: s.params.clone().unwrap_or_default(),
+                is_method: s.kind == DefCap::Method,
+                doc: None,
+                opaque_return: false,
+                is_constant: false,
+                lexical: false,
             },
             _ => SymbolDetail::None,
         },

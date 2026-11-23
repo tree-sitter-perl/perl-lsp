@@ -430,7 +430,7 @@ pub(super) fn extract_data_section_params(sub_node: Node, source: &[u8]) -> Vec<
                     name: text.to_string(),
                     default: None,
                     pass: super::visit_decl::slurpy_pass(p),
-                    is_invocant: false,
+                    key: None, is_invocant: false,
                     binding_site: None,
                 });
             }

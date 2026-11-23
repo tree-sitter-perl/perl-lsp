@@ -1030,7 +1030,7 @@ impl<'a> Builder<'a> {
                                 .into_iter()
                                 .map(|(name, span)| {
                                     let pass = crate::model::conventions::unpacked_param_pass(&name);
-                                    ParamInfo { name, default: None, pass, is_invocant: false, binding_site: Some(span.start) }
+                                    ParamInfo { name, default: None, pass, key: None, is_invocant: false, binding_site: Some(span.start) }
                                 })
                                 .collect();
                             // Combine any preceding shift params with @_ params
@@ -1058,7 +1058,7 @@ impl<'a> Builder<'a> {
                                 .into_iter()
                                 .map(|(name, span)| {
                                     let pass = crate::model::conventions::unpacked_param_pass(&name);
-                                    ParamInfo { name, default: None, pass, is_invocant: false, binding_site: Some(span.start) }
+                                    ParamInfo { name, default: None, pass, key: None, is_invocant: false, binding_site: Some(span.start) }
                                 })
                                 .collect();
                             if !list_params.is_empty() {
@@ -1079,7 +1079,7 @@ impl<'a> Builder<'a> {
                             name: var_name,
                             default,
                             pass: ParamPass::Positional,
-                            is_invocant: false,
+                            key: None, is_invocant: false,
                             binding_site,
                         });
                         continue;
@@ -1091,7 +1091,7 @@ impl<'a> Builder<'a> {
                             name: var_name,
                             default: None,
                             pass: ParamPass::Positional,
-                            is_invocant: false,
+                            key: None, is_invocant: false,
                             binding_site,
                         });
                         continue;
@@ -1185,7 +1185,7 @@ impl<'a> Builder<'a> {
                 match param.kind_of() {
                     Kind::MandatoryParameter => {
                         if let Some(var) = self.first_var_child(param) {
-                            params.push(ParamInfo { name: var, default: None, pass: ParamPass::Positional, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { name: var, default: None, pass: ParamPass::Positional, key: None, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     Kind::OptionalParameter => {
@@ -1198,7 +1198,7 @@ impl<'a> Builder<'a> {
                             .and_then(|d| d.utf8_text(self.source).ok())
                             .map(|s| s.to_string());
                         if let Some(name) = var {
-                            params.push(ParamInfo { name, default, pass: ParamPass::Positional, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { name, default, pass: ParamPass::Positional, key: None, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     Kind::NamedParameter => {
@@ -1206,18 +1206,19 @@ impl<'a> Builder<'a> {
                             let default = param.field(Field::Default)
                                 .and_then(|d| d.utf8_text(self.source).ok())
                                 .map(|s| s.to_string());
-                            params.push(ParamInfo { name, default, pass: ParamPass::Named, is_invocant: false, binding_site: Some(param.start_position()) });
+                            let key = Some(crate::model::conventions::PERL_SPELLINGS.strip_sigils(&name).to_string());
+                            params.push(ParamInfo { name, default, pass: ParamPass::Named, key, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     Kind::SlurpyParameter => {
                         if let Some(var) = self.first_var_child(param) {
                             let pass = slurpy_pass(param);
-                            params.push(ParamInfo { name: var, default: None, pass, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { name: var, default: None, pass, key: None, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     Kind::Scalar | Kind::Array | Kind::Hash => {
                         if let Ok(text) = param.utf8_text(self.source) {
-                            params.push(ParamInfo { name: text.to_string(), default: None, pass: slurpy_pass(param), is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { name: text.to_string(), default: None, pass: slurpy_pass(param), key: None, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     _ => {}
@@ -1257,8 +1258,7 @@ impl<'a> Builder<'a> {
                                     SymbolDetail::Variable { sigil, decl_kind },
                                 );
                                 self.symbols[id.0 as usize].in_force = Some(param_node.end_position());
-                                if let (ParamPass::Named, Some(owner)) = (p.pass, &input) {
-                                    let bare = crate::model::conventions::PERL_SPELLINGS.strip_sigils(&p.name).to_string();
+                                if let (Some(bare), Some(owner)) = (p.key.clone(), &input) {
                                     let var_span = node_to_span(var);
                                     let key_span = Span {
                                         start: Point::new(var_span.end.row, var_span.end.column.saturating_sub(bare.len())),
@@ -1642,7 +1642,7 @@ impl<'a> Builder<'a> {
                                 name: format!("${}", bare_name),
                                 default: None,
                                 pass: ParamPass::Positional,
-                                is_invocant: false,
+                                key: None, is_invocant: false,
                                 binding_site: None,
                             }],
                             is_method: true,

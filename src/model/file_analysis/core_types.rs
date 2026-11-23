@@ -1928,6 +1928,11 @@ pub struct ParamInfo {
     /// extractor from the signature's own syntax (rule #11): a consumer asks
     /// the mode, never the name's sigil.
     pub pass: ParamPass,
+    /// The name a call passes it by (`f(name => …)`, `f(name: …)`), minted
+    /// where the signature says it can be named; `None` for a parameter
+    /// only a place reaches.
+    #[serde(default)]
+    pub key: Option<String>,
     /// True when this param is the implicit receiver of the call,
     /// supplied by the caller via `$obj->method(...)` rather than
     /// written in the argument list. Sig help, hover, and outline

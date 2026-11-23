@@ -123,6 +123,17 @@
 (variadic_parameter
   name: (variable_name (name) @def.local.name) @def.local.spelled) @def.local
 
+; A parameter list, in order: a parameter is reached by place or by name,
+; required unless it has a default, and a variadic takes whatever is left
+; of both.
+(formal_parameters) @arity.sig
+(formal_parameters
+  [(simple_parameter !default_value) (property_promotion_parameter !default_value)] @arity.required @arity.either)
+(formal_parameters
+  [(simple_parameter default_value: (_) @arity.default)
+   (property_promotion_parameter default_value: (_) @arity.default)] @arity.optional @arity.either)
+(formal_parameters (variadic_parameter) @arity.variadic)
+
 ; ---- properties ----
 ; A property is a data member of its class, named without the `$` it is
 ; declared with: `$obj->x` reads the member `x`. The `$x` it is written as

@@ -19,6 +19,17 @@ list says which names it takes. The engine models that once.
 | `RestNamed` | the leftover names | `%opts` | — | `**kwargs` |
 | `Rest` | both leftovers | — | `...$args` | — |
 
+A pack states the mode on each parameter of an `@arity.sig` list:
+`@arity.either` for a language whose parameters a call may name (php,
+python), `@arity.by_name` / `@arity.by_place` where a separator narrows it
+(python's bare `*` and `/`, the narrower winning), and `@arity.variadic`
+with `@arity.rest_places` / `@arity.rest_names` for a collector; a
+parameter with nothing stated is reached by place (C/C++). The list lands
+as the callable's `SymbolDetail::Sub` parameters, as Perl's does.
+`ParamInfo::key` is the name a call passes a parameter by, minted where
+the signature says it can be named, so a binder matches a label to a key
+and never strips a sigil.
+
 A parameter list is therefore two carriers: a positional sequence
 (`takes_position`) and a keyed map (`takes_name`); `Either` sits in both.
 The extractor mints the mode from the signature's syntax. A consumer asks

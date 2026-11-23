@@ -1016,6 +1016,7 @@ fn inject_member_blocks(
                 deref_stack: m.deref_stack.clone(),
                 attributes: Vec::new(),
                 arity: None,
+                params: None,
                 owner_stated: false,
                 flags: Default::default(),
                 member_space: None,
@@ -1214,6 +1215,7 @@ fn remap_spans(
             deref_stack: _,
             attributes: _,
             arity: _,
+            params,
             owner_stated: _,
             flags: _,
             member_space: _,
@@ -1222,6 +1224,9 @@ fn remap_spans(
             enum_of: _,
             body: _,
         } = s;
+        for p in params.iter_mut().flatten() {
+            p.binding_site = p.binding_site.map(r);
+        }
         *start = r(*start);
         *end = r(*end);
         *name_start = r(*name_start);
