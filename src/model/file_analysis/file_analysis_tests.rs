@@ -3648,3 +3648,32 @@ fn a_qualified_call_reaches_what_its_sub_takes() {
     let def = fa.find_definition(Point::new(3, call.find("name").unwrap()), None).expect("def");
     assert_eq!(def.start.row, 1);
 }
+
+/// `sub f(:$name)` declares `name` twice over, the variable the body reads
+/// and the key a call passes: a call key goes to the parameter, and a
+/// rename from either side rewrites both, never a same-named attr of the
+/// package.
+#[test]
+fn a_named_parameter_is_its_call_keys() {
+    let src = "package Foo;\nuse v5.40;\nuse Moo;\nhas name => (is => 'ro');\nsub greet($self, :$name) { return $name }\nFoo->new(name => 1)->greet(name => 2);\n";
+    let fa = build_fa_from_source(src);
+    let sig = src.lines().nth(4).unwrap();
+    let call = src.lines().nth(5).unwrap();
+    let key_col = call.rfind("name").unwrap();
+    let def = fa.find_definition(Point::new(5, key_col), None).expect("call key has a def");
+    assert_eq!((def.start.row, def.start.column), (4, sig.find(":$name").unwrap() + 2));
+
+    let edits = fa.rename_at(Point::new(4, sig.rfind("$name").unwrap() + 1), "who").expect("renames");
+    let mut at: Vec<(usize, usize)> = edits.iter().map(|(s, _)| (s.start.row, s.start.column)).collect();
+    at.sort();
+    assert_eq!(
+        at,
+        [(4, sig.find(":$name").unwrap() + 2), (4, sig.rfind("$name").unwrap() + 1), (5, key_col)],
+        "the parameter, its read and the greet key; not the attr or the constructor key"
+    );
+    assert!(edits.iter().all(|(_, t)| t == "who"));
+    let from_key = fa.rename_at(Point::new(5, key_col), "who").expect("renames from the key");
+    let mut at2: Vec<(usize, usize)> = from_key.iter().map(|(s, _)| (s.start.row, s.start.column)).collect();
+    at2.sort();
+    assert_eq!(at, at2);
+}

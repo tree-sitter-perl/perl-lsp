@@ -805,7 +805,14 @@ impl AttrProjection {
 pub struct FieldProjections {
     pub class: String,
     pub bare: String,
-    pub has_param: bool,
+    /// The callable of `class` that takes this name as a named argument:
+    /// `new` for a constructor attr, the sub for a `:$name` parameter.
+    pub input: Option<String>,
+    /// The group is an attribute of `class`, so the class's projections of
+    /// the name (accessors, slots, columns) join it and an ancestor's
+    /// same-named attr may be its root. A parameter's group is its
+    /// callable's alone.
+    pub attr: bool,
     pub has_reader: bool,
     /// The family the reader spelling is asked as: an accessor is called,
     /// whatever backs it; a member that IS the field (python's class-body
@@ -854,7 +861,8 @@ struct FieldGroup {
     decl_span: Option<Span>,
     class: String,
     bare: String,
-    has_param: bool,
+    input: Option<String>,
+    attr: bool,
     has_reader: bool,
     reader_kind: MemberKind,
 }

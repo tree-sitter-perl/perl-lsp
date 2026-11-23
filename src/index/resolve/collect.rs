@@ -1255,8 +1255,9 @@ pub(super) fn collect_from_analysis(
                 RefKind::HashKeyAccess { .. },
             ) => {
                 // The owning callable's keys on the same side (what it returns
-                // or what it takes), widened across inheritance for
-                // CONSTRUCTOR keys: a base attr's ctor key
+                // or what it takes), widened across inheritance: a method's
+                // keys reach the subclass calls that dispatch to it, and a
+                // CONSTRUCTOR's reach every subclass: a base attr's ctor key
                 // (`Input{Animal, new}`) is also keyed by a SUBCLASS
                 // construction (`Dog->new(name => …)`, owner `Input{Dog, new}`),
                 // since `name` is the inherited attr. So renaming a base attr
@@ -1274,14 +1275,22 @@ pub(super) fn collect_from_analysis(
                     if on != name {
                         return false;
                     }
-                    op == package
-                        || (crate::model::conventions::is_constructor_name(on)
-                            && match (op.as_deref(), package.as_deref()) {
-                                (Some(child), Some(base)) => {
-                                    analysis.class_isa(child, base, module_index)
-                                }
-                                _ => false,
-                            })
+                    if op == package {
+                        return true;
+                    }
+                    let (Some(child), Some(base)) = (op.as_deref(), package.as_deref()) else {
+                        return false;
+                    };
+                    if crate::model::conventions::is_constructor_name(on) {
+                        analysis.class_isa(child, base, module_index)
+                    } else {
+                        // Any other call on a subclass reaches the callable
+                        // it dispatches to, so an inherited method's keys
+                        // are its declaring class's.
+                        analysis
+                            .resolve_method_in_ancestors(child, on, module_index)
+                            .is_some_and(|m| m.class() == base)
+                    }
                 };
                 match r.hash_key_owner() {
                     Some(o @ (HashKeyOwner::Sub { .. } | HashKeyOwner::Input { .. })) => owner_matches(o),

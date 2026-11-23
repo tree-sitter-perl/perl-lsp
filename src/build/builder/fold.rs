@@ -628,11 +628,12 @@ impl<'a> Builder<'a> {
                     pending.push(Path::ColumnKeyed(owner, args));
                     continue;
                 }
-                pending.push(if local_class {
+                pending.push(if user_shadows_verb {
                     Path::Strict(owner, args)
                 } else {
-                    // The class lives elsewhere — a local def miss can't
-                    // veto; defer the gate to query time.
+                    // The callable is declared elsewhere (another file, or
+                    // inherited) — a local def miss can't veto; defer the
+                    // gate to query time.
                     Path::StrictOrDefer(owner, RefIdx(i as u32), args)
                 });
                 continue;
@@ -1975,9 +1976,29 @@ impl<'a> Builder<'a> {
             self.add_symbol_in_scope(scope, key, SymKind::HashKeyDef, span, span, detail, Namespace::Language, package);
         }
         for (args, call, name, here) in std::mem::take(&mut self.pending_call_arg_keys) {
-            let package = self.refs[call].resolved_package().map(str::to_string).or(here);
+            let pinned = self.refs[call].resolved_package().map(str::to_string);
+            // A callee this file does not declare (imported, or another
+            // package's) takes what its own file says: a key the local table
+            // lacks binds to the call, and its owner is read off the call
+            // with the index in hand.
+            let package = pinned.or(here);
+            // A builtin or a keyword a framework installed (`has`, `extends`)
+            // is no callable taking names: the framework reads its arguments.
+            let at = self.import_scope_at(self.refs[call].span.start);
+            let elsewhere = !crate::model::builtins::is_builtin(&name)
+                && !self.imports.keyword(at, &name)
+                && !self.symbols.iter().any(|s| {
+                    matches!(s.kind, SymKind::Sub | SymKind::Method)
+                        && s.name == name
+                        && s.package == package
+                });
             let owner = HashKeyOwner::named_input(package, name);
-            self.emit_call_arg_key_accesses(args, Gate::Strict(owner));
+            let gate = if elsewhere {
+                Gate::StrictOrDefer(owner, crate::model::witnesses::RefIdx(call as u32))
+            } else {
+                Gate::Strict(owner)
+            };
+            self.emit_call_arg_key_accesses(args, gate);
         }
     }
 

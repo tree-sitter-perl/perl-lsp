@@ -759,7 +759,7 @@ impl<'a> Builder<'a> {
         self.push_callable_scope(scope_kind, node_to_span(node), sub_id);
 
         // Record signature params as Variable symbols in the sub scope
-        self.record_signature_params(node, &params);
+        self.record_signature_params(node, &params, Some(HashKeyOwner::named_input(package.clone(), &name)));
 
         // Perl 5.38 methods: synthesize implicit $self with type → enclosing class
         if is_method {
@@ -844,7 +844,7 @@ impl<'a> Builder<'a> {
         let span = node_to_span(node);
         let sub_id = self.ensure_anon_sub_symbol(node, &params);
         self.push_callable_scope(ScopeKind::Sub { name: "(anon)".into() }, span, sub_id);
-        self.record_signature_params(node, &params);
+        self.record_signature_params(node, &params, None);
         self.detect_first_param_type(&params, node, self.current_package.clone());
         self.queue_children_then(node, move |b| {
             b.record_sub_tail(node);
@@ -1227,7 +1227,10 @@ impl<'a> Builder<'a> {
         params
     }
 
-    pub(super) fn record_signature_params(&mut self, sub_node: Node<'a>, params: &[ParamInfo]) {
+    /// `input` is the owner of the keys the callable takes by name: a
+    /// `:$name` parameter is one declaration spelled two ways, the variable
+    /// the body reads and the key a call passes, paired at minting.
+    pub(super) fn record_signature_params(&mut self, sub_node: Node<'a>, params: &[ParamInfo], input: Option<HashKeyOwner>) {
         // For signature syntax, params come from the signature node
         for i in 0..sub_node.child_count() {
             if let Some(sig) = sub_node.child(i) {
@@ -1254,6 +1257,22 @@ impl<'a> Builder<'a> {
                                     SymbolDetail::Variable { sigil, decl_kind },
                                 );
                                 self.symbols[id.0 as usize].in_force = Some(param_node.end_position());
+                                if let (ParamPass::Named, Some(owner)) = (p.pass, &input) {
+                                    let bare = crate::model::conventions::PERL_SPELLINGS.strip_sigils(&p.name).to_string();
+                                    let var_span = node_to_span(var);
+                                    let key_span = Span {
+                                        start: Point::new(var_span.end.row, var_span.end.column.saturating_sub(bare.len())),
+                                        end: var_span.end,
+                                    };
+                                    let key = self.add_symbol(
+                                        bare,
+                                        SymKind::HashKeyDef,
+                                        node_to_span(param_node),
+                                        key_span,
+                                        SymbolDetail::HashKeyDef { owner: owner.clone(), is_dynamic: false },
+                                    );
+                                    self.pair_co_declared(id, key);
+                                }
                                 param_idx += 1;
                             }
                         }

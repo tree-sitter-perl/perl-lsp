@@ -49,13 +49,13 @@ pub(super) fn group_from_projections(
             rename: MemberRename::Bare,
         });
     }
-    if p.has_param {
+    if let Some(input) = &p.input {
         members.push(GroupMember {
             target: TargetRef::new(
                 p.bare.clone(),
                 TargetKind::HashKeyOfInput {
                     package: Some(p.class.clone()),
-                    name: "new".to_string(),
+                    name: input.clone(),
                     slot: InputSlot::Named,
                 },
                 class_analysis,

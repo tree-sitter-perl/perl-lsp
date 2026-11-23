@@ -49,6 +49,9 @@ what declares it is whatever says the callable takes that name:
 
 - a framework's constructor key (`has`, Class::Tiny, Corinna `:param`),
   under `Input{C, new}`;
+- a `Named` parameter (`sub f(:$name)`): one token declares two symbols,
+  the variable the body reads and the `Input{pkg, f}` key a call passes,
+  paired as `Symbol::declared_with`;
 - a collecting parameter's read: inside a callable whose `RestNamed`
   parameter is `%args`, each direct `$args{k}` is owned by that callable's
   `Input`, and the first read of a key declares it (`bind_collected_keys`).
@@ -66,3 +69,26 @@ A `Class(C)` lookup (`$obj->{k}`) still finds `Input{C, _}` keys, as it
 finds `Sub{C, _}` ones. Plain calls emit their argument keys after the walk,
 once each call is pinned to its package and the collecting reads have
 declared their keys, so a call above its `sub` links like one below it.
+
+## A named parameter is one name
+
+A `:$name` parameter's variable and key are one renameable entity: the
+field-group machinery carries it as a group whose `input` is the
+callable and whose `attr` is false, so the package's same-named attr
+(its accessors, slots, constructor key) never joins it. Rename or
+references from the parameter, a body read, or any call's key rewrites
+all of them, across files.
+
+A call key reaches the callable the call dispatches to: a call on a
+subclass reaches the inherited method's keys (`resolve_method_in_ancestors`
+at the matcher and at the consumer-side cursor), and a constructor's keys
+still widen to every subclass by `class_isa`, since its keys are the
+class's inherited attrs.
+
+Whether a fat-comma key IS a key is the callee's to say. When the file
+declares the callable, its local table is authoritative and a key it
+lacks emits nothing. When it does not (an imported function, a method
+another file declares or an ancestor supplies), every stringy key binds
+to its call and the owner is read with the index in hand. A builtin and a
+keyword a framework installed (`has`, `extends`) are no callable taking
+names: the framework reads their arguments, so they never defer.
