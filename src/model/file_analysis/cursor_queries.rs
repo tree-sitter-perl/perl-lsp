@@ -549,18 +549,14 @@ impl FileAnalysis {
                 _ => return None,
             },
         };
-        // The owner names the class: a constructor key (`Sub{class,new}` —
+        // The owner names the class: a constructor key (`Input{class,new}` —
         // `Foo->new(size => …)`), a bridged condition-arg (`Bridged` — DBIC
         // `search({col})`), or an internal slot (`Class` — `$self->{size}`).
         // A `Class`-owner deref reaches the attr ONLY if it's a real internal
         // slot (Moo/bless `InternalKey`); a bridged column isn't a hash slot, so
         // `$row->{col}` (a `Class` lookup) resolves to nothing here.
         let class = match &owner {
-            HashKeyOwner::Sub { package: Some(c), name }
-                if crate::model::conventions::is_constructor_name(name) =>
-            {
-                c.clone()
-            }
+            HashKeyOwner::Input { .. } => owner.constructor_class()?.to_string(),
             HashKeyOwner::Bridged { class: c } => c.clone(),
             HashKeyOwner::Class(c) => {
                 let has_internal = self.attr_projections.iter().any(|a| {
@@ -641,10 +637,7 @@ impl FileAnalysis {
                 && s.name == bare
                 && matches!(
                     &s.detail,
-                    SymbolDetail::HashKeyDef {
-                        owner: HashKeyOwner::Sub { package: Some(p), name },
-                        ..
-                    } if p == class && crate::model::conventions::is_constructor_name(name)
+                    SymbolDetail::HashKeyDef { owner, .. } if owner.constructor_class() == Some(class)
                 )
         }) {
             let accessor = key_def
@@ -659,6 +652,32 @@ impl FileAnalysis {
                 bare: bare.to_string(),
                 has_param: true,
                 has_reader: accessor.is_some(),
+                reader_kind: MemberKind::CALLABLE,
+            });
+        }
+        // (1b) A blessed slot (`bless { name => … }, $class`): the key the
+        // constructor returns is an instance slot of the class, so it anchors
+        // the slot's group — its `$self->{name}` reads — though no caller
+        // passes it by that name.
+        if let Some(key_def) = self.symbols.iter().find(|s| {
+            matches!(s.kind, SymKind::HashKeyDef)
+                && s.name == bare
+                && matches!(
+                    &s.detail,
+                    SymbolDetail::HashKeyDef { owner: HashKeyOwner::Sub { package: Some(p), .. }, .. } if p == class
+                )
+                && self.attr_projections.iter().any(|a| {
+                    a.class == class && a.attr == bare && matches!(a.kind, AttrProjectionKind::InternalKey)
+                })
+        }) {
+            return Some(FieldGroup {
+                spelling_sym: None,
+                private: false,
+                decl_span: Some(key_def.selection_span),
+                class: class.to_string(),
+                bare: bare.to_string(),
+                has_param: false,
+                has_reader: false,
                 reader_kind: MemberKind::CALLABLE,
             });
         }
@@ -839,10 +858,7 @@ impl FileAnalysis {
         }
         // Constructor keys at call sites.
         if g.has_param {
-            let owner = HashKeyOwner::Sub {
-                package: Some(g.class.clone()),
-                name: "new".to_string(),
-            };
+            let owner = HashKeyOwner::named_input(Some(g.class.clone()), "new");
             for r in self.refs() {
                 if let Some(o) = r.hash_key_owner() {
                     if r.target_name == g.bare && o.found_by(&owner) {
@@ -942,18 +958,17 @@ impl FileAnalysis {
             }
         }
 
-        // A key of the call's arguments: the callee's own key, owned
-        // `Sub{invocant_class, method}` (the constructor-key shape).
+        // A key of the call's arguments: the callee's named input.
         if let Some(enclosing) = enclosing_call {
-            // An owner is ONE producer: a union receiver's call has a
-            // return per arm, and no single `Sub` owns the key.
+            // An owner is ONE callee: a union receiver's call reaches a
+            // method per arm, and no single one owns the key.
             if let Some(class) =
                 self.receiver_classes(enclosing, module_index, ReceiverPolicy::Edge).single().map(str::to_string)
             {
-                return Some(HashKeyOwner::Sub {
-                    package: Some(class),
-                    name: enclosing.unqualified_target_name(self.names()).to_string(),
-                });
+                return Some(HashKeyOwner::named_input(
+                    Some(class),
+                    enclosing.unqualified_target_name(self.names()),
+                ));
             }
         }
         // Variable bound to an imported function call: `$c = get_config();

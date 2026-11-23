@@ -39,3 +39,30 @@ A key written in a call's argument list (`f(name => …)`) carries
 the key is extracted. Its owner is the callee's, read off that call; a
 key read inside the arguments (`f(x => $h->{name})`) belongs to its own
 hash, not to the call.
+
+## A callable's input keys are their own owner
+
+`HashKeyOwner::Input { package, name, slot }` owns the keys a callable
+takes; `Sub { package, name }` keeps the keys it returns. A call's key
+(`connect(timeout => 30)`, `Foo->new(size => 1)`) is an `Input` use, and
+what declares it is whatever says the callable takes that name:
+
+- a framework's constructor key (`has`, Class::Tiny, Corinna `:param`),
+  under `Input{C, new}`;
+- a collecting parameter's read: inside a callable whose `RestNamed`
+  parameter is `%args`, each direct `$args{k}` is owned by that callable's
+  `Input`, and the first read of a key declares it (`bind_collected_keys`).
+
+So `Foo->new(name => 1)` reaches `$args{name}` in a hand-written `new`,
+and never the `bless { name => … }` slot `new` returns, nor a key of the
+hash a `cfg()` returns. The slot is reached from the read only by
+following the value, which waits for flow. A `bless` key of class `C`
+still anchors its slot group (`$self->{name}` reads) on its own.
+
+The surface carries both sets per callable (`MethodSurface::hash_keys`,
+`input_keys`), and call-argument completion offers only `input_keys`.
+
+A `Class(C)` lookup (`$obj->{k}`) still finds `Input{C, _}` keys, as it
+finds `Sub{C, _}` ones. Plain calls emit their argument keys after the walk,
+once each call is pinned to its package and the collecting reads have
+declared their keys, so a call above its `sub` links like one below it.

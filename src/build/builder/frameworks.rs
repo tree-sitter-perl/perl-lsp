@@ -640,10 +640,7 @@ impl<'a> Builder<'a> {
                     });
                 }
             }
-            let owner = HashKeyOwner::Sub {
-                package: self.current_package.clone(),
-                name: "new".to_string(),
-            };
+            let owner = HashKeyOwner::named_input(self.current_package.clone(), "new");
             for (name, sel_span) in &attr_names {
                 let key_id = self.add_symbol(
                     name.clone(),

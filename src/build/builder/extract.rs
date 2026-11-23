@@ -605,14 +605,11 @@ impl<'a> Builder<'a> {
                 let pkg = self.current_package.clone()
                     .or_else(|| self.scopes[self.current_scope().0 as usize].package.clone());
                 if let Some(pkg) = pkg {
-                    // Inside a sub: register to `Sub{C, sub_name}` —
-                    // that's the actual constructor (or whatever sub
-                    // does the blessing). `has`-emitted HashKeyDefs
-                    // use the same shape, so a single owner encoding
-                    // covers both registration paths and call-site
-                    // HashKeyAccess refs (Sub{C, method}) match
-                    // strict. Top-level blesses (rare) keep the
-                    // coarse `Class(C)` form.
+                    // Inside a sub: the keys of what the sub returns,
+                    // `Sub{C, sub_name}` — never the keys its callers
+                    // pass (`Input`), which a hand-written constructor
+                    // reads out of its arguments. Top-level blesses
+                    // (rare) keep the coarse `Class(C)` form.
                     return Some(match self.enclosing_sub_name() {
                         Some(name) => HashKeyOwner::Sub { package: Some(pkg), name },
                         None => HashKeyOwner::Class(pkg),
@@ -763,11 +760,11 @@ impl<'a> Builder<'a> {
                 Gate::ColumnKeyed(sub_owner) => {
                     // First-hashref narrowing already happened in `effective`.
                     // A key that's an actual column → the column owner; else fall
-                    // back to the `Sub{class,verb}` owner if the verb declares it
+                    // back to the verb's named input if the verb declares it
                     // (Moo/Corinna ctor keys under a generic-named `new`); else
                     // skip (so `order_by` and friends never latch on).
                     let class = match sub_owner {
-                        HashKeyOwner::Sub { package: Some(c), .. } => c.clone(),
+                        HashKeyOwner::Input { package: Some(c), .. } => c.clone(),
                         _ => continue,
                     };
                     let col = HashKeyOwner::Bridged { class };

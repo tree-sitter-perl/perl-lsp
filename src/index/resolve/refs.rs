@@ -53,9 +53,10 @@ pub(super) fn group_from_projections(
         members.push(GroupMember {
             target: TargetRef::new(
                 p.bare.clone(),
-                TargetKind::HashKeyOfSub {
+                TargetKind::HashKeyOfInput {
                     package: Some(p.class.clone()),
                     name: "new".to_string(),
+                    slot: InputSlot::Named,
                 },
                 class_analysis,
             ),
@@ -533,6 +534,7 @@ pub(super) fn matcher_view(
                     && !r.match_verdict_baked()
             }),
         TargetKind::HashKeyOfSub { .. }
+        | TargetKind::HashKeyOfInput { .. }
         | TargetKind::HashKeyOfBridged(_)
         | TargetKind::InternalHashKey { .. } => refs_keyed(&view, &target.name).any(|r| {
             matches!(r.kind, RefKind::HashKeyAccess { .. })
@@ -551,6 +553,7 @@ pub(super) fn matcher_view(
             TargetKind::Handler { .. } => "refs.upgrade_by.handler",
             TargetKind::Sub { .. } | TargetKind::Method { .. } => "refs.upgrade_by.methodcall",
             TargetKind::HashKeyOfSub { .. }
+            | TargetKind::HashKeyOfInput { .. }
             | TargetKind::HashKeyOfBridged(_)
             | TargetKind::InternalHashKey { .. } => "refs.upgrade_by.hashkey",
             _ => "refs.upgrade_by.other",
@@ -562,6 +565,7 @@ pub(super) fn matcher_view(
         TargetKind::Handler { .. } => "refs.rowsview_by.handler",
         TargetKind::Sub { .. } | TargetKind::Method { .. } => "refs.rowsview_by.methodcall",
         TargetKind::HashKeyOfSub { .. }
+        | TargetKind::HashKeyOfInput { .. }
         | TargetKind::HashKeyOfBridged(_)
         | TargetKind::InternalHashKey { .. } => "refs.rowsview_by.hashkey",
         _ => "refs.rowsview_by.other",

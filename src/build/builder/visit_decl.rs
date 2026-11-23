@@ -1597,10 +1597,7 @@ impl<'a> Builder<'a> {
                         node_to_span(node),
                         bare_span,
                         SymbolDetail::HashKeyDef {
-                            owner: HashKeyOwner::Sub {
-                                package: self.current_package.clone(),
-                                name: "new".to_string(),
-                            },
+                            owner: HashKeyOwner::named_input(self.current_package.clone(), "new"),
                             is_dynamic: false,
                         },
                     );

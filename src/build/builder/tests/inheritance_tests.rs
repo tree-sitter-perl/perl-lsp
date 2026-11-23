@@ -227,7 +227,7 @@ fn test_moox_option_synthesizes_accessor_and_ctor_key() {
             matches!(
                 &s.detail,
                 crate::model::file_analysis::SymbolDetail::HashKeyDef {
-                    owner: crate::model::file_analysis::HashKeyOwner::Sub { name, .. },
+                    owner: crate::model::file_analysis::HashKeyOwner::Input { name, .. },
                     ..
                 } if name == "new"
             )

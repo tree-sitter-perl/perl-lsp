@@ -2320,6 +2320,7 @@ impl Ref {
             RefKind::HashKeyAccess { .. } => match self.hash_key_owner() {
                 Some(HashKeyOwner::Class(c)) => (4, Some(c.clone())),
                 Some(HashKeyOwner::Sub { name, .. }) => (5, Some(name.clone())),
+                Some(HashKeyOwner::Input { name, .. }) => (6, Some(name.clone())),
                 _ => (0, None),
             },
             _ => (0, None),

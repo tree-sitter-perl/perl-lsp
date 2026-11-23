@@ -654,12 +654,41 @@ pub enum HashKeyOwner {
     /// in scope). Without this, two different packages each defining
     /// `sub get_config { ... host ... }` would collide at query time.
     Sub { package: Option<String>, name: String },
+    /// Keys a callable takes as its input: the names its callers write
+    /// (`connect(timeout => 30)`, `Foo->new(size => 1)`, `f(b: 2)`) and the
+    /// parameters that answer to them (a `has` / `:param` / Class::Tiny
+    /// constructor key). Kept apart from `Sub`, the keys a callable returns,
+    /// so a call's keys never reach its return value's (`named-arguments.md`).
+    Input { package: Option<String>, name: String, slot: InputSlot },
+}
+
+/// Where in a callable's input a key sits.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
+pub enum InputSlot {
+    /// Among the callable's named arguments.
+    Named,
 }
 
 impl HashKeyOwner {
+    /// A callable's named-argument keys: what `f(key => …)` passes.
+    pub fn named_input(package: Option<String>, name: impl Into<String>) -> Self {
+        HashKeyOwner::Input { package, name: name.into(), slot: InputSlot::Named }
+    }
+
+    /// The class whose constructor takes this key, for a constructor's
+    /// named input.
+    pub fn constructor_class(&self) -> Option<&str> {
+        match self {
+            HashKeyOwner::Input { package: Some(c), name, .. }
+                if crate::model::conventions::is_constructor_name(name) => Some(c),
+            _ => None,
+        }
+    }
+
     /// Directional match: would a lookup with `lookup` owner reach a
     /// def with `self` owner? Strict equality, plus the broadening
-    /// rule that a `Class(C)` lookup picks up `Sub{Some(C), _}` defs.
+    /// rule that a `Class(C)` lookup picks up `Sub{Some(C), _}` and
+    /// `Input{Some(C), _}` defs.
     ///
     /// Why: bless-inside-a-sub registers HashKeyDefs as `Sub{C,
     /// sub_name}` (the constructor sub). `has` does the same. But
@@ -671,7 +700,8 @@ impl HashKeyOwner {
     pub fn found_by(&self, lookup: &HashKeyOwner) -> bool {
         if self == lookup { return true; }
         match (self, lookup) {
-            (HashKeyOwner::Sub { package: Some(c1), .. }, HashKeyOwner::Class(c2)) => c1 == c2,
+            (HashKeyOwner::Sub { package: Some(c1), .. }, HashKeyOwner::Class(c2))
+            | (HashKeyOwner::Input { package: Some(c1), .. }, HashKeyOwner::Class(c2)) => c1 == c2,
             _ => false,
         }
     }

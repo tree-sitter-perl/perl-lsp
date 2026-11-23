@@ -109,10 +109,7 @@ impl<'a> Builder<'a> {
             return;
         }
 
-        let owner = HashKeyOwner::Sub {
-            package: Some(pkg),
-            name: "new".to_string(),
-        };
+        let owner = HashKeyOwner::named_input(Some(pkg), "new");
         for (name, sel_span) in &attr_names {
             // rw accessor: one Method symbol serves getter and writer. No isa
             // → no return type, so no accessor witness (only provenance).

@@ -338,6 +338,7 @@ fn build_once(
         imports: Default::default(),
         return_infos: Vec::new(),
         pending_array_pushes: Vec::new(),
+        pending_call_arg_keys: Vec::new(),
         sub_tail: std::collections::HashMap::new(),
         slot_write_rhs_span: std::collections::HashMap::new(),
         call_bindings: Vec::new(),
@@ -590,6 +591,7 @@ fn build_once(
 
     // Post-pass 2: resolve hash key owners from type constraints
     b.resolve_hash_key_owners();
+    b.bind_collected_keys();
 
     // Compute per-package framework facts BEFORE return-type fold so
     // the bag-aware reducer has the right context. Mirrors the data

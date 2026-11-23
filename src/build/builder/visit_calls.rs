@@ -356,16 +356,13 @@ impl<'a> Builder<'a> {
                         .map(|package| RefBinding::Function { package }),
                 );
                 // Even-position stringy args → HashKeyAccess refs
-                // owned by `Sub{resolved_package, name}`. Same
+                // owned by the callee's named input. Same
                 // mechanism as method-call args; covers
                 // `Foo::new(key => val)` and helpers like
                 // `connect(timeout => 30)`.
                 if let Some(args) = node.field(Field::Arguments) {
-                    let owner = HashKeyOwner::Sub {
-                        package: resolved_package.clone(),
-                        name: name.to_string(),
-                    };
-                    self.emit_call_arg_key_accesses(args, Gate::Strict(owner));
+                    let here = self.current_package.clone();
+                    self.pending_call_arg_keys.push((args, self.refs.len() - 1, bare_name(name).to_string(), here));
                 }
                 // Push type constraints on arguments of known builtins
                 if let Some(obs) = crate::model::builtins::builtin_first_arg_use(name) {

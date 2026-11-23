@@ -3587,8 +3587,64 @@ fn call_arg_key_owner_comes_from_its_call_and_a_nested_deref_stays_out() {
     assert_eq!((arg.len(), deref.len()), (1, 1), "one call-bound arg key, one deref");
     assert_eq!(
         fa.deferred_hash_key_owner(arg[0], None),
-        Some(HashKeyOwner::Sub { package: Some("Foo".into()), name: "new".into() }),
+        Some(HashKeyOwner::named_input(Some("Foo".into()), "new")),
     );
     // The deref only sits inside the call's arguments; it is `$h`'s key.
     assert_eq!(fa.deferred_hash_key_owner(deref[0], None), None);
+}
+
+// ---- Named arguments: a call's keys are what the callee takes ----
+
+/// `Foo->new(name => …)` reaches where `new` takes `name`, the read of its
+/// collecting `%args`, not the slot `new` returns; a key `new` never reads
+/// reaches nothing (`docs/adr/named-arguments.md`).
+#[test]
+fn call_keys_reach_the_collecting_read_not_the_returned_slot() {
+    let src = "package Foo;\nsub new { my ($class, %args) = @_; return bless { name => $args{name}, age => 0 }, $class; }\npackage main;\nFoo->new(name => 'x', age => 3);\n";
+    let fa = build_fa_from_source(src);
+    let line1 = src.lines().nth(1).unwrap();
+    let read_col = line1.find("$args{name}").unwrap() + "$args{".len();
+    let call = src.lines().nth(3).unwrap();
+    let def = fa.find_definition(Point::new(3, call.find("name").unwrap()), None).expect("name at the call has a def");
+    assert_eq!((def.start.row, def.start.column), (1, read_col), "name goes to the $args{{name}} read");
+
+    let slot_col = line1.find("age").unwrap();
+    let age = fa.find_definition(Point::new(3, call.find("age").unwrap()), None);
+    assert!(
+        age.is_none_or(|d| (d.start.row, d.start.column) != (1, slot_col)),
+        "age never reaches the slot `new` returns: {age:?}"
+    );
+}
+
+/// A plain call above its `sub` links like one below it, and reaches the
+/// key the sub takes, never the identically named key it returns.
+#[test]
+fn a_plain_call_reaches_what_its_sub_takes_not_what_it_returns() {
+    let src = "connect(timeout => 30);\nsub connect { my %o = @_; return { timeout => $o{timeout} } }\n";
+    let fa = build_fa_from_source(src);
+    let line1 = src.lines().nth(1).unwrap();
+    let read_col = line1.find("$o{timeout}").unwrap() + "$o{".len();
+    let def = fa.find_definition(Point::new(0, 8), None).expect("timeout at the call has a def");
+    assert_eq!((def.start.row, def.start.column), (1, read_col));
+}
+
+/// What a callable takes and what it returns are two key sets, and the
+/// cross-file view keeps them apart.
+#[test]
+fn a_callable_takes_one_key_set_and_returns_another() {
+    let fa = build_fa_from_source("sub cfg { my %o = @_; my $v = $o{verbose}; return { host => 1 } }\n");
+    let info = fa.sub_info_view("cfg").unwrap();
+    assert_eq!(info.input_keys(), ["verbose".to_string()]);
+    assert_eq!(info.hash_keys(), ["host".to_string()]);
+}
+
+/// A package-qualified call names the callee by its own name in its own
+/// package, so `Foo::new(name => …)` reaches what `Foo::new` takes.
+#[test]
+fn a_qualified_call_reaches_what_its_sub_takes() {
+    let src = "package Foo;\nsub new { my ($class, %a) = @_; $a{name} }\npackage main;\nFoo::new(name => 1);\n";
+    let fa = build_fa_from_source(src);
+    let call = src.lines().nth(3).unwrap();
+    let def = fa.find_definition(Point::new(3, call.find("name").unwrap()), None).expect("def");
+    assert_eq!(def.start.row, 1);
 }

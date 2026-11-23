@@ -137,11 +137,7 @@ pub fn resolve_symbol_scoped(
                     Some(HashKeyOwner::Bridged { class: c }) => Some((c.clone(), false)),
                     Some(HashKeyOwner::Class(c)) => Some((c.clone(), true)),
                     _ => match analysis.deferred_hash_key_owner(r, module_index) {
-                        Some(HashKeyOwner::Sub { package: Some(c), name })
-                            if crate::model::conventions::is_constructor_name(&name) =>
-                        {
-                            Some((c, false))
-                        }
+                        Some(o @ HashKeyOwner::Input { .. }) => o.constructor_class().map(|c| (c.to_string(), false)),
                         Some(HashKeyOwner::Bridged { class: c }) => Some((c, false)),
                         Some(HashKeyOwner::Class(c)) => Some((c, true)),
                         _ => None,
@@ -364,6 +360,9 @@ pub fn resolve_symbol_scoped(
         RenameKind::HashKey(name) => match analysis.hash_key_owner_at(point) {
             Some(HashKeyOwner::Sub { package, name: sub_name }) => ResolvedTarget::Target(
                 TargetRef::new(name, TargetKind::HashKeyOfSub { package, name: sub_name }, analysis),
+            ),
+            Some(HashKeyOwner::Input { package, name: sub_name, slot }) => ResolvedTarget::Target(
+                TargetRef::new(name, TargetKind::HashKeyOfInput { package, name: sub_name, slot }, analysis),
             ),
             // A bridged key (DBIC column condition-arg / accessor): the fallback
             // when no field-group path caught it (e.g. single-file, no index).

@@ -562,8 +562,7 @@ impl<'a> Builder<'a> {
         //    HashKeyDef may not be visible at consumer build;
         //    the type already pinned the class.
         //  * **Non-Parametric receiver, locally typed.** Fall
-        //    through to `Sub { package: receiver, name: method
-        //    }` with `has_hash_key_def` strict-eq gating —
+        //    through to the method's named input (`Input`) with `has_hash_key_def` strict-eq gating —
         //    prevents `Foo::bar(name=>1)` from latching onto
         //    `Sub{Foo,new}` keys.
         //  * **Chain receiver, type unresolvable at build.**
@@ -616,10 +615,7 @@ impl<'a> Builder<'a> {
                 // class: link the first hashref's column keys to the class's
                 // columns. Cross-file (class elsewhere) stays `StrictOrDefer` —
                 // the deferred owner mints the column owner at query time.
-                let owner = HashKeyOwner::Sub {
-                    package: Some(cls.clone()),
-                    name: r.target_name.clone(),
-                };
+                let owner = HashKeyOwner::named_input(Some(cls.clone()), r.target_name.clone());
                 // A class that defines its OWN `sub <verb>` has overridden DBIC's
                 // verb — the call dispatches to the user's method, whose hash arg
                 // is not column-keyed — so don't column-key it (fall to Strict).
@@ -1937,6 +1933,51 @@ impl<'a> Builder<'a> {
                     },
                 );
             }
+        }
+    }
+
+    /// A callable's collecting parameter (`my ($class, %args) = @_`, a
+    /// signature's `%opts`) receives the named arguments its callers write,
+    /// so its direct key reads are those arguments: each read is owned by the
+    /// callable's named input, and the first read of a key declares it. Then
+    /// the plain calls' argument keys, held back for this, are emitted.
+    ///
+    /// TODO(arg-key-flows-to-slot): a key read here and stored into the
+    /// blessed slot (`bless { name => $args{name} }`) is one attr; joining
+    /// the read to the slot follows the value, which is whole-program flow.
+    pub(super) fn bind_collected_keys(&mut self) {
+        let mut declared: std::collections::HashSet<(HashKeyOwner, String)> = std::collections::HashSet::new();
+        let mut minted: Vec<(String, Span, ScopeId, HashKeyOwner)> = Vec::new();
+        for r in self.refs.iter_mut() {
+            if !matches!(r.kind, RefKind::HashKeyAccess { .. }) {
+                continue;
+            }
+            let Some(HashKeyOwner::Variable { name, def_scope }) = r.hash_key_owner() else { continue };
+            let scope = &self.scopes[def_scope.0 as usize];
+            let Some(callable) = scope.owner.map(|id| &self.symbols[id.0 as usize]) else { continue };
+            let SymbolDetail::Sub { params, .. } = &callable.detail else { continue };
+            if !params.iter().any(|p| p.pass == ParamPass::RestNamed && p.name == *name) {
+                continue;
+            }
+            let owner = HashKeyOwner::named_input(callable.package.clone(), callable.name.clone());
+            if declared.insert((owner.clone(), r.target_name.clone())) {
+                minted.push((r.target_name.clone(), r.span, r.scope, owner.clone()));
+            }
+            r.bind_hash_key_owner(owner);
+        }
+        for (key, span, scope, owner) in minted {
+            if self.has_hash_key_def(&key, &owner) {
+                continue;
+            }
+            let HashKeyOwner::Input { package, .. } = &owner else { continue };
+            let package = package.clone();
+            let detail = SymbolDetail::HashKeyDef { owner, is_dynamic: false };
+            self.add_symbol_in_scope(scope, key, SymKind::HashKeyDef, span, span, detail, Namespace::Language, package);
+        }
+        for (args, call, name, here) in std::mem::take(&mut self.pending_call_arg_keys) {
+            let package = self.refs[call].resolved_package().map(str::to_string).or(here);
+            let owner = HashKeyOwner::named_input(package, name);
+            self.emit_call_arg_key_accesses(args, Gate::Strict(owner));
         }
     }
 

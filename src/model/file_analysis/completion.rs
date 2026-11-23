@@ -92,7 +92,8 @@ pub enum ResolvedSub<'a> {
         /// Inferred type per param (parallel to `params`); `None` if unknown.
         param_types: Vec<Option<InferredType>>,
         is_method: bool,
-        hash_keys: Vec<String>,
+        /// The names the callable takes as named arguments.
+        input_keys: Vec<String>,
     },
 }
 
@@ -302,6 +303,7 @@ impl FileAnalysis {
             HashKeyOwner::Bridged { class } => format!("{}->{}", class, key),
             HashKeyOwner::Variable { name, .. } => format!("{}{{{}}}", name, key),
             HashKeyOwner::Sub { name, .. } => format!("{}()->{{{}}}", name, key),
+            HashKeyOwner::Input { name, .. } => format!("{}({} => …)", name, key),
         };
         let mut seen = HashSet::new();
         let mut candidates = Vec::new();
@@ -760,14 +762,8 @@ impl FileAnalysis {
                     })
                     .collect()
             }
-            ResolvedSub::CrossFile { hash_keys, params, .. } => {
-                // Check if any param is slurpy %hash
-                let has_slurpy = params.iter().any(|p| p.pass == ParamPass::RestNamed);
-                if !has_slurpy || hash_keys.is_empty() {
-                    return Vec::new();
-                }
-
-                hash_keys.into_iter()
+            ResolvedSub::CrossFile { input_keys, .. } => {
+                input_keys.into_iter()
                     .filter(|k| !used_keys.contains(k))
                     .map(|k| CompletionCandidate {
                         label: format!("{} =>", k),
@@ -1064,7 +1060,8 @@ impl FileAnalysis {
                     }
                     HashKeyOwner::Class(_)
                     | HashKeyOwner::Bridged { .. }
-                    | HashKeyOwner::Sub { .. } => {}
+                    | HashKeyOwner::Sub { .. }
+                    | HashKeyOwner::Input { .. } => {}
                 }
             }
         }
@@ -1350,7 +1347,7 @@ fn cross_file_resolved(sub_info: &SubInfo<'_>) -> ResolvedSub<'static> {
         params,
         param_types,
         is_method: sub_info.is_method(),
-        hash_keys: sub_info.hash_keys().to_vec(),
+        input_keys: sub_info.input_keys().to_vec(),
     }
 }
 

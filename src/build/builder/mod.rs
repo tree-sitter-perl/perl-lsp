@@ -314,6 +314,13 @@ struct Builder<'a> {
     /// types. Clear-and-emit on `source_tag = "array_push"`. Tuple
     /// shape only; cross-scope and conditional branches not handled.
     pending_array_pushes: Vec<(ScopeId, String, Vec<Span>)>,
+    /// A plain call's argument list, its call ref, the callee name and the
+    /// package the call is written in (where an unpinned name resolves): its
+    /// keys are emitted once every call is pinned to its package and the
+    /// callees' collecting parameters have minted their keys
+    /// (`bind_collected_keys`), so a call above its `sub` links the same as
+    /// one below it.
+    pending_call_arg_keys: Vec<(Node<'a>, usize, String, Option<String>)>,
     /// For each Sub/Method scope, its fallthrough arms (see [`TailArm`]).
     /// The tail-arm pass mints them on the sub's return arms; types ride the
     /// bag, this only points at source spans.
@@ -770,9 +777,9 @@ enum Gate {
     /// A plugin-declared column-keyed verb (DBIC `search`/`create`/…): walk only
     /// the FIRST hashref arg (the `\%cond`/`\%cols`; the trailing `\%attrs` hash
     /// is not column-keyed). A key that is a `Class` column of the receiver gets
-    /// the column owner; otherwise it falls back to the supplied `Sub{class,verb}`
-    /// owner (so a generic-named verb like `new` still binds Moo/Corinna ctor
-    /// keys). Carries the `Sub{class,verb}` owner.
+    /// the column owner; otherwise it falls back to the verb's named input
+    /// (so a generic-named verb like `new` still binds Moo/Corinna ctor
+    /// keys). Carries that input owner.
     ColumnKeyed(HashKeyOwner),
 }
 

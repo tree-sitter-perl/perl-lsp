@@ -704,7 +704,8 @@ impl<'a> CandidateSet<'a> {
                     None => analysis.deferred_hash_key_owner(r, Some(idx)),
                 };
                 let class = match &owner {
-                    Some(HashKeyOwner::Sub { package: Some(c), .. }) => Some(c.clone()),
+                    Some(HashKeyOwner::Sub { package: Some(c), .. })
+                    | Some(HashKeyOwner::Input { package: Some(c), .. }) => Some(c.clone()),
                     Some(HashKeyOwner::Class(c)) => Some(c.clone()),
                     _ => None,
                 };

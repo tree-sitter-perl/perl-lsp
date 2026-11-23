@@ -2535,3 +2535,46 @@ fn a_perl_constructor_retrieves_under_its_name() {
     assert!(target.constructed_classes.is_empty());
     assert_eq!(target.retrieval_keys(fa.names()), ["new"]);
 }
+
+/// A key a callable takes is one entity across files: the callee's
+/// collecting read declares it and every call site's key is a use, and the
+/// identically named key the callable RETURNS is not part of it.
+#[test]
+fn refs_to_an_input_key_joins_the_read_and_the_calls_across_files() {
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let lib = PathBuf::from("/tmp/resolve_input_key_lib.pm");
+    let app = PathBuf::from("/tmp/resolve_input_key_app.pl");
+    idx.insert_workspace_for_test(
+        lib.clone(),
+        parse("package Lib;\nsub new { my ($class, %args) = @_; return bless { host => $args{host} }, $class }\n1;\n"),
+    );
+    idx.insert_workspace_for_test(app.clone(), parse("use Lib;\nmy $l = Lib->new(host => 'h');\n"));
+
+    let results = refs_to(
+        &store,
+        Some(&idx),
+        &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
+            name: "host".to_string(),
+            kind: TargetKind::HashKeyOfInput {
+                package: Some("Lib".to_string()),
+                name: "new".to_string(),
+                slot: crate::model::file_analysis::InputSlot::Named,
+            },
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
+        },
+        RoleMask::EDITABLE,
+    );
+    let in_file = |path: &PathBuf| {
+        let want = crate::util::canonical_path::CanonicalPath::resolve(path);
+        results.iter().filter(move |r| matches!(&r.key, FileKey::Path(p) if *p == want)).collect::<Vec<_>>()
+    };
+    let lib_line = "sub new { my ($class, %args) = @_; return bless { host => $args{host} }, $class }";
+    let read_col = lib_line.find("$args{host}").unwrap() + "$args{".len();
+    let lib_refs = in_file(&lib);
+    assert!(lib_refs.iter().any(|r| (r.span.start.row, r.span.start.column) == (1, read_col)), "the read: {results:?}");
+    let slot_col = lib_line.find("host").unwrap();
+    assert!(!lib_refs.iter().any(|r| (r.span.start.row, r.span.start.column) == (1, slot_col)), "not the returned slot: {results:?}");
+    assert_eq!(in_file(&app).len(), 1, "the call site's key: {results:?}");
+}

@@ -65,8 +65,13 @@ impl FileAnalysis {
             .iter()
             .map(|s| s.name.clone())
             .collect();
+        let input_keys: Vec<String> = self
+            .hash_key_defs_for_owner(&HashKeyOwner::named_input(primary.package.clone(), name))
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
 
-        Some(SubInfo { analysis: self, primary, overloads, hash_keys })
+        Some(SubInfo { analysis: self, primary, overloads, hash_keys, input_keys })
     }
 
     /// Locate a package-global variable declaration (`our $x` / `our @arr`
@@ -182,6 +187,7 @@ pub struct SubInfo<'a> {
     #[allow(dead_code)] // retained for the `param_counts` / `return_type_for_arity` API surface
     overloads: Vec<&'a Symbol>,
     hash_keys: Vec<String>,
+    input_keys: Vec<String>,
 }
 
 impl<'a> SubInfo<'a> {
@@ -221,8 +227,14 @@ impl<'a> SubInfo<'a> {
         }
     }
 
+    /// The keys of what the callable returns.
     pub fn hash_keys(&self) -> &[String] {
         &self.hash_keys
+    }
+
+    /// The names the callable takes as named arguments.
+    pub fn input_keys(&self) -> &[String] {
+        &self.input_keys
     }
 
     /// Arity list covering the primary and overloads, in declaration order.
