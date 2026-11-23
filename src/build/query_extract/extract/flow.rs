@@ -305,7 +305,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             if let Some(recv) = ad.in_match(e.match_id, Capture::Member(MemberCap::Recv)) {
                 let span = e.span();
                 let args = super::members::call_args(ad, e.match_id);
-                let arg_count = args.as_ref().map(Vec::len);
+                let arg_count = args.as_ref().map(|a| super::members::places(a));
                 let recv_expr = expr_on(ad, &mut st.minted, out, recv);
                 out.call_sites.push(crate::build::query_extract::CallSite {
                     span,

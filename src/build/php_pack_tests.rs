@@ -5759,3 +5759,31 @@ fn a_php_callable_states_its_parameters() {
         ]
     );
 }
+
+/// A named argument fills no place: the call passes it under its name, and
+/// the places it counts are the unnamed ones.
+#[cfg(feature = "php")]
+#[test]
+fn a_named_argument_fills_no_place() {
+    use crate::model::witnesses::{CallArg, Callee, WitnessPayload};
+    let fa = php("<?php\nfunction f($a, $b = 1, $c = 2) { return $a; }\nf(1, c: 3);\n");
+    let args: Vec<Option<&str>> = fa
+        .witnesses
+        .all()
+        .iter()
+        .find_map(|w| match &w.payload {
+            WitnessPayload::Invoke { callee: Callee::Function { name, .. }, args: Some(args), .. } if name == "f" => Some(
+                args.iter()
+                    .map(|a| match a {
+                        CallArg::Named { key, .. } => Some(key.as_str()),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .expect("the call's invoke");
+    assert_eq!(args, [None, Some("c")]);
+    let call = fa.refs().iter().find(|r| r.target_name == "f" && r.span.start.row == 2).unwrap();
+    assert_eq!(call.arg_count, Some(1), "one place");
+}

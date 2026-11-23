@@ -142,3 +142,14 @@ TODO(pack-collected-keys): once keyed access lands for packs, a key read
 directly off a callable's `RestNamed`/`Rest` parameter is owned by that
 callable's `Input` and the first read declares it, as
 `bind_collected_keys` does for Perl's `%args`.
+
+## A named argument fills no place
+
+A call's label rides its argument as `CallArg::Named { key, value }`
+(`@arity.label` inside the `@arity.arg`). It fills no place: the arity a
+call states and the places `ReturnExpr::Arg(n)` reads count the unnamed
+arguments only, so `pick(1, c: 3)` is one place and one name, never two
+places. TODO(named-arg-binding): bind each named argument to the callee's
+parameter whose `ParamInfo::key` it names, which needs the callee's
+parameters at query time (cross-file: from the index) and has its first
+consumer in typing a parameter from its call sites (whole-program).

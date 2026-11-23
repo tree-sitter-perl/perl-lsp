@@ -7,16 +7,25 @@ use crate::model::file_analysis::{MemberOp, ParamArity};
 
 /// The call's arguments in order (the `@arity.arg`s of its match's
 /// `@arity.args` list), each with whether it spreads (an `@arity.spread` on
-/// the argument's node); `None` when the match wrote no argument list.
-pub(super) fn call_args(ad: &Adorned, match_id: usize) -> Option<Vec<(Span, bool)>> {
+/// the argument's node) and the name it is passed by (an `@arity.label`
+/// inside it); `None` when the match wrote no argument list.
+pub(super) fn call_args(ad: &Adorned, match_id: usize) -> Option<Vec<crate::build::query_extract::WrittenArg>> {
     let list = ad.in_match(match_id, Capture::Arity(ArityCap::Args))?;
     let spreads = |a: &Event| ad.on(a).any(|s| s.cap == Capture::Arity(ArityCap::Spread));
+    let label = |a: &Event| {
+        ad.within(a).map(|i| &ad.events()[i]).find(|t| t.cap == Capture::Arity(ArityCap::Label)).map(|t| t.text.clone())
+    };
     Some(
         ad.list_items(list)
             .filter(|a| a.cap == Capture::Arity(ArityCap::Arg))
-            .map(|a| (a.span(), spreads(a)))
+            .map(|a| crate::build::query_extract::WrittenArg { span: a.span(), spread: spreads(a), label: label(a) })
             .collect(),
     )
+}
+
+/// How many places a call's arguments fill: a named one fills none.
+pub(super) fn places(args: &[crate::build::query_extract::WrittenArg]) -> usize {
+    args.iter().filter(|a| a.label.is_none()).count()
 }
 
 /// The arguments the call passes by name (`@arity.label`s in its match's

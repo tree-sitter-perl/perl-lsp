@@ -1283,8 +1283,8 @@ fn remap_spans(
         if let Some(recv) = site.receiver.as_mut() {
             *recv = rspan(*recv);
         }
-        for (arg, _) in site.args.iter_mut().flatten() {
-            *arg = rspan(*arg);
+        for arg in site.args.iter_mut().flatten() {
+            arg.span = rspan(arg.span);
         }
     }
     for site in receiver_sites.iter_mut() {

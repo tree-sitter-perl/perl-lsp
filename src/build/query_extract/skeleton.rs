@@ -127,6 +127,15 @@ pub struct SkelRef {
     pub arg_keys: Vec<(String, Span)>,
 }
 
+/// One argument a call writes: where it is, whether it spreads
+/// (`@arity.spread`), and the name it is passed by (`@arity.label`).
+#[derive(Debug, Clone)]
+pub struct WrittenArg {
+    pub span: Span,
+    pub spread: bool,
+    pub label: Option<String>,
+}
+
 /// One `@expr.call` site.
 #[derive(Debug, Clone)]
 pub struct CallSite {
@@ -147,7 +156,7 @@ pub struct CallSite {
     /// The written arguments in order, each with whether it spreads
     /// (`@arity.spread`); `None` when the call's match captured no argument
     /// list.
-    pub args: Option<Vec<(Span, bool)>>,
+    pub args: Option<Vec<WrittenArg>>,
     /// The call constructs an instance of its receiver's class
     /// (`@expr.construct`).
     pub constructs: bool,
@@ -1283,12 +1292,10 @@ impl SkeletonAnalysis {
                 }
                 let args = site.args.as_ref().map(|args| {
                     args.iter()
-                        .map(|&(arg, spread)| {
-                            if spread {
-                                crate::model::witnesses::CallArg::Spread(WA::Expr(arg))
-                            } else {
-                                crate::model::witnesses::CallArg::One(WA::Expr(arg))
-                            }
+                        .map(|a| match (&a.label, a.spread) {
+                            (Some(key), _) => crate::model::witnesses::CallArg::Named { key: key.clone(), value: WA::Expr(a.span) },
+                            (None, true) => crate::model::witnesses::CallArg::Spread(WA::Expr(a.span)),
+                            (None, false) => crate::model::witnesses::CallArg::One(WA::Expr(a.span)),
                         })
                         .collect()
                 });
