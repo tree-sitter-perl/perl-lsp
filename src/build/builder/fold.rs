@@ -628,7 +628,7 @@ impl<'a> Builder<'a> {
                     pending.push(Path::ColumnKeyed(owner, args));
                     continue;
                 }
-                pending.push(if user_shadows_verb {
+                pending.push(if self.declares_input(&owner) || self.framework_read.contains(&args.id()) {
                     Path::Strict(owner, args)
                 } else {
                     // The callable is declared elsewhere (another file, or
@@ -1946,6 +1946,18 @@ impl<'a> Builder<'a> {
     /// TODO(arg-key-flows-to-slot): a key read here and stored into the
     /// blessed slot (`bless { name => $args{name} }`) is one attr; joining
     /// the read to the slot follows the value, which is whole-program flow.
+    /// Whether this file states what `owner`'s callable takes: it declares
+    /// the callable, or a key of its input (a framework's constructor key,
+    /// a `has`). Then the local table is authoritative for the call's keys.
+    fn declares_input(&self, owner: &HashKeyOwner) -> bool {
+        let HashKeyOwner::Input { package, name, .. } = owner else { return false };
+        self.symbols.iter().any(|s| match (&s.kind, &s.detail) {
+            (SymKind::Sub | SymKind::Method, _) => &s.name == name && &s.package == package,
+            (SymKind::HashKeyDef, SymbolDetail::HashKeyDef { owner: o, .. }) => o == owner,
+            _ => false,
+        })
+    }
+
     pub(super) fn bind_collected_keys(&mut self) {
         let mut declared: std::collections::HashSet<(HashKeyOwner, String)> = std::collections::HashSet::new();
         let mut minted: Vec<(String, Span, ScopeId, HashKeyOwner)> = Vec::new();
@@ -1985,14 +1997,11 @@ impl<'a> Builder<'a> {
             // A builtin or a keyword a framework installed (`has`, `extends`)
             // is no callable taking names: the framework reads its arguments.
             let at = self.import_scope_at(self.refs[call].span.start);
-            let elsewhere = !crate::model::builtins::is_builtin(&name)
-                && !self.imports.keyword(at, &name)
-                && !self.symbols.iter().any(|s| {
-                    matches!(s.kind, SymKind::Sub | SymKind::Method)
-                        && s.name == name
-                        && s.package == package
-                });
+            let framework = crate::model::builtins::is_builtin(&name)
+                || self.imports.keyword(at, &name)
+                || self.framework_read.contains(&args.id());
             let owner = HashKeyOwner::named_input(package, name);
+            let elsewhere = !framework && !self.declares_input(&owner);
             let gate = if elsewhere {
                 Gate::StrictOrDefer(owner, crate::model::witnesses::RefIdx(call as u32))
             } else {
