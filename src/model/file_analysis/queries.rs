@@ -1096,16 +1096,12 @@ impl FileAnalysis {
     /// A parameter's key is the name a call passes it by, no binding.
     fn binding_symbol(&self, id: SymbolId) -> SymbolId {
         let sym = &self.symbols[id.0 as usize];
-        match sym.declared_with {
-            Some(twin)
-                if self.symbols[twin.0 as usize].scope == sym.scope
-                    && self.symbols[twin.0 as usize].kind != SymKind::HashKeyDef
-                    && sym.kind != SymKind::HashKeyDef =>
-            {
-                id.min(twin)
-            }
-            _ => id,
+        if sym.kind == SymKind::HashKeyDef {
+            return id;
         }
+        self.declared_together(sym)
+            .filter(|t| t.scope == sym.scope && t.kind != SymKind::HashKeyDef)
+            .fold(id, |at, t| at.min(t.id))
     }
 
     /// Key every variable fact in the bag to the place its name binds to

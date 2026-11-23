@@ -862,8 +862,8 @@ fn a_promoted_parameter_is_the_property_and_the_local_as_one() {
     let fa = php(PROMOTED);
     let field = fa.symbols().iter().find(|s| s.kind == SymKind::Field).unwrap();
     let local = fa.symbols().iter().find(|s| s.kind == SymKind::Variable && s.name == "made").unwrap();
-    assert_eq!(field.declared_with, Some(local.id));
-    assert_eq!(local.declared_with, Some(field.id));
+    assert!(fa.declared_together(field).any(|t| t.id == local.id));
+    assert!(fa.declared_together(local).any(|t| t.id == field.id));
     assert_eq!(field.selection_span, local.selection_span);
     assert_ne!(field.scope, local.scope, "the property is the class's, the local the constructor's");
 }
@@ -5701,4 +5701,40 @@ class P {
         edits,
         [(2, lines[2].find("$b").unwrap() + 1), (2, lines[2].rfind("$b").unwrap() + 1), (3, lines[3].find("b:").unwrap())]
     );
+}
+
+/// A promoted constructor parameter (`private int $x`) declares three
+/// things at one token: the property, the constructor's local, and the key
+/// a call passes (`new P(x: 1)`). They are one name: a rename from any of
+/// them, a `$this->x` read or a label rewrites all of them.
+#[cfg(feature = "php")]
+#[test]
+fn a_promoted_parameter_is_its_property_and_its_label() {
+    let src = "<?php
+class P {
+    public function __construct(private int $x) { echo $x; }
+    public function get() { return $this->x; }
+}
+$p = new P(x: 1);
+";
+    let fa = php(src);
+    let lines: Vec<&str> = src.lines().collect();
+    let at = |row: usize, needle: &str| tree_sitter::Point::new(row, lines[row].find(needle).unwrap());
+    let xs: Vec<SymKind> = fa.symbols().iter().filter(|s| s.name == "x").map(|s| s.kind).collect();
+    assert_eq!(xs.len(), 3, "property, local and key: {xs:?}");
+    let def = fa.find_definition(at(5, "x:"), None).expect("label goes to the parameter");
+    assert_eq!(def.start.row, 2);
+    let want = [
+        (2, lines[2].find("$x").unwrap() + 1),
+        (2, lines[2].rfind("$x").unwrap() + 1),
+        (3, lines[3].find("x;").unwrap()),
+        (5, lines[5].find("x:").unwrap()),
+    ];
+    for from in [at(2, "x)"), at(3, "x;"), at(5, "x:"), tree_sitter::Point::new(2, lines[2].rfind("$x").unwrap() + 1)] {
+        let mut edits: Vec<(usize, usize)> =
+            fa.rename_at(from, "y").expect("renames").into_iter().map(|(s, _)| (s.start.row, s.start.column)).collect();
+        edits.sort();
+        edits.dedup();
+        assert_eq!(edits, want, "from {from:?}");
+    }
 }

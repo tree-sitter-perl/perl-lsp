@@ -1448,7 +1448,7 @@ impl FileAnalysis {
         // member it was declared with is the class's content, the twin is
         // the bare name code in the body reads.
         if sym.kind == SymKind::Variable
-            && sym.declared_with.is_some_and(|id| self.symbol_is_class_content(self.symbol(id)))
+            && self.declared_together(sym).any(|t| t.kind != SymKind::Variable && self.symbol_is_class_content(t))
         {
             return false;
         }

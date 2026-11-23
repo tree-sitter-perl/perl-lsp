@@ -555,10 +555,11 @@ impl FileAnalysis {
         // synthesized def) owned by `Sub { class, new }`.
         let (key, owner) = match self
             .ref_at(point)
-            .map(|r| (r, r.hash_key_owner()))
+            .map(|r| (r, r.hash_key_owner().cloned().or_else(|| self.deferred_hash_key_owner(r, None))))
         {
+            // A call's key binds to its call; its owner is the callee's.
             Some((r, Some(o))) if matches!(r.kind, RefKind::HashKeyAccess { .. }) => {
-                (r.target_name.clone(), o.clone())
+                (r.target_name.clone(), o)
             }
             _ => match self.symbol_at(point) {
                 Some(s) if matches!(s.kind, SymKind::HashKeyDef) => match &s.detail {
@@ -641,7 +642,7 @@ impl FileAnalysis {
     fn field_spelled_by<'s>(&'s self, sym: &'s Symbol) -> Option<&'s Symbol> {
         match sym.kind {
             SymKind::Field => Some(sym),
-            SymKind::Variable => sym.declared_with.map(|id| self.symbol(id)).filter(|f| f.kind == SymKind::Field),
+            SymKind::Variable | SymKind::HashKeyDef => self.declared_together(sym).find(|f| f.kind == SymKind::Field),
             _ => None,
         }
     }
@@ -664,10 +665,7 @@ impl FileAnalysis {
                 // A `sub new(:$name)` parameter's key is its parameter's group.
                 && self.param_group_of(s).is_none()
         }) {
-            let accessor = key_def
-                .declared_with
-                .map(|id| self.symbol(id))
-                .filter(|s| matches!(s.kind, SymKind::Method));
+            let accessor = self.declared_together(key_def).find(|s| matches!(s.kind, SymKind::Method));
             return Some(FieldGroup {
                 spelling_sym: None,
                 private: false,
@@ -716,7 +714,7 @@ impl FileAnalysis {
                 && s.name == bare
                 && s.package.as_deref() == Some(class)
         })?;
-        let paired = accessor.declared_with.map(|id| self.symbol(id)).is_some_and(|s| {
+        let paired = self.declared_together(accessor).any(|s| {
             matches!(s.kind, SymKind::HashKeyDef)
                 && matches!(
                     &s.detail,
@@ -743,14 +741,20 @@ impl FileAnalysis {
         // A member declared with a bare name from one token is the field
         // itself: read through the class, shared down the hierarchy like
         // any member, its bare name's uses the variable spellings.
-        if let Some(twin) = sym.declared_with.map(|id| self.symbol(id)).filter(|t| t.kind == SymKind::Variable) {
+        if let Some(twin) = self.declared_together(sym).find(|t| t.kind == SymKind::Variable) {
+            // A promoted constructor parameter is also the key a call
+            // passes it by.
+            let input = self.declared_together(sym).find_map(|t| match &t.detail {
+                SymbolDetail::HashKeyDef { owner: o @ HashKeyOwner::Input { .. }, .. } => Some(o.clone()),
+                _ => None,
+            });
             return Some(FieldGroup {
                 spelling_sym: Some(twin.id),
                 private: false,
                 decl_span: None,
                 class: sym.package.clone()?,
                 bare: sym.name.clone(),
-                input: None,
+                input,
                 attr: true,
                 has_reader: true,
                 reader_kind: MemberKind::of_symbol(sym),
@@ -778,10 +782,14 @@ impl FileAnalysis {
     /// The group of a by-name parameter: the variable the body reads and
     /// the key a call passes, declared from one `:$name` token.
     fn param_group_of(&self, sym: &Symbol) -> Option<FieldGroup> {
-        let twin = self.symbol(sym.declared_with?);
-        let (var, key) = match (sym.kind, twin.kind) {
-            (SymKind::Variable, SymKind::HashKeyDef) => (sym, twin),
-            (SymKind::HashKeyDef, SymKind::Variable) => (twin, sym),
+        // A promoted parameter's field is the group (`field_group_of`).
+        if self.declared_together(sym).any(|t| t.kind == SymKind::Field) {
+            return None;
+        }
+        let twin_of = |kind| self.declared_together(sym).find(|t| t.kind == kind);
+        let (var, key) = match sym.kind {
+            SymKind::Variable => (sym, twin_of(SymKind::HashKeyDef)?),
+            SymKind::HashKeyDef => (twin_of(SymKind::Variable)?, sym),
             _ => return None,
         };
         let SymbolDetail::HashKeyDef { owner: owner @ HashKeyOwner::Input { package, .. }, .. } = &key.detail else {
@@ -806,7 +814,7 @@ impl FileAnalysis {
             .iter()
             .filter(|s| s.kind == SymKind::HashKeyDef && s.name == bare)
             .filter(|s| matches!(&s.detail, SymbolDetail::HashKeyDef { owner: o, .. } if o == owner))
-            .find_map(|s| self.param_group_of(s))
+            .find_map(|s| self.param_group_of(s).or_else(|| self.field_group_of(self.field_spelled_by(s)?)))
     }
 
     /// The parameter group by its callable's input owner — the

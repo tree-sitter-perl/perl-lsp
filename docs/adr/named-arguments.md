@@ -114,3 +114,20 @@ callable called by no name (a closure, a lambda) declares none.
 
 The key is no binding: where a variable and its key are twins, the
 variable is the place its value lives (`binding_symbol`).
+
+A token may declare more than two things: PHP's promoted constructor
+parameter (`private int $x`) is the class's property, the constructor's
+local and the key `new P(x: 1)` passes. `Symbol::declared_with` is a
+ring through every symbol one token declared (`declared_together`), and
+`@def.pair` joins the defs declared at one name token whichever match
+states them, so a pattern of its own can add a declaration a token's
+three captures cannot hold. Such a group is the property's: its field
+group carries the constructor's input, so a rename from the property, a
+`$this->x` read, the local or a label rewrites all of them.
+
+A pack's collecting parameter (`**kw`, `...$rest`) does not yet own its
+reads: a pack mints no keyed-access refs (`kw['name']`) for it to own.
+TODO(pack-collected-keys): once keyed access lands for packs, a key read
+directly off a callable's `RestNamed`/`Rest` parameter is owned by that
+callable's `Input` and the first read declares it, as
+`bind_collected_keys` does for Perl's `%args`.

@@ -967,11 +967,12 @@ pub struct Symbol {
     /// (`MemberSpaces::of_decl`).
     #[serde(default)]
     pub member_space: Option<NamespaceId>,
-    /// The OTHER symbol the same declaration token minted: a `has` accessor
-    /// and its constructor key, a promoted constructor parameter and its
-    /// field. Minted where the pair is synthesized, so no consumer
-    /// re-derives the pairing from span equality or column arithmetic
-    /// (rule #11).
+    /// The next symbol the same declaration token minted, in a ring
+    /// through every one of them: a `has` accessor and its constructor key,
+    /// a promoted constructor parameter's field, local and key. Minted
+    /// where the declaration is synthesized, so no consumer re-derives the
+    /// grouping from span equality or column arithmetic (rule #11). Read it
+    /// through [`declared_together`], never as one twin.
     #[serde(default)]
     pub declared_with: Option<SymbolId>,
     /// The pointer/reference declarator stack a typed variable carries,
@@ -1320,6 +1321,20 @@ pub fn cut_region(region: Span, cuts: impl IntoIterator<Item = Option<Point>>) -
         .min_by_key(key)
         .unwrap_or(region.end);
     (key(&region.start) < key(&end)).then_some(Span { start: region.start, end })
+}
+
+/// The other symbols `sym`'s declaration token minted: the ring
+/// `Symbol::declared_with` links, `sym` left out.
+pub fn declared_together<'s>(symbols: &'s [Symbol], sym: &'s Symbol) -> impl Iterator<Item = &'s Symbol> + 's {
+    let mut at = sym.declared_with;
+    let mut left = symbols.len();
+    std::iter::from_fn(move || {
+        let id = at.filter(|id| *id != sym.id && left > 0)?;
+        left -= 1;
+        let next = symbols.get(id.0 as usize)?;
+        at = next.declared_with;
+        Some(next)
+    })
 }
 
 impl Symbol {

@@ -182,6 +182,15 @@
     (by_ref
       (variable_name (name) @def.field.name @def.local.name @flow.target) @def.field.spelled @def.local.spelled)
   ]) @def.field @def.local @def.pair
+; It is also the key a call passes the constructor (`new P(x: 1)`), a
+; third declaration at the same token: a pattern of its own, since the
+; name already holds three captures, and `@def.pair` joins the defs one
+; token declares whichever match states them.
+(property_promotion_parameter
+  name: [
+    (variable_name (name) @def.input.name)
+    (by_ref (variable_name (name) @def.input.name))
+  ]) @def.input @def.pair
 
 ; ---- documentation ----
 ; A docblock (`/** … */`) written directly before a declaration documents

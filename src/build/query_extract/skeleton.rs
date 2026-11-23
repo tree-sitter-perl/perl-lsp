@@ -22,9 +22,11 @@ pub struct SkelSymbol {
     /// The documentation the document attaches to the def's name token
     /// (`@doc.of`), as the pack's `doc_text` reads it.
     pub doc: Option<String>,
-    /// The `@def.pair` match this def shares its name token with: the two
-    /// defs carrying one id are one declaration (`Symbol::declared_with`).
-    /// A match id, not a position in `symbols`, so it survives every dedup.
+    /// The name token a `@def.pair` def is declared at: the defs carrying
+    /// one id are one declaration (`Symbol::declared_with`), whichever
+    /// match declared each, so a token can declare more than one node's
+    /// worth of captures holds. A token's id, not a position in
+    /// `symbols`, so it survives every dedup.
     pub pair: Option<usize>,
     /// Declared return (`@rettype`), for methods/functions — drives
     /// method-return resolution + chaining through Member. A type, or one
@@ -746,10 +748,11 @@ impl SkeletonAnalysis {
                     pairs.entry(id).or_default().push(i);
                 }
             }
-            for at in pairs.values() {
-                let [a, b] = at[..] else { continue };
-                symbols[a].declared_with = Some(SymbolId(b as u32));
-                symbols[b].declared_with = Some(SymbolId(a as u32));
+            // Every def one token declares links to the next, round.
+            for at in pairs.values().filter(|at| at.len() > 1) {
+                for (k, &i) in at.iter().enumerate() {
+                    symbols[i].declared_with = Some(SymbolId(at[(k + 1) % at.len()] as u32));
+                }
             }
         }
         // Tag a typedef-struct's members with its name. `typedef struct
@@ -1067,15 +1070,9 @@ impl SkeletonAnalysis {
             // or its twin's when one token declared both (python's class
             // body), the same choice a read of the name binds.
             let place_of = |sym: &Symbol| {
-                let id = match sym.declared_with {
-                    Some(twin)
-                        if symbols[twin.0 as usize].scope == sym.scope
-                            && symbols[twin.0 as usize].kind != SymKind::HashKeyDef =>
-                    {
-                        sym.id.min(twin)
-                    }
-                    _ => sym.id,
-                };
+                let id = crate::model::file_analysis::declared_together(&symbols, sym)
+                    .filter(|t| t.scope == sym.scope && t.kind != SymKind::HashKeyDef && sym.kind != SymKind::HashKeyDef)
+                    .fold(sym.id, |at, t| at.min(t.id));
                 WA::Place(Box::new(crate::model::file_analysis::Place::variable(
                     crate::model::file_analysis::Binding::Lexical(id),
                 )))
