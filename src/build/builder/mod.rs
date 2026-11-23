@@ -321,6 +321,10 @@ struct Builder<'a> {
     /// (`bind_collected_keys`), so a call above its `sub` links the same as
     /// one below it.
     pending_call_arg_keys: Vec<(Node<'a>, usize, String, Option<String>)>,
+    /// The nodes a plugin pattern captured in a match it emitted for: a
+    /// call whose arguments a framework reads is no callable taking names,
+    /// so its keys are the framework's (`docs/adr/named-arguments.md`).
+    framework_read: std::collections::HashSet<usize>,
     /// For each Sub/Method scope, its fallthrough arms (see [`TailArm`]).
     /// The tail-arm pass mints them on the sub's return arms; types ride the
     /// bag, this only points at source spans.

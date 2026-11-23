@@ -650,8 +650,14 @@ impl<'a> Builder<'a> {
             // `InternalHashKey` member. A `return { ... }` hash is NOT instance
             // slots (its keys are the sub's return shape, consumed `Sub`-owned),
             // so only the bless context mints this.
-            if let HashKeyOwner::Sub { package: Some(class), .. } = owner {
-                if self.anon_hash_is_blessed(node) {
+            // The slots are the BLESSED class's: `bless {…}, 'Other'` in a
+            // `C` method makes `Other` instances, never `C` ones.
+            if let HashKeyOwner::Sub { package: Some(enclosing), .. } = owner {
+                if let Some(bless) = self.blessing_call(node) {
+                    let class = match self.extract_call_args(bless).get(1) {
+                        Some(arg) => self.bless_class_of(*arg).unwrap_or_else(|| enclosing.clone()),
+                        None => enclosing.clone(),
+                    };
                     for key in keys {
                         self.attr_projections.push(crate::model::file_analysis::AttrProjection {
                             class: class.clone(),
@@ -666,19 +672,19 @@ impl<'a> Builder<'a> {
         self.queue_children(node);
     }
 
-    /// Is this anon-hash node the operand of a `bless` call (within 5
-    /// ancestors)? Mirrors `detect_anon_hash_owner`'s bless branch — bless
+    /// The `bless` call this anon-hash node is the operand of (within 5
+    /// ancestors). Mirrors `detect_anon_hash_owner`'s bless branch — bless
     /// keys are instance slots; `return { ... }` keys are not.
-    pub(super) fn anon_hash_is_blessed(&self, anon_hash: Node<'a>) -> bool {
+    pub(super) fn blessing_call(&self, anon_hash: Node<'a>) -> Option<Node<'a>> {
         let mut ancestor = self.syntax.parent(anon_hash);
         for _ in 0..5 {
-            let Some(a) = ancestor else { return false };
+            let a = ancestor?;
             if self.is_bless_call(a) {
-                return true;
+                return Some(a);
             }
             ancestor = self.syntax.parent(a);
         }
-        false
+        None
     }
 
     /// `recv->resultset('Foo')` → `Parametric(ResultSet { base,

@@ -3677,3 +3677,37 @@ fn a_named_parameter_is_its_call_keys() {
     at2.sort();
     assert_eq!(at, at2);
 }
+
+/// A blessed hash's keys are slots of the class it is blessed INTO: a
+/// method of `Foo` that makes a `Meta` gives `Meta` its `name` slot, and
+/// `Foo` none, so `Foo`'s subclasses never inherit a `name` attr from it.
+#[test]
+fn a_bless_into_another_class_slots_that_class() {
+    use crate::model::file_analysis::AttrProjectionKind;
+    let src = "package Foo;\nsub meta { my $c = shift; bless({ name => $c }, 'Meta') }\nsub new { my $c = shift; bless({ size => 1 }, $c) }\n1;\n";
+    let fa = build_fa_from_source(src);
+    let slots: Vec<(&str, &str)> = fa
+        .attr_projections
+        .iter()
+        .filter(|a| matches!(a.kind, AttrProjectionKind::InternalKey))
+        .map(|a| (a.class.as_str(), a.attr.as_str()))
+        .collect();
+    assert_eq!(slots, [("Meta", "name"), ("Foo", "size")]);
+    assert!(fa.field_projections_named("name", "Foo").is_none());
+}
+
+/// A call a framework's pattern reads (DBIC's `__PACKAGE__->has_many`) is
+/// no callable taking names: its keys never bind to the call, so the
+/// framework's own facts at those tokens keep the cursor.
+#[test]
+fn a_framework_read_call_binds_no_keys() {
+    let src = "package My::Row;\nuse base 'DBIx::Class::Core';\n__PACKAGE__->has_many( widgets => 'Widget', 'row_id' );\nMy::Other->frob( speed => 1 );\n1;\n";
+    let fa = build_fa_from_source(src);
+    let keys: Vec<&str> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::HashKeyAccess { .. }))
+        .map(|r| r.target_name.as_str())
+        .collect();
+    assert_eq!(keys, ["speed"], "an unread call elsewhere still binds its keys");
+}

@@ -782,6 +782,9 @@ impl<'a> Builder<'a> {
                     drop(c);
                     let actions =
                         crate::util::ghost_stats::timed("pd.on_match", || p.on_match(&spec.name, &mctx));
+                    if !actions.is_empty() {
+                        self.framework_read.extend(caps.iter().map(|(_, n)| n.id()));
+                    }
                     if defer {
                         self.record_gated_pattern_emission(
                             p.id(),
@@ -1016,6 +1019,9 @@ impl<'a> Builder<'a> {
                 p.id(),
             );
             let actions = p.on_match(&spec.name, &mctx);
+            if !actions.is_empty() {
+                self.framework_read.extend(caps.iter().map(|(_, n)| n.id()));
+            }
             if defer {
                 self.record_gated_pattern_emission(
                     p.id(),

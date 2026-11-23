@@ -86,9 +86,15 @@ still widen to every subclass by `class_isa`, since its keys are the
 class's inherited attrs.
 
 Whether a fat-comma key IS a key is the callee's to say. When the file
-declares the callable, its local table is authoritative and a key it
-lacks emits nothing. When it does not (an imported function, a method
+declares the callable, or a key of its input (a `has` declares the
+constructor's), its local table is authoritative and a key it lacks
+emits nothing. When it does not (an imported function, a method
 another file declares or an ancestor supplies), every stringy key binds
 to its call and the owner is read with the index in hand. A builtin and a
-keyword a framework installed (`has`, `extends`) are no callable taking
-names: the framework reads their arguments, so they never defer.
+keyword a framework installed (`has`, `extends`), and a call a plugin
+pattern emitted for (DBIC's `__PACKAGE__->has_many(widgets => …)`), are
+no callable taking names: the framework reads their arguments, so they
+never defer.
+
+A blessed hash's keys are slots of the class it is blessed into, not of
+the package whose method blesses it: `bless {…}, 'Other'` slots `Other`.
