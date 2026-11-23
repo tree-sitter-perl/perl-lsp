@@ -1242,8 +1242,12 @@ fn remap_spans(
             qualifier: _,
             spelled,
             access: _,
+            arg_keys,
         } = rf;
         (*start, *end) = remap_span(*start, *end);
+        for (_, sp) in arg_keys.iter_mut() {
+            *sp = rspan(*sp);
+        }
         // The invocant span is consumed via `expr_type_at_span` (member
         // resolution); the member-op span rides the MethodCall ref. Both
         // die on the spliced line if left in transformed coords.

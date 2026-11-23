@@ -1093,10 +1093,17 @@ impl FileAnalysis {
     /// The one symbol a binding is named by. A token that declares two
     /// symbols in one scope (python's class-body binding: the member and
     /// the name the body reads, `Symbol::declared_with`) binds one value.
+    /// A parameter's key is the name a call passes it by, no binding.
     fn binding_symbol(&self, id: SymbolId) -> SymbolId {
         let sym = &self.symbols[id.0 as usize];
         match sym.declared_with {
-            Some(twin) if self.symbols[twin.0 as usize].scope == sym.scope => id.min(twin),
+            Some(twin)
+                if self.symbols[twin.0 as usize].scope == sym.scope
+                    && self.symbols[twin.0 as usize].kind != SymKind::HashKeyDef
+                    && sym.kind != SymKind::HashKeyDef =>
+            {
+                id.min(twin)
+            }
             _ => id,
         }
     }

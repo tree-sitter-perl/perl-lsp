@@ -92,3 +92,19 @@ another file declares or an ancestor supplies), every stringy key binds
 to its call and the owner is read with the index in hand. A builtin and a
 keyword a framework installed (`has`, `extends`) are no callable taking
 names: the framework reads their arguments, so they never defer.
+
+## Every language spells it the same way
+
+A pack states both halves in its query document. `@def.input` on a
+parameter declares its key, paired with the parameter's local by
+`@def.pair`; the extractor files the key under the named input of the
+callable whose scope the parameter binds in. `@arity.label` on a
+call's argument name (php's `f(b: 2)`, python's `f(b=2)`) rides the
+call's own reference, and the call's key refs follow it bound to it
+(`CallArgKey`), so a label resolves like a Perl call key: its owner is
+read off the call, a construction's being the class's constructor
+(`called_member`). A receiver is the object, never a key, and a
+callable called by no name (a closure, a lambda) declares none.
+
+The key is no binding: where a variable and its key are twins, the
+variable is the place its value lives (`binding_symbol`).

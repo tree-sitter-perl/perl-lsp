@@ -86,17 +86,19 @@ fn input_group_of_callee(
     idx: &dyn CrossFileLookup,
 ) -> Option<ResolvedTarget> {
     use crate::model::file_analysis::HashKeyOwner;
-    let HashKeyOwner::Input { package: Some(package), name, slot } = owner else {
+    let HashKeyOwner::Input { package, name, slot } = owner else {
         return None;
     };
-    let declaring = origin
-        .resolve_method_in_ancestors(package, name, Some(idx))
-        .map(|m| m.class().to_string())
-        .unwrap_or_else(|| package.clone());
-    let declared = HashKeyOwner::Input { package: Some(declaring.clone()), name: name.clone(), slot: *slot };
+    let declaring = package.as_deref().map(|package| {
+        origin
+            .resolve_method_in_ancestors(package, name, Some(idx))
+            .map_or_else(|| package.to_string(), |m| m.class().to_string())
+    });
+    let declared = HashKeyOwner::Input { package: declaring.clone(), name: name.clone(), slot: *slot };
     if let Some(p) = origin.input_projections_named(bare, &declared) {
         return Some(group_from_projections(p, origin, None, Some(idx)));
     }
+    let declaring = declaring?;
     idx.visible_def_candidates(&declaring).iter().find_map(|cached| {
         let whole = idx.whole_present(cached);
         let p = whole.input_projections_named(bare, &declared)?;

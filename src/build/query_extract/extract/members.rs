@@ -19,6 +19,18 @@ pub(super) fn call_args(ad: &Adorned, match_id: usize) -> Option<Vec<(Span, bool
     )
 }
 
+/// The arguments the call passes by name (`@arity.label`s in its match's
+/// `@arity.args` list), each its name and token.
+pub(super) fn call_labels(ad: &Adorned, match_id: usize) -> Vec<(String, Span)> {
+    let Some(list) = ad.in_match(match_id, Capture::Arity(ArityCap::Args)) else {
+        return Vec::new();
+    };
+    ad.list_items(list)
+        .filter(|a| a.cap == Capture::Arity(ArityCap::Label))
+        .map(|a| (a.text.clone(), a.span()))
+        .collect()
+}
+
 /// The operator a member match wrote, with its span: the
 /// `@member.op.<which>` some pattern names on its `@member.op` token. A
 /// token no pattern names claims no operator, so op-DX stays silent rather

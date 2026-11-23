@@ -139,6 +139,18 @@
 (typed_parameter . (identifier) @def.var.name @def.var)
 (default_parameter name: (identifier) @def.var.name @def.var)
 (typed_default_parameter name: (identifier) @def.var.name @def.var)
+; A `def`'s parameter is also the key a call may pass it by (`f(a=1)`):
+; the one token declares the name and the key. A lambda is called by no
+; name, so its parameters are keys of nothing; `*args` and `**kw` collect
+; what no key names. (A positional-only parameter, before a `/`, mints a
+; key no call can write.)
+(function_definition
+  parameters: (parameters (identifier) @def.input @def.var @def.pair))
+(function_definition
+  parameters: (parameters
+    [(typed_parameter . (identifier) @def.input.name @def.var.name)
+     (default_parameter name: (identifier) @def.input.name @def.var.name)
+     (typed_default_parameter name: (identifier) @def.input.name @def.var.name)] @def.input @def.var @def.pair))
 
 ; An annotated parameter holds a value of its annotation, as an annotated
 ; assignment's target does.
@@ -276,7 +288,10 @@
 ; A bare name read. An attribute's name (`count` in `o.count`) is the member
 ; read above, never a bare name; its receiver is.
 ((identifier) @expr.read.var
- (#not-has-parent? @expr.read.var attribute))
+ (#not-has-parent? @expr.read.var attribute keyword_argument))
+(keyword_argument value: (identifier) @expr.read.var)
+; A keyword argument's name is a key the callee takes.
+(keyword_argument name: (identifier) @arity.label)
 (attribute object: (identifier) @expr.read.var)
 
 ; Parentheses hold the value they wrap.

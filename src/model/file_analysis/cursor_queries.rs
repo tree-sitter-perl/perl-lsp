@@ -78,7 +78,7 @@ impl FileAnalysis {
     // ---- High-level queries ----
 
     /// Go-to-definition: resolve the symbol at cursor to its definition span.
-    pub fn find_definition(&self, point: Point, _module_index: Option<&dyn CrossFileLookup>) -> Option<Span> {
+    pub fn find_definition(&self, point: Point, module_index: Option<&dyn CrossFileLookup>) -> Option<Span> {
         // 1. Check if cursor is on a ref
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
@@ -162,11 +162,17 @@ impl FileAnalysis {
                     });
                 }
                 RefKind::HashKeyAccess { .. } => {
-                    // Try the pre-resolved owner first
-                    if let Some(owner) = r.hash_key_owner() {
-                        for def in self.hash_key_defs_for_owner(owner) {
-                            if def.name == r.target_name {
-                                return Some(def.selection_span);
+                    // The pre-resolved owner, else the one read off the
+                    // key's call; a call's key belongs to the callable the
+                    // call dispatches to.
+                    let owner = r.hash_key_owner().cloned().or_else(|| self.deferred_hash_key_owner(r, module_index));
+                    if let Some(owner) = owner {
+                        let declared = self.declaring_input(&owner, module_index);
+                        for owner in std::iter::once(&owner).chain(declared.as_ref()) {
+                            for def in self.hash_key_defs_for_owner(owner) {
+                                if def.name == r.target_name {
+                                    return Some(def.selection_span);
+                                }
                             }
                         }
                     }
@@ -668,7 +674,7 @@ impl FileAnalysis {
                 decl_span: Some(key_def.selection_span),
                 class: class.to_string(),
                 bare: bare.to_string(),
-                input: Some("new".to_string()),
+                input: Some(HashKeyOwner::named_input(Some(class.to_string()), "new")),
                 attr: true,
                 has_reader: accessor.is_some(),
                 reader_kind: MemberKind::CALLABLE,
@@ -762,7 +768,7 @@ impl FileAnalysis {
             decl_span: None,
             class: sym.package.clone()?,
             bare: sym.name[1..].to_string(),
-            input: sym.flags.contains(SymbolFlags::PARAM).then(|| "new".to_string()),
+            input: sym.flags.contains(SymbolFlags::PARAM).then(|| HashKeyOwner::named_input(sym.package.clone(), "new")),
             attr: true,
             has_reader: sym.flags.contains(SymbolFlags::READER),
             reader_kind: MemberKind::CALLABLE,
@@ -778,16 +784,16 @@ impl FileAnalysis {
             (SymKind::HashKeyDef, SymKind::Variable) => (twin, sym),
             _ => return None,
         };
-        let SymbolDetail::HashKeyDef { owner: HashKeyOwner::Input { package, name, .. }, .. } = &key.detail else {
+        let SymbolDetail::HashKeyDef { owner: owner @ HashKeyOwner::Input { package, .. }, .. } = &key.detail else {
             return None;
         };
         Some(FieldGroup {
             spelling_sym: Some(var.id),
             private: true,
             decl_span: None,
-            class: package.clone()?,
+            class: package.clone().unwrap_or_default(),
             bare: key.name.clone(),
-            input: Some(name.clone()),
+            input: Some(owner.clone()),
             attr: false,
             has_reader: false,
             reader_kind: MemberKind::CALLABLE,
@@ -807,6 +813,17 @@ impl FileAnalysis {
     /// consumer-side entry for a call key in another file.
     pub fn input_projections_named(&self, bare: &str, owner: &HashKeyOwner) -> Option<FieldProjections> {
         self.input_group_named(bare, owner).map(|g| self.projections_of(g))
+    }
+
+    /// A call key's input owner on the class that declares the callable
+    /// the call dispatches to, where that is an ancestor of the class the
+    /// call names; `None` when the call names the declaring class itself.
+    pub fn declaring_input(&self, owner: &HashKeyOwner, module_index: Option<&dyn CrossFileLookup>) -> Option<HashKeyOwner> {
+        let HashKeyOwner::Input { package: Some(class), name, slot } = owner else {
+            return None;
+        };
+        let declaring = self.resolve_method_in_ancestors(class, name, module_index)?.class().to_string();
+        (declaring != *class).then(|| HashKeyOwner::Input { package: Some(declaring), name: name.clone(), slot: *slot })
     }
 
     /// The class's projections of the group's name (accessors, slots) —
@@ -923,13 +940,16 @@ impl FileAnalysis {
             spans.push(decl);
         }
         // Constructor keys at call sites.
-        if let Some(input) = &g.input {
-            let owner = HashKeyOwner::named_input(Some(g.class.clone()), input.clone());
-            for r in self.refs() {
-                if let Some(o) = r.hash_key_owner() {
-                    if r.target_name == g.bare && o.found_by(&owner) {
-                        spans.push(r.span);
-                    }
+        if let Some(owner) = &g.input {
+            for r in self.refs().iter().filter(|r| r.target_name == g.bare) {
+                let o = match r.hash_key_owner() {
+                    Some(o) => Some(o.clone()),
+                    None if r.arg_key_call().is_some() => self.deferred_hash_key_owner(r, None),
+                    None => None,
+                };
+                let Some(o) = o else { continue };
+                if o.found_by(owner) || self.declaring_input(&o, None).as_ref() == Some(owner) {
+                    spans.push(r.span);
                 }
             }
         }
@@ -1021,8 +1041,8 @@ impl FileAnalysis {
             let package = enclosing
                 .resolved_package()
                 .map(str::to_string)
-                .or_else(|| self.deferred_call_package(enclosing, module_index))?;
-            return Some(HashKeyOwner::named_input(Some(package), enclosing.unqualified_target_name(self.names())));
+                .or_else(|| self.deferred_call_package(enclosing, module_index));
+            return Some(HashKeyOwner::named_input(package, enclosing.unqualified_target_name(self.names())));
         }
         if let Some(enclosing) = enclosing_call {
             // An owner is ONE callee: a union receiver's call reaches a
@@ -1030,10 +1050,10 @@ impl FileAnalysis {
             if let Some(class) =
                 self.receiver_classes(enclosing, module_index, ReceiverPolicy::Edge).single().map(str::to_string)
             {
-                return Some(HashKeyOwner::named_input(
-                    Some(class),
-                    enclosing.unqualified_target_name(self.names()),
-                ));
+                // A construction calls the class's constructor, whatever its
+                // token spells.
+                let member = self.called_member(enclosing, &class, module_index)?.into_owned();
+                return Some(HashKeyOwner::named_input(Some(class), member));
             }
         }
         // Variable bound to an imported function call: `$c = get_config();

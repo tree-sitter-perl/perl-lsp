@@ -445,6 +445,7 @@ impl ExtractState<'_, '_> {
             | DefCap::Package
             | DefCap::Var
             | DefCap::Local
+            | DefCap::Input
             | DefCap::Assigned
             | DefCap::Constant
             | DefCap::Enumerator

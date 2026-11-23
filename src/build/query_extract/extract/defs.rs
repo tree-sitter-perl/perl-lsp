@@ -94,6 +94,14 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     let pack = st.pack;
     let ad = st.adorned;
     let mine = |cap: Capture| ad.in_match(e.match_id, cap);
+    // The receiver is the object a method runs on, never an argument a
+    // call passes by name.
+    if kind == DefCap::Input {
+        let token = mine(Capture::Def { kind, part: DefPart::Name }).unwrap_or(e);
+        if ad.on(token).any(|t| t.cap == Capture::Receiver) {
+            return;
+        }
+    }
     // The name token; for a def named from its anchor, the language's
     // default name at the anchor token; for a nameless def the language's
     // default name (a zero-width token) or the def's own text.

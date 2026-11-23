@@ -779,7 +779,7 @@ fn parameters_are_locals_of_their_callable() {
     assert_eq!(locals, want);
     let at = fa.symbols().iter().find(|s| s.name == "at").unwrap();
     assert!(fa.scope_within_sub_body(at.scope));
-    let in_closure = fa.symbols().iter().filter(|s| s.name == "c").map(|s| s.scope).collect::<Vec<_>>();
+    let in_closure = fa.symbols().iter().filter(|s| s.name == "c" && s.kind == SymKind::Variable).map(|s| s.scope).collect::<Vec<_>>();
     assert_ne!(in_closure[0], in_closure[1], "the closure's parameter is its own");
     assert!(fa.document_symbols().iter().all(|o| o.name != "at" && o.name != "c"));
 }
@@ -4987,7 +4987,8 @@ $top = 1;
         "p", "v", "a", "r", "c", "l1", "l2", "kv", "e", "br", "fk", "fv", "gk", "gv", "ex", "gl", "st", "fn", "hoisted", "promo", "top",
     ];
     for name in names {
-        let syms: Vec<_> = fa.symbols().iter().filter(|s| s.name == name).collect();
+        // A parameter's key is spelled bare, as a call names it (`f(p: 1)`).
+        let syms: Vec<_> = fa.symbols().iter().filter(|s| s.name == name && s.kind != SymKind::HashKeyDef).collect();
         assert!(!syms.is_empty(), "`${name}` is declared");
         for s in syms {
             assert_eq!(s.listed_name(), format!("${name}"), "{:?}", s.kind);
@@ -5661,4 +5662,43 @@ fn a_stripped_copy_still_answers_its_classes_flavors() {
     fa.evict_to(Residency::Skeleton);
     assert!(fa.symbols_are_evicted());
     assert_eq!(flavors(&fa), [true, true, false, false, false]);
+}
+
+/// A named argument (`f(b: 2)`) is the key the callee's parameter `$b`
+/// declares: goto-def lands on the parameter, and renaming the parameter
+/// rewrites its reads and every label, a constructor's included.
+#[cfg(feature = "php")]
+#[test]
+fn a_named_argument_is_its_parameter() {
+    let src = "<?php
+namespace App;
+function f(int $a, int $b = 1) { return $b; }
+f(1, b: 2);
+class P {
+    public function __construct(string $name) {}
+    public function m(int $n) { return $n; }
+}
+(new P(name: 'x'))->m(n: 3);
+";
+    let fa = php(src);
+    let lines: Vec<&str> = src.lines().collect();
+    let at = |row: usize, needle: &str| tree_sitter::Point::new(row, lines[row].find(needle).unwrap());
+    let def = fa.find_definition(at(3, "b:"), None).expect("label goes to its parameter");
+    assert_eq!((def.start.row, def.start.column), (2, lines[2].find("$b").unwrap() + 1));
+    let def = fa.find_definition(at(8, "name:"), None).expect("constructor label");
+    assert_eq!(def.start.row, 5);
+    let def = fa.find_definition(at(8, "n:"), None).expect("method label");
+    assert_eq!(def.start.row, 6);
+
+    let mut edits: Vec<(usize, usize)> = fa
+        .rename_at(tree_sitter::Point::new(2, lines[2].find("$b").unwrap() + 1), "c")
+        .expect("renames")
+        .into_iter()
+        .map(|(s, _)| (s.start.row, s.start.column))
+        .collect();
+    edits.sort();
+    assert_eq!(
+        edits,
+        [(2, lines[2].find("$b").unwrap() + 1), (2, lines[2].rfind("$b").unwrap() + 1), (3, lines[3].find("b:").unwrap())]
+    );
 }

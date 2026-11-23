@@ -117,6 +117,9 @@ pub struct SkelRef {
     /// (a `@flow.place` its read projects), one that only fills an empty
     /// member where the write is a `@flow.init`.
     pub access: crate::model::file_analysis::AccessKind,
+    /// The arguments a call passes by name (`@arity.label`), each its name
+    /// and token: keys of the callee's named input, bound to this call.
+    pub arg_keys: Vec<(String, Span)>,
 }
 
 /// One `@expr.call` site.
@@ -824,6 +827,20 @@ impl SkeletonAnalysis {
                 self.scopes[body.0 as usize].owner = Some(s.id);
             }
         }
+        // A parameter's key is a key of the named input of the callable
+        // whose scope it binds in.
+        for (i, s) in self.symbols.iter().enumerate() {
+            if s.kind != DefCap::Input {
+                continue;
+            }
+            let callable = self.scopes.get(s.scope.0 as usize).and_then(|sc| sc.owner).map(|id| &symbols[id.0 as usize]);
+            if let Some(callable) = callable {
+                symbols[i].detail = crate::model::file_analysis::SymbolDetail::HashKeyDef {
+                    owner: crate::model::file_analysis::HashKeyOwner::named_input(callable.package.clone(), callable.name.clone()),
+                    is_dynamic: false,
+                };
+            }
+        }
         // The class whose method each scope is the body of, or sits inside:
         // the nearest callable that declares one names it, in-class and
         // out-of-line alike (a `void Buf<T>::reserve(…)` body is lexically at
@@ -1051,7 +1068,12 @@ impl SkeletonAnalysis {
             // body), the same choice a read of the name binds.
             let place_of = |sym: &Symbol| {
                 let id = match sym.declared_with {
-                    Some(twin) if symbols[twin.0 as usize].scope == sym.scope => sym.id.min(twin),
+                    Some(twin)
+                        if symbols[twin.0 as usize].scope == sym.scope
+                            && symbols[twin.0 as usize].kind != SymKind::HashKeyDef =>
+                    {
+                        sym.id.min(twin)
+                    }
                     _ => sym.id,
                 };
                 WA::Place(Box::new(crate::model::file_analysis::Place::variable(
@@ -1605,7 +1627,7 @@ impl SkeletonAnalysis {
         // declares carries the names it may be, for the registry to ask
         // across files (`WitnessPayload::FreeValue`).
         let mut constant_reads: Vec<crate::model::witnesses::Witness> = Vec::new();
-        let mut refs: Vec<crate::model::file_analysis::Ref> = self
+        let minted: Vec<(crate::model::file_analysis::Ref, &SkelRef)> = self
             .refs
             .iter()
             .filter_map(|r| {
@@ -1714,7 +1736,7 @@ impl SkeletonAnalysis {
                     | RefCap::Var
                     | RefCap::Key => return None,
                 };
-                Some(crate::model::file_analysis::Ref {
+                Some((crate::model::file_analysis::Ref {
                     kind,
                     span,
                     scope: r.scope,
@@ -1727,9 +1749,30 @@ impl SkeletonAnalysis {
                     folded_from: None,
                     arg_count: r.arg_count,
                     evaluated_before: None,
-                })
+                }, r))
             })
             .collect();
+        // A call's named arguments follow it, each a key bound to the call
+        // (`RefBinding::CallArgKey`): its owner is the callee's named input,
+        // read off the call once the callee is in hand.
+        let mut refs: Vec<crate::model::file_analysis::Ref> = Vec::with_capacity(minted.len());
+        for (call, r) in minted {
+            let at = crate::model::witnesses::RefIdx(refs.len() as u32);
+            refs.push(call);
+            for (name, span) in &r.arg_keys {
+                refs.push(crate::model::file_analysis::Ref {
+                    kind: crate::model::file_analysis::RefKind::HashKeyAccess { var_text: String::new(), dies_on_undef: false },
+                    span: *span,
+                    scope: r.scope,
+                    target_name: name.clone(),
+                    access: crate::model::file_analysis::AccessKind::Read,
+                    binding: Some(crate::model::file_analysis::RefBinding::CallArgKey { call: at }),
+                    folded_from: None,
+                    arg_count: None,
+                    evaluated_before: None,
+                });
+            }
+        }
         for w in constant_reads {
             bag.push(w);
         }

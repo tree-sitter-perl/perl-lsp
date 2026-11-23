@@ -59,6 +59,10 @@ spelled! {
         /// a receiver creates (python's `self.x = …`). A class-owned
         /// `HashKeyDef`, Perl's `$self->{x}` slot.
         Slot = "slot",
+        /// A key a call may pass a parameter by: the parameter's name, a
+        /// key of its callable's named input (`HashKeyOwner::Input`),
+        /// declared with the parameter's local from one token (`@def.pair`).
+        Input = "input",
         Constant = "constant",
         Enumerator = "enumerator",
         Label = "label",
@@ -650,6 +654,9 @@ spelled! {
         Arg = "arg",
         Sig = "sig",
         Spread = "spread",
+        /// A call argument passed by name (`f(a: 1)`, `f(a=1)`): its name
+        /// token, a key of the callee's named input.
+        Label = "label",
         /// A declared parameter of the `@arity.sig` it sits in: a required
         /// one, one with a default, or one that takes any number of values.
         Required = "required",
@@ -1179,7 +1186,7 @@ impl DefCap {
             // `reexport` marker makes resolution see through it.
             DefCap::Method | DefCap::Reexport => SymKind::Method,
             DefCap::Field => SymKind::Field,
-            DefCap::Slot => SymKind::HashKeyDef,
+            DefCap::Slot | DefCap::Input => SymKind::HashKeyDef,
             DefCap::Enumerator => SymKind::Enumerator,
             DefCap::Var | DefCap::Local | DefCap::Assigned | DefCap::Label | DefCap::UnionField => {
                 SymKind::Variable

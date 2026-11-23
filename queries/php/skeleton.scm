@@ -107,9 +107,19 @@
 ; declared type is its elements', so the local stays untyped.
 ; TODO(php-implicit-nullable): `string $m = null` declares `?string`; the
 ; bound is `string`, so a `null === $m` guard reads as both.
-(simple_parameter
-  type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot.entry
-  name: (variable_name (name) @def.local.name @flow.target) @def.local.spelled) @def.local
+; A function's or method's parameter is also the key a call may pass it
+; by (`f(a: 1)`): the one token declares the local and the key. A closure
+; is called by no name, so its parameters are keys of nothing.
+((formal_parameters
+   (simple_parameter
+     type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot.entry
+     name: (variable_name (name) @def.local.name @def.input.name @flow.target) @def.local.spelled) @def.local @def.input @def.pair) @_params
+ (#has-parent? @_params function_definition method_declaration))
+((formal_parameters
+   (simple_parameter
+     type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot.entry
+     name: (variable_name (name) @def.local.name @flow.target) @def.local.spelled) @def.local) @_params
+ (#not-has-parent? @_params function_definition method_declaration))
 (variadic_parameter
   name: (variable_name (name) @def.local.name) @def.local.spelled) @def.local
 
@@ -597,7 +607,7 @@
 ; A call's value is an Invoke of its callee on its arguments, and the
 ; argument list rides the callee's match. `...$xs` passes any number of
 ; values. A named argument (`f(a: 1)`) is one more argument in its written
-; place; nothing binds it by name yet.
+; place, and its name is a key the callee takes.
 (function_call_expression
   function: (name) @ref.call
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
@@ -607,6 +617,7 @@
   function: (qualified_name (name) @ref.call) @ref.spelled
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
 (arguments (argument (variadic_unpacking)) @arity.spread)
+(argument name: (name) @arity.label)
 
 ; ---- constants ----
 ; A name, bare or qualified, where a value is read is a constant: it

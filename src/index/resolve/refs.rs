@@ -49,15 +49,11 @@ pub(super) fn group_from_projections(
             rename: MemberRename::Bare,
         });
     }
-    if let Some(input) = &p.input {
+    if let Some(crate::model::file_analysis::HashKeyOwner::Input { package, name, slot }) = &p.input {
         members.push(GroupMember {
             target: TargetRef::new(
                 p.bare.clone(),
-                TargetKind::HashKeyOfInput {
-                    package: Some(p.class.clone()),
-                    name: input.clone(),
-                    slot: InputSlot::Named,
-                },
+                TargetKind::HashKeyOfInput { package: package.clone(), name: name.clone(), slot: *slot },
                 class_analysis,
             ),
             rename: MemberRename::Bare,

@@ -2450,3 +2450,31 @@ def f(c):
     assert_eq!(fa.inferred_type_via_bag("x", Point::new(11, 12)), Some(InferredType::ClassName("A".into())), "nothing raises past the write");
     assert_eq!(fa.inferred_type_via_bag("y", Point::new(19, 8)), two("B", "C"), "the entry value only unwinds through the finally");
 }
+
+/// A keyword argument (`f(b=2)`) is the key the callee's parameter `b`
+/// declares, never a read of a variable `b`; the receiver is no key.
+#[cfg(feature = "python")]
+#[test]
+fn a_keyword_argument_is_its_parameter() {
+    let src = "def f(a, b=1, *args, d, **kw):
+    return b
+f(1, b=2, d=4)
+class C:
+    def m(self, x: int):
+        return x
+C().m(x=1)
+";
+    let fa = py_in(src, None);
+    let lines: Vec<&str> = src.lines().collect();
+    let at = |row: usize, needle: &str| Point::new(row, lines[row].find(needle).unwrap());
+    let def = fa.find_definition(at(2, "b="), None).expect("label goes to its parameter");
+    assert_eq!((def.start.row, def.start.column), (0, 9));
+    let def = fa.find_definition(at(6, "x="), None).expect("method label");
+    assert_eq!((def.start.row, def.start.column), (4, lines[4].find("x:").unwrap()));
+    assert!(!fa.symbols().iter().any(|s| s.kind == SymKind::HashKeyDef && s.name == "self"), "the receiver is no key");
+
+    let mut edits: Vec<(usize, usize)> =
+        fa.rename_at(Point::new(0, 9), "c").expect("renames").into_iter().map(|(s, _)| (s.start.row, s.start.column)).collect();
+    edits.sort();
+    assert_eq!(edits, [(0, 9), (1, 11), (2, 5)]);
+}
