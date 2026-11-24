@@ -5707,6 +5707,27 @@ class P {
     );
 }
 
+/// An enum is a class, so its static method's labels are its parameters;
+/// an attribute constructs its class, so its labels are the constructor's.
+#[cfg(feature = "php")]
+#[test]
+fn enum_methods_and_attributes_take_their_labels() {
+    let src = "<?php
+enum E { case X; static function m(int $timeout) {} }
+E::m(timeout: 1);
+#[Attribute] class Route { function __construct(string $path) {} }
+#[Route(path: '/x')]
+function h() {}
+";
+    let fa = php(src);
+    let lines: Vec<&str> = src.lines().collect();
+    let at = |row: usize, needle: &str| tree_sitter::Point::new(row, lines[row].find(needle).unwrap());
+    let def = fa.find_definition(at(2, "timeout:"), None).expect("enum method label");
+    assert_eq!((def.start.row, def.start.column), (1, lines[1].find("$timeout").unwrap() + 1));
+    let def = fa.find_definition(at(4, "path:"), None).expect("attribute label");
+    assert_eq!((def.start.row, def.start.column), (3, lines[3].find("$path").unwrap() + 1));
+}
+
 /// A promoted constructor parameter (`private int $x`) declares three
 /// things at one token: the property, the constructor's local, and the key
 /// a call passes (`new P(x: 1)`). They are one name: a rename from any of
