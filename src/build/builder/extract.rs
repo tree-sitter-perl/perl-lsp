@@ -708,7 +708,7 @@ impl<'a> Builder<'a> {
         // (`search($cond, \%attrs)`) carries no inline keys, and the trailing
         // `\%attrs` hash (`order_by`/`rows`/…) must never be mistaken for it
         // (picking "first hash among args" would walk it).
-        if matches!(gate, Gate::ColumnKeyed(_)) {
+        if matches!(gate, Gate::ColumnKeyed(..)) {
             let arg0 = if effective.is(Kind::AnonymousHashExpression) {
                 Some(effective)
             } else {
@@ -729,7 +729,7 @@ impl<'a> Builder<'a> {
                 _ => return,
             }
         }
-        if matches!(gate, Gate::ColumnKeyed(_)) {
+        if matches!(gate, Gate::ColumnKeyed(..)) {
             // Pair-walk via the shared `cst::pair_nodes`: Perl tucks the tail
             // pairs of `a => 1, b => 2` into a right-nested `list_expression`,
             // which `pair_nodes` flattens.
@@ -750,7 +750,7 @@ impl<'a> Builder<'a> {
     pub(super) fn emit_arg_elements(&mut self, elements: &[Node<'a>], gate: &Gate, receiver: Option<crate::model::file_analysis::ReceiverParam>) {
         use crate::model::file_analysis::slot_at_place;
         let owner = match gate {
-            Gate::Strict(o) | Gate::StrictOrDefer(o, _) | Gate::Open(o) | Gate::ColumnKeyed(o) => Some(o),
+            Gate::Strict(o) | Gate::StrictOrDefer(o, _) | Gate::Open(o) | Gate::ColumnKeyed(o, _) => Some(o),
             Gate::Deferred(_) => None,
         };
         let params = owner.and_then(|o| self.local_params_of(o));
@@ -823,12 +823,13 @@ impl<'a> Builder<'a> {
                     if !self.has_hash_key_def(&key, owner) { continue; }
                     owned(owner.clone())
                 }
-                Gate::ColumnKeyed(sub_owner) => {
+                Gate::ColumnKeyed(sub_owner, call) => {
                     // First-hashref narrowing already happened in `effective`.
-                    // A key that's an actual column → the column owner; else fall
-                    // back to the verb's named input if the verb declares it
-                    // (Moo/Corinna ctor keys under a generic-named `new`); else
-                    // skip (so `order_by` and friends never latch on).
+                    // A key that's an actual column → the column owner; else
+                    // the verb's named input if this file declares it. A key
+                    // neither names is the call's to decide once ancestry is
+                    // in hand: a subclass's `new(k => …)` passes an inherited
+                    // constructor key, which no local def names.
                     let class = match sub_owner {
                         HashKeyOwner::Input { package: Some(c), .. } => c.clone(),
                         _ => continue,
@@ -839,7 +840,7 @@ impl<'a> Builder<'a> {
                     } else if self.has_hash_key_def(&key, sub_owner) {
                         owned(sub_owner.clone())
                     } else {
-                        continue;
+                        RefBinding::CallArgKey { call: *call, place }
                     }
                 }
                 Gate::StrictOrDefer(owner, call) => {

@@ -793,7 +793,7 @@ enum Gate {
     /// the column owner; otherwise it falls back to the verb's named input
     /// (so a generic-named verb like `new` still binds Moo/Corinna ctor
     /// keys). Carries that input owner.
-    ColumnKeyed(HashKeyOwner),
+    ColumnKeyed(HashKeyOwner, crate::model::witnesses::RefIdx),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

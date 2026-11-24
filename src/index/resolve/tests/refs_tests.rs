@@ -2197,6 +2197,27 @@ g(1, retries => 2);\n",
     assert!(defs.iter().any(|d| d.span.start == at(3, 29)), "a name after a place lands on its read, got {defs:?}");
 }
 
+/// A subclass's constructor call passes the keys its parent declares, though
+/// the subclass declares none of its own.
+#[test]
+fn a_subclass_new_passes_its_parent_s_constructor_keys() {
+    let store = OpenDocs::new();
+    let path = PathBuf::from("/tmp/resolve_subclass_new_keys.pl");
+    let fa = parse(
+        "package Foo;\nuse Moo;\nhas name => (is => 'ro');\n\
+package Bar;\nuse Moo;\nextends 'Foo';\n\
+package main;\nBar->new(name => 1);\n",
+    );
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), fa.clone());
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(&path));
+    let at = |row, column| tree_sitter::Point { row, column };
+    let defs = resolve(&store, &fa, key.clone(), at(7, 10), Some(&idx), OverrideScope::default()).definitions();
+    assert!(defs.iter().any(|d| d.span.start.row == 2), "the key lands on the parent's `has`, got {defs:?}");
+    let refs = resolve(&store, &fa, key, at(2, 4), Some(&idx), OverrideScope::default()).references();
+    assert!(refs.iter().any(|r| r.span.start == at(7, 9)), "the `has` finds the subclass's call, got {refs:?}");
+}
+
 /// A dotted helper's keys are the keys its chained call passes.
 #[test]
 fn a_dotted_helper_takes_the_keys_its_call_passes() {

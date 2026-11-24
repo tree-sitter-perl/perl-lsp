@@ -578,7 +578,7 @@ impl<'a> Builder<'a> {
             Strict(HashKeyOwner, Node<'a>),
             StrictOrDefer(HashKeyOwner, RefIdx, Node<'a>),
             Deferred(RefIdx, Node<'a>),
-            ColumnKeyed(HashKeyOwner, Node<'a>),
+            ColumnKeyed(HashKeyOwner, RefIdx, Node<'a>),
         }
         // Plugin-declared verbs whose first hashref arg is column-keyed (owned
         // so it doesn't borrow `self` across the `&mut self` emit loop below).
@@ -625,7 +625,7 @@ impl<'a> Builder<'a> {
                         && s.package.as_deref() == Some(cls.as_str())
                 });
                 if local_class && !user_shadows_verb && column_keyed.contains(&r.target_name) {
-                    pending.push(Path::ColumnKeyed(owner, args));
+                    pending.push(Path::ColumnKeyed(owner, RefIdx(i as u32), args));
                     continue;
                 }
                 pending.push(if self.declares_input(&owner) || self.framework_read.contains(&args.id()) {
@@ -667,8 +667,8 @@ impl<'a> Builder<'a> {
                 Path::Deferred(call, args) => {
                     self.emit_call_arg_key_accesses(args, Gate::Deferred(call), member);
                 }
-                Path::ColumnKeyed(owner, args) => {
-                    self.emit_call_arg_key_accesses(args, Gate::ColumnKeyed(owner), member);
+                Path::ColumnKeyed(owner, call, args) => {
+                    self.emit_call_arg_key_accesses(args, Gate::ColumnKeyed(owner, call), member);
                 }
             }
         }
