@@ -321,6 +321,10 @@ struct Builder<'a> {
     /// (`bind_collected_keys`), so a call above its `sub` links the same as
     /// one below it.
     pending_call_arg_keys: Vec<(Node<'a>, usize, String, Option<String>)>,
+
+    /// A call of a value (`$f->(k => 1)`): its arguments and the ref of the
+    /// operand that holds the callable, whose value names the callee.
+    pending_value_call_keys: Vec<(Node<'a>, usize)>,
     /// The nodes a plugin pattern captured in a match it emitted for: a
     /// call whose arguments a framework reads is no callable taking names,
     /// so its keys are the framework's (`docs/adr/named-arguments.md`).

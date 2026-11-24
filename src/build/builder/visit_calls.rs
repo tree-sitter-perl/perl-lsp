@@ -139,7 +139,15 @@ impl<'a> Builder<'a> {
             if reassigns {
                 self.reassigning_refs.push(self.refs.len());
             }
+            let idx = self.refs.len();
             self.add_ref_in(node, RefKind::Variable, ref_span, text.to_string(), access);
+            // The operand of a value call (`$f->(k => 1)`) is what the call
+            // reaches its callee through.
+            if let Some(call) = self.syntax.parent(node).filter(|p| p.is(Kind::CoderefCallExpression)) {
+                if let (Some(args), true) = (call.field(Field::Arguments), crate::cst::NodeExt::elements(&call).next() == Some(node)) {
+                    self.pending_value_call_keys.push((args, idx));
+                }
+            }
         }
     }
 

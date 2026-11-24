@@ -798,6 +798,13 @@ fn find_call_at_cursor_from<'a>(
                 let args = node.field(Field::Arguments);
                 return Some((name.to_string(), false, None, args, Some(fname.start_position())));
             }
+            // `$f->(…)`: the operand holds the callable.
+            Kind::CoderefCallExpression => {
+                let operand = crate::cst::NodeExt::elements(&node).next()?;
+                let name = operand.utf8_text(source).ok()?;
+                let args = node.field(Field::Arguments);
+                return Some((name.to_string(), false, None, args, Some(operand.start_position())));
+            }
             Kind::MethodCallExpression => {
                 let mname = node.field(Field::Method)?;
                 let name = mname.utf8_text(source).ok()?;

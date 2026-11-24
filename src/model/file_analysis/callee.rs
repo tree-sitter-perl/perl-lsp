@@ -133,6 +133,14 @@ impl FileAnalysis {
     /// runs what its receiver's MRO dispatches it to. `None` when the
     /// call has no single callee (a union receiver reaches one per arm).
     pub fn callee_of(&self, call: &Ref, index: Option<&dyn CrossFileLookup>) -> Option<Callee> {
+        // A value call reaches the callable its operand holds.
+        if matches!(call.kind, RefKind::Variable) {
+            let held = self.inferred_type_via_bag(&call.target_name, call.span.start)?;
+            return match held.held_callable()? {
+                HeldCallable::Symbol(sid) => Some(self.callee_here(self.symbol(sid))),
+                HeldCallable::Named { package, name } => Some(self.packaged_callee(package, name, index)),
+            };
+        }
         if !matches!(call.kind, RefKind::FunctionCall) {
             let class = self.receiver_classes(call, index, ReceiverPolicy::Edge).single()?.to_string();
             return self.member_callee(call, &class, index);
@@ -186,7 +194,7 @@ impl FileAnalysis {
     /// cursor-time site that names its call by position.
     pub fn callee_at(&self, at: Point, index: Option<&dyn CrossFileLookup>) -> Option<Callee> {
         let call = self.refs().iter().find(|r| match &r.kind {
-            RefKind::FunctionCall => r.span.start == at,
+            RefKind::FunctionCall | RefKind::Variable => r.span.start == at,
             RefKind::MethodCall { method_name_span, .. } => method_name_span.start == at || r.span.start == at,
             _ => false,
         })?;

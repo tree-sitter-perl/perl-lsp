@@ -660,6 +660,10 @@ pub enum HashKeyOwner {
     /// constructor key). Kept apart from `Sub`, the keys a callable returns,
     /// so a call's keys never reach its return value's (`named-arguments.md`).
     Input { package: Option<String>, name: String, slot: InputSlot },
+    /// The input of a callable no name reaches — an anonymous sub, a
+    /// closure, a lambda: its calls reach it through the value that holds
+    /// it, so it is the declaration's own and file-local, like `Variable`.
+    AnonInput { callable: SymbolId, slot: InputSlot },
 }
 
 /// Where in a callable's input a key sits.
@@ -679,6 +683,9 @@ impl HashKeyOwner {
     /// a callable no package holds, the namespace its declaration sits in
     /// — a module's function is that module's, not every module's.
     pub fn input_of(sym: &Symbol, namespaces: &[NamespaceRange]) -> Self {
+        if sym.flags.contains(SymbolFlags::ANONYMOUS) {
+            return HashKeyOwner::AnonInput { callable: sym.id, slot: InputSlot::Named };
+        }
         let package = sym.package.clone().or_else(|| {
             namespace_range_at(namespaces, sym.selection_span.start)
                 .map(|r| r.namespace.clone())

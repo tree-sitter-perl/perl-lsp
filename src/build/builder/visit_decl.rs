@@ -844,7 +844,8 @@ impl<'a> Builder<'a> {
         let span = node_to_span(node);
         let sub_id = self.ensure_anon_sub_symbol(node, &params);
         self.push_callable_scope(ScopeKind::Sub { name: "(anon)".into() }, span, sub_id);
-        self.record_signature_params(node, &params, None);
+        let input = HashKeyOwner::AnonInput { callable: sub_id, slot: crate::model::file_analysis::InputSlot::Named };
+        self.record_signature_params(node, &params, Some(input));
         self.detect_first_param_type(&params, node, self.current_package.clone());
         self.queue_children_then(node, move |b| {
             b.record_sub_tail(node);
@@ -970,6 +971,7 @@ impl<'a> Builder<'a> {
         );
         // Not a nameable entity — resolvable, never listed.
         self.presentation_mut(sym_id).hide_in_outline = true;
+        self.symbols[sym_id.0 as usize].flags |= crate::model::file_analysis::SymbolFlags::ANONYMOUS;
         if let Some(key) = key {
             self.anon_sub_symbols.insert(key, sym_id);
         }

@@ -1972,7 +1972,7 @@ impl<'a> Builder<'a> {
             if !params.iter().any(|p| p.pass == ParamPass::RestNamed && p.name == *name) {
                 continue;
             }
-            let owner = HashKeyOwner::named_input(callable.package.clone(), callable.name.clone());
+            let owner = HashKeyOwner::input_of(callable, &self.namespace_ranges);
             if declared.insert((owner.clone(), r.target_name.clone())) {
                 minted.push((r.target_name.clone(), r.span, r.scope, owner.clone()));
             }
@@ -1982,10 +1982,31 @@ impl<'a> Builder<'a> {
             if self.has_hash_key_def(&key, &owner) {
                 continue;
             }
-            let HashKeyOwner::Input { package, .. } = &owner else { continue };
-            let package = package.clone();
+            let package = match &owner {
+                HashKeyOwner::Input { package, .. } => package.clone(),
+                HashKeyOwner::AnonInput { callable, .. } => self.symbols[callable.0 as usize].package.clone(),
+                _ => continue,
+            };
             let detail = SymbolDetail::HashKeyDef { owner, is_dynamic: false };
             self.add_symbol_in_scope(scope, key, SymKind::HashKeyDef, span, span, detail, Namespace::Language, package);
+        }
+        // A value call's keys are its callable's, where the operand's value
+        // names one in this file; else the call decides at query time.
+        for (args, operand) in std::mem::take(&mut self.pending_value_call_keys) {
+            let r = &self.refs[operand];
+            let held = self.bag_query_variable(&r.target_name, r.scope, crate::model::witnesses::ReadPoint::position(r.span.start));
+            let call = crate::model::witnesses::RefIdx(operand as u32);
+            let gate = match held.as_ref().and_then(InferredType::held_callable) {
+                Some(crate::model::file_analysis::HeldCallable::Symbol(sid)) => {
+                    Gate::Strict(HashKeyOwner::input_of(&self.symbols[sid.0 as usize], &self.namespace_ranges))
+                }
+                Some(crate::model::file_analysis::HeldCallable::Named { package, name }) => {
+                    let owner = HashKeyOwner::named_input(Some(package.to_string()), name);
+                    if self.declares_input(&owner) { Gate::Strict(owner) } else { Gate::StrictOrDefer(owner, call) }
+                }
+                None => Gate::Deferred(call),
+            };
+            self.emit_call_arg_key_accesses(args, gate);
         }
         for (args, call, name, here) in std::mem::take(&mut self.pending_call_arg_keys) {
             let pinned = self.refs[call].resolved_package().map(str::to_string);

@@ -339,6 +339,7 @@ fn build_once(
         return_infos: Vec::new(),
         pending_array_pushes: Vec::new(),
         pending_call_arg_keys: Vec::new(),
+        pending_value_call_keys: Vec::new(),
         framework_read: std::collections::HashSet::new(),
         sub_tail: std::collections::HashMap::new(),
         slot_write_rhs_span: std::collections::HashMap::new(),
