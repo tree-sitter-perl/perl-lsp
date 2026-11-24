@@ -672,20 +672,21 @@ impl FileAnalysis {
         candidates
     }
 
-    /// The labels a call to `callee` may still pass: each parameter it
-    /// takes by name (`ParamInfo::label`), less the `used` ones, each
-    /// followed by `sep` as the language writes it.
-    pub fn complete_call_labels(callee: &Symbol, used: &[String], sep: &str) -> Vec<CompletionCandidate> {
-        let SymbolDetail::Sub { params, .. } = &callee.detail else { return Vec::new() };
-        params
+    /// The `labels` a call to `callee` may still pass, less the `used`
+    /// ones, each followed by `sep` as the language writes it.
+    pub fn complete_call_labels(callee: &Callee, labels: &[String], used: &[String], sep: &str) -> Vec<CompletionCandidate> {
+        let name = match &callee.input {
+            HashKeyOwner::Input { name, .. } => name.as_str(),
+            _ => "",
+        };
+        labels
             .iter()
-            .filter_map(ParamInfo::label)
-            .filter(|k| !used.iter().any(|u| u == k))
+            .filter(|k| !used.iter().any(|u| u == *k))
             .map(|k| CompletionCandidate {
                 label: format!("{}{}", k, sep.trim_end()),
                 kind: SymKind::Variable,
                 is_static: false,
-                detail: Some(format!("{}({}{}…)", callee.name, k, sep)),
+                detail: Some(format!("{}({}{}…)", name, k, sep)),
                 insert_text: Some(format!("{}{}", k, sep)),
                 sort_priority: PRIORITY_LOCAL,
                 additional_edits: vec![],
@@ -956,26 +957,14 @@ impl FileAnalysis {
         // members; `-as` binds local→origin; `use M ();` binds nothing.
         if !is_method {
             if let Some(idx) = module_index {
-                for import in self.imports.in_scope(self.import_scope_at(point)) {
-                    // A split exporter's surface lives across its candidates.
-                    let bound_remote = idx
-                        .visible_def_candidates(&import.module_name)
-                        .iter()
-                        .find_map(|cached| {
-                            let surface = cached.analysis.export_surface_with_index(&import.module_name, idx);
-                            imported_names(import, &surface)
-                                .iter()
-                                .find(|(local, _)| local == name)
-                                .map(|(_local, remote)| remote.clone())
-                        });
-                    let Some(remote) = bound_remote else { continue };
+                if let Some((module, remote)) = self.imported_callable(name, point, idx) {
                     // The name may be defined in the directly-`use`d module
                     // or in a module it re-exports. `defining_module_cached`
                     // chases the same re-export edges (seen-set bounded);
                     // the candidate pick covers a split module's own subs.
                     if let Some(cached) = idx
-                        .defining_module_cached(&import.module_name, &remote)
-                        .or_else(|| idx.candidate_defining_sub(&import.module_name, &remote))
+                        .defining_module_cached(&module, &remote)
+                        .or_else(|| idx.candidate_defining_sub(&module, &remote))
                     {
                         let whole = idx.bag_present(&cached);
                         if let Some(sub_info) = whole.sub_info_view(&remote) {

@@ -587,7 +587,21 @@ fn completion_items_native(
             if let Some(call_ctx) =
                 cursor_context::find_call_context(tree, source.as_bytes(), point)
             {
-                if call_ctx.at_key_position {
+                // The call's callee answers first, through the one call →
+                // callee binding; the hashref-parameter body scan stays
+                // the fallback until such a parameter owns its keys.
+                let _session = crate::model::witnesses::ResolutionSession::enter(Some(module_index));
+                let callee = call_ctx.name_start.and_then(|at| analysis.callee_at(at, Some(module_index)));
+                let labels = callee.as_ref().map(|c| c.labels(analysis, Some(module_index))).unwrap_or_default();
+                if call_ctx.at_key_position && !labels.is_empty() {
+                    let used: Vec<String> = call_ctx.used_keys.iter().cloned().collect();
+                    items.extend(crate::model::file_analysis::FileAnalysis::complete_call_labels(
+                        callee.as_ref().expect("labels came from it"),
+                        &labels,
+                        &used,
+                        crate::model::conventions::NAMED_ARG_WRITTEN,
+                    ));
+                } else if call_ctx.at_key_position {
                     items.extend(analysis.complete_keyval_args(
                         &call_ctx.name,
                         call_ctx.is_method,

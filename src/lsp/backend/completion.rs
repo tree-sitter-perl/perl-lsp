@@ -116,7 +116,7 @@ pub fn pack_completion(
     // `f(ti|` — the word may be a value or a label: the callee's named
     // inputs join the identifier universe, ahead of it.
     if let crate::lsp::cursor_slot::Slot::Label { site, .. } = &slot {
-        items.extend(call_labels(open_docs, analysis, path, base_idx, site));
+        items.extend(call_labels(analysis, xidx, site));
     }
     let macros_live = macro_completion(source, point, language, path, &mut items);
     let closure_live = closure_symbol_completion(
@@ -126,59 +126,18 @@ pub fn pack_completion(
     symbols::finish_completion(items, &slot, false, macros_live || closure_live)
 }
 
-/// The labels a call may still pass, read off the callable its callee
-/// token resolves to: the definition goto-def lands on, in this file or
-/// another, whose parameter list says which parameters take a name. A
-/// callee that names a class (`new Point(…)`, `Point(…)`) calls the
-/// constructor its MRO declares.
+/// The labels a call may still pass: the call's callee (`callee_of`),
+/// read through the one call → callee binding every named-argument
+/// consumer shares.
 fn call_labels(
-    open_docs: &crate::index::open_docs::OpenDocs,
     analysis: &crate::model::file_analysis::FileAnalysis,
-    path: Option<&crate::util::canonical_path::CanonicalPath>,
     module_index: &dyn crate::model::file_analysis::CrossFileLookup,
     site: &crate::build::query_extract::LabelSite,
 ) -> Vec<CompletionItem> {
-    use crate::model::file_analysis::{MethodResolution, Symbol, SymbolDetail};
-    let cs = crate::index::resolve::resolve(
-        open_docs,
-        analysis,
-        crate::index::open_docs::FileKey::Path(path.cloned().unwrap_or_default()),
-        site.callee.start,
-        Some(module_index),
-        crate::index::resolve::OverrideScope::default(),
-    );
-    let Some(loc) = cs.hover_candidate() else { return Vec::new() };
-    let declared_at = |a: &crate::model::file_analysis::FileAnalysis| {
-        a.symbols().iter().find(|s| s.selection_span.start == loc.span.start).cloned()
-    };
-    let declared = if crate::index::resolve::file_key_eq(&loc.key, cs.origin_file_key()) {
-        declared_at(analysis)
-    } else {
-        loc.key
-            .canonical_path()
-            .and_then(|p| module_index.cached_by_path(p))
-            .and_then(|cached| declared_at(&module_index.symbols_present(&cached)))
-    };
-    let Some(declared) = declared else { return Vec::new() };
-    let is_callable = |s: &Symbol| matches!(s.detail, SymbolDetail::Sub { .. });
-    let callee = if is_callable(&declared) {
-        Some(declared)
-    } else {
-        match analysis.resolve_constructor_in_ancestors(&declared.name, Some(module_index)) {
-            Some(MethodResolution::Local { sym_id, .. }) => Some(analysis.symbol(sym_id).clone()),
-            Some(MethodResolution::CrossFile { class, member, def_module, .. }) => module_index
-                .candidate_defining_sub(def_module.as_deref().unwrap_or(&class), &member)
-                .and_then(|cached| {
-                    module_index.symbols_present(&cached).symbols().iter().find(|s| {
-                        s.name == member && s.package.as_deref() == Some(class.as_str()) && is_callable(s)
-                    }).cloned()
-                }),
-            None => None,
-        }
-    };
-    callee
-        .map(|callee| crate::model::file_analysis::FileAnalysis::complete_call_labels(&callee, &site.used, &site.written))
-        .unwrap_or_default()
+    let _session = crate::model::witnesses::ResolutionSession::enter(Some(module_index));
+    let Some(callee) = analysis.callee_at(site.callee.start, Some(module_index)) else { return Vec::new() };
+    let labels = callee.labels(analysis, Some(module_index));
+    crate::model::file_analysis::FileAnalysis::complete_call_labels(&callee, &labels, &site.used, &site.written)
         .into_iter()
         .map(symbols::candidate_to_completion_item)
         .collect()

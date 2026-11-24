@@ -165,6 +165,11 @@ impl FileAnalysis {
                     // The pre-resolved owner, else the one read off the
                     // key's call; a call's key belongs to the callable the
                     // call dispatches to.
+                    if let Some(def) = self.arg_key_callee(r, module_index).and_then(|callee| {
+                        callee.key_defs(self, module_index).into_iter().find(|(home, d)| home.is_none() && d.name == r.target_name)
+                    }) {
+                        return Some(def.1.selection_span);
+                    }
                     let owner = r.hash_key_owner().cloned().or_else(|| self.deferred_hash_key_owner(r, module_index));
                     if let Some(owner) = owner {
                         let declared = self.declaring_input(&owner, module_index);
@@ -1045,24 +1050,8 @@ impl FileAnalysis {
         }
 
         // A key of the call's arguments: the callee's named input.
-        if let Some(enclosing) = enclosing_call.filter(|c| matches!(c.kind, RefKind::FunctionCall)) {
-            let package = enclosing
-                .resolved_package()
-                .map(str::to_string)
-                .or_else(|| self.deferred_call_package(enclosing, module_index));
-            return Some(HashKeyOwner::named_input(package, enclosing.unqualified_target_name(self.names())));
-        }
         if let Some(enclosing) = enclosing_call {
-            // An owner is ONE callee: a union receiver's call reaches a
-            // method per arm, and no single one owns the key.
-            if let Some(class) =
-                self.receiver_classes(enclosing, module_index, ReceiverPolicy::Edge).single().map(str::to_string)
-            {
-                // A construction calls the class's constructor, whatever its
-                // token spells.
-                let member = self.called_member(enclosing, &class, module_index)?.into_owned();
-                return Some(HashKeyOwner::named_input(Some(class), member));
-            }
+            return self.callee_of(enclosing, module_index).map(|c| c.input);
         }
         // Variable bound to an imported function call: `$c = get_config();
         // $c->{key}`. The build-time walk only pins the owner when the sub's
@@ -1112,23 +1101,8 @@ impl FileAnalysis {
         if split_qualified(&call_ref.target_name, self.names()).0.is_some() {
             return None;
         }
-        let idx = module_index?;
         let name = call_ref.unqualified_target_name(self.names());
-        // The package's own `use`s, later wins, mirroring
-        // `resolve_call_package`. A split exporter's surface lives across
-        // its candidate files.
-        for import in self.imports.in_scope(self.import_scope_at(call_ref.span.start)).rev() {
-            for cached in idx.visible_def_candidates(&import.module_name) {
-                let surface = cached.analysis.export_surface_with_index(&import.module_name, idx);
-                if imported_names(import, &surface)
-                    .iter()
-                    .any(|(local, _)| local.as_str() == name)
-                {
-                    return Some(import.module_name.clone());
-                }
-            }
-        }
-        None
+        self.imported_callable(name, call_ref.span.start, module_index?).map(|(module, _)| module)
     }
 
     /// The cross-file-facing view of the field group at `point`: the

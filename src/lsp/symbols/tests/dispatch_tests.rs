@@ -1191,3 +1191,38 @@ sub fire {
         );
     }
 }
+
+/// The keys a call may pass come from the callable the call runs, through
+/// the one call → callee binding: a class's `has` attributes for a
+/// constructor nothing in the file declares, a `:$name` signature's
+/// named parameters for a sub.
+#[test]
+fn a_call_key_completes_from_its_callee() {
+    let src = r#"package Point;
+use Moo;
+has x => (is => 'ro');
+has y => (is => 'ro');
+sub move ($self, :$dx, :$dy = 0) { }
+package main;
+my $p = Point->new(x => 1, );
+$p->move();
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(src, None).unwrap();
+    let analysis = crate::build::builder::build(&tree, src.as_bytes());
+    let idx = ModuleIndex::new_for_test();
+    let labels = |needle: &str| -> Vec<String> {
+        let (row, line) = src.lines().enumerate().find(|(_, l)| l.contains(needle)).unwrap();
+        let pos = Position { line: row as u32, character: (line.find(needle).unwrap() + needle.len()) as u32 };
+        let mut out: Vec<String> = completion_items_for_test(&analysis, &tree, src, pos, &idx, None)
+            .into_iter()
+            .map(|i| i.label)
+            .filter(|l| l.ends_with(" =>"))
+            .collect();
+        out.sort();
+        out
+    };
+    assert_eq!(labels("x => 1, "), ["y =>"], "the attrs not yet passed");
+    assert_eq!(labels("move("), ["dx =>", "dy =>"]);
+}

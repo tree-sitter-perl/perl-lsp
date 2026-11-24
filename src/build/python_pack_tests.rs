@@ -2564,3 +2564,29 @@ fn calling_a_class_completes_its_init_labels() {
     let labels: Vec<String> = items.into_iter().map(|i| i.label).filter(|l| l.ends_with('=')).collect();
     assert_eq!(labels, ["x=", "y="]);
 }
+
+/// A call's key lands on the parameter of the callable the call runs,
+/// wherever it is declared: an imported function's, an imported class's
+/// `__init__` (inherited too), a method of an imported class's instance.
+#[cfg(feature = "python")]
+#[test]
+fn a_call_key_lands_on_the_callees_parameter_across_files() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let lib = "def connect(host, timeout=30):\n    pass\n\nclass Base:\n    def __init__(self, size=1):\n        pass\n\nclass A(Base):\n    def m(self, retries=3):\n        pass\n";
+    let app = "from pkg.lib import connect, A\n\nconnect('h', timeout=1)\nA(size=2)\nA().m(retries=4)\n";
+    let (t, idx) = indexed("pycallee", &[("pkg/__init__.py", ""), ("pkg/lib.py", lib), ("pkg/app.py", app)]);
+    let path = t.0.join("pkg/app.py");
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let store = OpenDocs::new();
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.clone()));
+    for (at, want) in [(Point::new(2, 13), (0, 18)), (Point::new(3, 2), (4, 23)), (Point::new(4, 6), (8, 16))] {
+        let cs = resolve(&store, &fa, key.clone(), at, Some(&idx), OverrideScope::default());
+        let defs: Vec<(String, usize, usize)> = cs
+            .definitions()
+            .iter()
+            .map(|d| (d.key.canonical_path().unwrap().file_name().unwrap().to_string_lossy().to_string(), d.span.start.row, d.span.start.column))
+            .collect();
+        assert_eq!(defs, [("lib.py".to_string(), want.0, want.1)], "goto-def from {at:?}");
+    }
+}

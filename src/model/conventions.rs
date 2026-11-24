@@ -28,6 +28,9 @@ pub const PERL_ROOT_PACKAGE: &str = "main";
 /// The sub `use Module LIST` calls, found up `Module`'s MRO.
 pub const IMPORT_SUB: &str = "import";
 
+/// How a call writes a named argument after its key: Perl's fat comma.
+pub const NAMED_ARG_WRITTEN: &str = " => ";
+
 /// Perl's name spellings: `::` qualifies, `$` / `@` / `%` lead variables.
 pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     namespace_sep: Some(std::borrow::Cow::Borrowed(PERL_SEP)),

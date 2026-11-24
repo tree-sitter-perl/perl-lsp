@@ -32,6 +32,7 @@ Foo->bar(1);
         at_key_position: false,
         used_keys: Default::default(),
         first_arg_string: None,
+        name_start: None,
     };
     let slot = Slot::ArgPosition { callee: Some(callee), index: 0, expected: None };
     let point = Point::new(0, 0);

@@ -699,6 +699,15 @@ impl<'a> CandidateSet<'a> {
         if let Some(r) = analysis.ref_at(point) {
             if let RefKind::HashKeyAccess { .. } = r.kind {
                 use crate::model::file_analysis::HashKeyOwner;
+                // A call's key: the callee's declarations, wherever its
+                // declaration lives.
+                if let Some(callee) = analysis.arg_key_callee(r, Some(idx)) {
+                    if let Some((Some(home), def)) =
+                        callee.key_defs(analysis, Some(idx)).into_iter().find(|(_, d)| d.name == r.target_name)
+                    {
+                        return vec![RefLocation::at(FileKey::Path(home.path.clone()), def.selection_span, AccessKind::Declaration)];
+                    }
+                }
                 let owner = match r.hash_key_owner() {
                     Some(o) => Some(o.clone()),
                     None => analysis.deferred_hash_key_owner(r, Some(idx)),

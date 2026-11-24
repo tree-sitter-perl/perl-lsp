@@ -54,6 +54,8 @@ mod hover;
 pub(crate) use hover::callable_hover_tail;
 mod sym_index;
 mod completion;
+mod callee;
+pub use callee::*;
 pub use completion::*;
 mod equiv_dump;
 
