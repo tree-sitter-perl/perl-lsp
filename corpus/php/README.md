@@ -41,10 +41,23 @@ firefly was added 2026-11-19 and measured that day on main at 73405da4 (cold
 The full survey, with diagnostics by code and the worst findings, is
 `design/php-corpora-survey-2026-11-08.md` in the project files.
 
-## The apps' vendor trees
+## Vendor trees
 
-`bootstrap.sh` builds one for each app (the entries with a `vendor` field)
-when `php` and `composer` are on `PATH`. For laravel-app,
+`bootstrap.sh` builds a vendor tree for every repo with a `composer.json`
+(all but wordpress) when `php` and `composer` are on `PATH`, so the
+dependency tier has the packages each repo imports. Without one, every
+import of an absent package widens: doctrine-orm's `resolved-by-widening`
+rows fell from 1,056 to 17 once its vendor tree was in place (2026-11-24).
+
+A library (`vendor` field `library`) resolves its own `composer.json` with
+`require-dev`, as its CI does: composer is told the checkout's version
+(`COMPOSER_ROOT_VERSION`, the pinned tag) and ignores platform requirements,
+and the resolve runs against a copy of `composer.json` with `config.lock`
+forced on, since several libraries set it off. A library that commits its
+`composer.lock` reads that lock instead. Either way the tree ends with
+`composer dump-autoload`. Vendor trees are git-excluded in each clone.
+
+For laravel-app,
 `composer update --no-install` resolves the lock, `fetch1.sh` shallow-fetches
 each locked package and exports it the way a GitHub zipball would (zipballs
 403 through the cloud proxy), `installed.php` writes
@@ -61,5 +74,8 @@ are already in place and an install reaches for a dist the proxy refuses.
 ## Reproducibility caveat
 
 Each clone is pinned to a commit, and firefly's vendor tree with it, but
-`composer update` resolves laravel-app's packages at bootstrap time, so two runs weeks apart can lock different
-versions. Pin the lock before the vendor tree gates anything.
+`composer update` resolves laravel-app's packages and every library's
+(unless it commits a lock) at bootstrap time, so two runs weeks apart can
+lock different versions. Pin the lock before a vendor tree gates anything.
+The table above was measured on bare checkouts, before any repo but the
+apps had a vendor tree.
