@@ -66,7 +66,7 @@ impl FileAnalysis {
             .map(|s| s.name.clone())
             .collect();
         let input_keys: Vec<String> = self
-            .hash_key_defs_for_owner(&HashKeyOwner::named_input(primary.package.clone(), name))
+            .hash_key_defs_for_owner(&HashKeyOwner::input_of(primary, &self.namespace_ranges))
             .iter()
             .map(|s| s.name.clone())
             .collect();

@@ -851,7 +851,7 @@ impl SkeletonAnalysis {
             let callable = self.scopes.get(s.scope.0 as usize).and_then(|sc| sc.owner).map(|id| &symbols[id.0 as usize]);
             if let Some(callable) = callable {
                 symbols[i].detail = crate::model::file_analysis::SymbolDetail::HashKeyDef {
-                    owner: crate::model::file_analysis::HashKeyOwner::named_input(callable.package.clone(), callable.name.clone()),
+                    owner: crate::model::file_analysis::HashKeyOwner::input_of(callable, &self.namespace_ranges),
                     is_dynamic: false,
                 };
             }

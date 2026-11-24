@@ -675,6 +675,18 @@ impl HashKeyOwner {
         HashKeyOwner::Input { package, name: name.into(), slot: InputSlot::Named }
     }
 
+    /// The named input of the callable `sym`: under its package, or, for
+    /// a callable no package holds, the namespace its declaration sits in
+    /// — a module's function is that module's, not every module's.
+    pub fn input_of(sym: &Symbol, namespaces: &[NamespaceRange]) -> Self {
+        let package = sym.package.clone().or_else(|| {
+            namespace_range_at(namespaces, sym.selection_span.start)
+                .map(|r| r.namespace.clone())
+                .filter(|n| !n.is_empty())
+        });
+        Self::named_input(package, sym.name.clone())
+    }
+
     /// The class whose constructor takes this key, for a constructor's
     /// named input.
     pub fn constructor_class(&self) -> Option<&str> {

@@ -2590,3 +2590,31 @@ fn a_call_key_lands_on_the_callees_parameter_across_files() {
         assert_eq!(defs, [("lib.py".to_string(), want.0, want.1)], "goto-def from {at:?}");
     }
 }
+
+/// A module function's named input is that module's: two modules
+/// declaring the same function keep their parameters apart.
+#[cfg(feature = "python")]
+#[test]
+fn a_module_functions_keys_are_its_modules() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let f = "def f(timeout=1):\n    pass\n";
+    let app = "from pkg.m1 import f\n\nf(timeout=2)\n";
+    let (t, idx) = indexed("pymodinput", &[("pkg/__init__.py", ""), ("pkg/m1.py", f), ("pkg/m2.py", f), ("pkg/app.py", app)]);
+    let store = OpenDocs::new();
+    let refs_from = |rel: &str| -> Vec<String> {
+        let path = t.0.join(rel);
+        let fa = idx.workspace_file_for_test(&path).unwrap();
+        let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path));
+        let cs = resolve(&store, &fa, key, Point::new(0, 6), Some(&idx), OverrideScope::default());
+        let mut files: Vec<String> = cs
+            .references()
+            .iter()
+            .map(|l| l.key.canonical_path().unwrap().file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        files.sort();
+        files
+    };
+    assert_eq!(refs_from("pkg/m1.py"), ["app.py", "m1.py"]);
+    assert_eq!(refs_from("pkg/m2.py"), ["m2.py"]);
+}

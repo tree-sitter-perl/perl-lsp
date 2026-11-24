@@ -48,7 +48,15 @@ impl Callee {
     /// declaring class's — then the input the call names, under which a
     /// framework declares a class's constructor keys.
     pub fn owners(&self, origin: &FileAnalysis, index: Option<&dyn CrossFileLookup>) -> Vec<HashKeyOwner> {
-        let declared = self.symbol(origin, index).map(|s| HashKeyOwner::named_input(s.package, s.name));
+        let declared = match self.at.as_ref() {
+            Some(CalleeAt::Here(id)) => Some(HashKeyOwner::input_of(origin.symbol(*id), &origin.namespace_ranges)),
+            Some(CalleeAt::There { module, span }) => index.and_then(|idx| {
+                let fa = idx.symbols_present(module);
+                let sym = fa.symbols().iter().find(|s| s.selection_span == *span)?;
+                Some(HashKeyOwner::input_of(sym, &fa.namespace_ranges))
+            }),
+            None => None,
+        };
         let mut out: Vec<HashKeyOwner> = declared.into_iter().collect();
         if !out.contains(&self.input) {
             out.push(self.input.clone());
@@ -186,7 +194,7 @@ impl FileAnalysis {
     }
 
     fn callee_here(&self, sym: &Symbol) -> Callee {
-        Callee { input: HashKeyOwner::named_input(sym.package.clone(), sym.name.clone()), at: Some(CalleeAt::Here(sym.id)) }
+        Callee { input: HashKeyOwner::input_of(sym, &self.namespace_ranges), at: Some(CalleeAt::Here(sym.id)) }
     }
 
     /// `package`'s `name`: declared here, else in the candidate file the
@@ -271,6 +279,6 @@ impl FileAnalysis {
 fn callee_there(index: &dyn CrossFileLookup, module: Arc<CachedModule>, span: Span) -> Callee {
     let fa = index.symbols_present(&module);
     let sym = fa.symbols().iter().find(|s| s.selection_span == span);
-    let input = HashKeyOwner::named_input(sym.and_then(|s| s.package.clone()), sym.map_or_else(String::new, |s| s.name.clone()));
+    let input = sym.map_or_else(|| HashKeyOwner::named_input(None, ""), |s| HashKeyOwner::input_of(s, &fa.namespace_ranges));
     Callee { input, at: Some(CalleeAt::There { module, span }) }
 }

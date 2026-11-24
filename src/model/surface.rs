@@ -280,7 +280,7 @@ impl Surface {
                         package: sym.package.clone(),
                         name: sym.name.clone(),
                     });
-                    let input_keys = keys_of(HashKeyOwner::named_input(sym.package.clone(), sym.name.clone()));
+                    let input_keys = keys_of(HashKeyOwner::input_of(sym, &fa.namespace_ranges));
                     let m = MethodSurface {
                         name: sym.name.clone(),
                         kind: crate::model::file_analysis::sym_kind_code(&sym.kind),
