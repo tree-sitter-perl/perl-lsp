@@ -1954,7 +1954,7 @@ impl<'a> Builder<'a> {
     fn declares_input(&self, owner: &HashKeyOwner) -> bool {
         let HashKeyOwner::Input { package, name, .. } = owner else { return false };
         self.symbols.iter().any(|s| match (&s.kind, &s.detail) {
-            (SymKind::Sub | SymKind::Method, _) => &s.name == name && &s.package == package,
+            (SymKind::Sub | SymKind::Method, _) => *s.name == **name && s.package.as_deref() == package.as_deref(),
             (SymKind::HashKeyDef, SymbolDetail::HashKeyDef { owner: o, .. }) => self.as_registered(o) == *owner,
             _ => false,
         })
@@ -1992,7 +1992,7 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let package = match &owner {
-                HashKeyOwner::Input { package, .. } => package.clone(),
+                HashKeyOwner::Input { package, .. } => package.as_deref().map(str::to_string),
                 HashKeyOwner::AnonInput { callable, .. } => self.symbols[callable.0 as usize].package.clone(),
                 _ => continue,
             };

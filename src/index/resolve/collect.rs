@@ -632,12 +632,12 @@ pub(super) fn symbol_defines_target(
             SymbolDetail::HashKeyDef {
                 owner: HashKeyOwner::Input { package: op, name: on, slot: os },
                 ..
-            } if op == package && on == name && os == slot
+            } if op.as_deref() == package.as_deref() && **on == **name && os == slot
         ),
         TargetKind::HashKeyOfHandler { owner, name, slot } => matches!(
             &sym.detail,
             SymbolDetail::HashKeyDef { owner: HashKeyOwner::Handler { owner: oo, name: on, slot: os }, .. }
-                if oo == owner && on == name && os == slot
+                if **oo == *owner && **on == **name && os == slot
         ),
         TargetKind::HashKeyOfBridged(wanted) => matches!(
             &sym.detail,
@@ -1273,17 +1273,17 @@ pub(super) fn collect_from_analysis(
                 };
                 let owner_matches = |o: &HashKeyOwner| -> bool {
                     let (op, on) = match (o, wanted_slot) {
-                        (HashKeyOwner::Sub { package, name }, None) => (package, name),
-                        (HashKeyOwner::Input { package, name, slot }, Some(want)) if *slot == want => (package, name),
+                        (HashKeyOwner::Sub { package, name }, None) => (package.as_deref(), name.as_str()),
+                        (HashKeyOwner::Input { package, name, slot }, Some(want)) if *slot == want => (package.as_deref(), &**name),
                         _ => return false,
                     };
                     if on != name {
                         return false;
                     }
-                    if op == package {
+                    if op == package.as_deref() {
                         return true;
                     }
-                    let (Some(child), Some(base)) = (op.as_deref(), package.as_deref()) else {
+                    let (Some(child), Some(base)) = (op, package.as_deref()) else {
                         return false;
                     };
                     if crate::model::conventions::is_constructor_name(on) {
@@ -1313,7 +1313,7 @@ pub(super) fn collect_from_analysis(
             (TargetKind::HashKeyOfHandler { owner, name, slot }, RefKind::HashKeyAccess { .. }) => {
                 // A handler's keys: the reads of its own parameter and the
                 // keys each dispatch to it passes, bound to that call.
-                let wanted = HashKeyOwner::Handler { owner: owner.clone(), name: name.clone(), slot: *slot };
+                let wanted = HashKeyOwner::Handler { owner: Box::new(owner.clone()), name: name.as_str().into(), slot: *slot };
                 match r.hash_key_owner() {
                     Some(o) => *o == wanted,
                     None => analysis.deferred_hash_key_owner(r, module_index).is_some_and(|o| o == wanted),

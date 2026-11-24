@@ -809,15 +809,15 @@ impl FileAnalysis {
             return None;
         };
         let package = match owner {
-            HashKeyOwner::Input { package, .. } => package.as_ref(),
-            HashKeyOwner::AnonInput { callable, .. } => self.symbol(*callable).package.as_ref(),
+            HashKeyOwner::Input { package, .. } => package.as_deref(),
+            HashKeyOwner::AnonInput { callable, .. } => self.symbol(*callable).package.as_deref(),
             _ => return None,
         };
         Some(FieldGroup {
             spelling_sym: Some(var.id),
             private: true,
             decl_span: None,
-            class: package.cloned().unwrap_or_default(),
+            class: package.map(str::to_string).unwrap_or_default(),
             bare: key.name.clone(),
             input: Some(owner.clone()),
             attr: false,
@@ -849,7 +849,7 @@ impl FileAnalysis {
             return None;
         };
         let declaring = self.resolve_method_in_ancestors(class, name, module_index)?.class().to_string();
-        (declaring != *class).then(|| HashKeyOwner::Input { package: Some(declaring), name: name.clone(), slot: *slot })
+        (*declaring != **class).then(|| HashKeyOwner::Input { package: Some(declaring.into()), name: name.clone(), slot: *slot })
     }
 
     /// The class's projections of the group's name (accessors, slots) —

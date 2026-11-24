@@ -678,7 +678,7 @@ impl FileAnalysis {
     /// ones, each followed by `sep` as the language writes it.
     pub fn complete_call_labels(callee: &Callee, labels: &[String], used: &[String], sep: &str) -> Vec<CompletionCandidate> {
         let name = match &callee.input {
-            HashKeyOwner::Input { name, .. } => name.as_str(),
+            HashKeyOwner::Input { name, .. } => &**name,
             _ => "",
         };
         labels

@@ -1883,13 +1883,13 @@ pub enum SymbolDetail {
     /// events are, but routes are methods, config keys are fields, etc.
     Handler {
         owner: HandlerOwner,
-        dispatchers: Vec<String>,
+        dispatchers: Box<[String]>,
         params: Vec<ParamInfo>,
         /// The input of the named callable it runs (`add_task(mail =>
         /// \&mail)`): a dispatch's keys are that callable's. An anonymous
         /// callback has none; its keys are the handler's own.
         #[serde(default)]
-        runs: Option<HashKeyOwner>,
+        runs: Option<Box<HashKeyOwner>>,
     },
     /// Package, Module, or other kinds needing no extra data.
     None,
@@ -2430,7 +2430,7 @@ impl Ref {
             RefKind::HashKeyAccess { .. } => match self.hash_key_owner() {
                 Some(HashKeyOwner::Class(c)) => (4, Some(c.clone())),
                 Some(HashKeyOwner::Sub { name, .. }) => (5, Some(name.clone())),
-                Some(HashKeyOwner::Input { name, .. }) => (6, Some(name.clone())),
+                Some(HashKeyOwner::Input { name, .. }) => (6, Some(name.to_string())),
                 _ => (0, None),
             },
             _ => (0, None),

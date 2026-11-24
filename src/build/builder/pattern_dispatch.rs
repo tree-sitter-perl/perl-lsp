@@ -1197,7 +1197,7 @@ impl<'a> Builder<'a> {
                         selection_span,
                         detail: SymbolDetail::Handler {
                             owner,
-                            dispatchers,
+                            dispatchers: dispatchers.into(),
                             params: params.into_iter().map(Into::into).collect(),
                             runs: None,
                         },

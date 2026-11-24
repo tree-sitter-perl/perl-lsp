@@ -241,11 +241,14 @@ impl FileAnalysis {
     /// The handler registered on `owner` as `name`: this file's first
     /// registration, else the first another file holds.
     fn handler_callee(&self, owner: &HandlerOwner, name: &str, index: Option<&dyn CrossFileLookup>) -> Callee {
-        let input = HashKeyOwner::Handler { owner: owner.clone(), name: name.to_string(), slot: InputSlot::Named };
+        let input = HashKeyOwner::Handler { owner: Box::new(owner.clone()), name: name.into(), slot: InputSlot::Named };
         let registered = |s: &Symbol| s.name == name && matches!(&s.detail, SymbolDetail::Handler { owner: o, .. } if o == owner);
         // A handler that runs a named callable is called as that callable.
         let runs = |s: &Symbol| match &s.detail {
-            SymbolDetail::Handler { runs: Some(HashKeyOwner::Input { package: Some(p), name, .. }), .. } => Some((p.clone(), name.clone())),
+            SymbolDetail::Handler { runs: Some(runs), .. } => match &**runs {
+                HashKeyOwner::Input { package: Some(p), name, .. } => Some((p.to_string(), name.to_string())),
+                _ => None,
+            },
             _ => None,
         };
         if let Some(sym) = self.symbols.iter().find(|s| registered(s)) {

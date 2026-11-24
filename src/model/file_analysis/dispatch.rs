@@ -634,6 +634,10 @@ impl<T> ReceiverGated<T> {
 
 // ---- Hash key owner (for scope graph) ----
 
+/// Held inline by every ref binding, witness attachment and key symbol, so
+/// its width is theirs: the input variants keep their names as `Box<str>`
+/// and a handler's owner behind a `Box` to stay within the widest of the
+/// others (`row_types_keep_their_size`).
 #[derive(Debug, Clone, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
 pub enum HashKeyOwner {
     Class(String),
@@ -659,7 +663,7 @@ pub enum HashKeyOwner {
     /// parameters that answer to them (a `has` / `:param` / Class::Tiny
     /// constructor key). Kept apart from `Sub`, the keys a callable returns,
     /// so a call's keys never reach its return value's (`named-arguments.md`).
-    Input { package: Option<String>, name: String, slot: InputSlot },
+    Input { package: Option<Box<str>>, name: Box<str>, slot: InputSlot },
     /// The input of a callable no name reaches — an anonymous sub, a
     /// closure, a lambda: its calls reach it through the value that holds
     /// it, so it is the declaration's own and file-local, like `Variable`.
@@ -670,8 +674,8 @@ pub enum HashKeyOwner {
     /// callback it was registered with. Its own namespace, apart from any
     /// method of the owner class of the same name.
     Handler {
-        owner: HandlerOwner,
-        name: String,
+        owner: Box<HandlerOwner>,
+        name: Box<str>,
         #[serde(default)]
         slot: InputSlot,
     },
@@ -712,7 +716,11 @@ impl HashKeyOwner {
 
     /// A callable's named-argument keys: what `f(key => …)` passes.
     pub fn named_input(package: Option<String>, name: impl Into<String>) -> Self {
-        HashKeyOwner::Input { package, name: name.into(), slot: InputSlot::Named }
+        HashKeyOwner::Input {
+            package: package.map(String::into_boxed_str),
+            name: name.into().into_boxed_str(),
+            slot: InputSlot::Named,
+        }
     }
 
     /// The named input of the callable `sym`: under its package, or, for
@@ -720,7 +728,7 @@ impl HashKeyOwner {
     /// — a module's function is that module's, not every module's.
     pub fn input_of(sym: &Symbol, namespaces: &[NamespaceRange]) -> Self {
         if let SymbolDetail::Handler { owner, .. } = &sym.detail {
-            return HashKeyOwner::Handler { owner: owner.clone(), name: sym.name.clone(), slot: InputSlot::Named };
+            return HashKeyOwner::Handler { owner: Box::new(owner.clone()), name: sym.name.as_str().into(), slot: InputSlot::Named };
         }
         if sym.flags.contains(SymbolFlags::ANONYMOUS) {
             return HashKeyOwner::AnonInput { callable: sym.id, slot: InputSlot::Named };
@@ -758,8 +766,8 @@ impl HashKeyOwner {
     pub fn found_by(&self, lookup: &HashKeyOwner) -> bool {
         if self == lookup { return true; }
         match (self, lookup) {
-            (HashKeyOwner::Sub { package: Some(c1), .. }, HashKeyOwner::Class(c2))
-            | (HashKeyOwner::Input { package: Some(c1), .. }, HashKeyOwner::Class(c2)) => c1 == c2,
+            (HashKeyOwner::Sub { package: Some(c1), .. }, HashKeyOwner::Class(c2)) => c1 == c2,
+            (HashKeyOwner::Input { package: Some(c1), .. }, HashKeyOwner::Class(c2)) => **c1 == **c2,
             _ => false,
         }
     }

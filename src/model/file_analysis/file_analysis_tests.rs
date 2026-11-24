@@ -3711,3 +3711,22 @@ fn a_framework_read_call_binds_no_keys() {
         .collect();
     assert_eq!(keys, ["speed"], "an unread call elsewhere still binds its keys");
 }
+
+/// Every ref, symbol and witness holds these inline, and an analysis is
+/// mostly refs and witnesses: a wider variant in one of them is paid by
+/// every row of every file (16 bytes on `HashKeyOwner` is 9% of a whole
+/// analysis). A variant that needs more room boxes its payload; raising a
+/// bound here is a measured decision, not a fix for a red test.
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn row_types_keep_their_size() {
+    use crate::model::witnesses::{Witness, WitnessAttachment};
+    use std::mem::size_of;
+    assert!(size_of::<HashKeyOwner>() <= 48, "HashKeyOwner: {}", size_of::<HashKeyOwner>());
+    assert!(size_of::<WitnessAttachment>() <= 72, "WitnessAttachment: {}", size_of::<WitnessAttachment>());
+    assert!(size_of::<InferredType>() <= 160, "InferredType: {}", size_of::<InferredType>());
+    assert!(size_of::<Witness>() <= 336, "Witness: {}", size_of::<Witness>());
+    assert!(size_of::<Ref>() <= 376, "Ref: {}", size_of::<Ref>());
+    assert!(size_of::<SymbolDetail>() <= 80, "SymbolDetail: {}", size_of::<SymbolDetail>());
+    assert!(size_of::<Symbol>() <= 416, "Symbol: {}", size_of::<Symbol>());
+}

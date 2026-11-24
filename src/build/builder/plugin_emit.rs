@@ -376,13 +376,13 @@ impl<'a> Builder<'a> {
                 if already {
                     return;
                 }
-                self.register_callable(callable.as_ref(), HashKeyOwner::Handler { owner: owner.clone(), name: name.clone(), slot: Default::default() });
+                self.register_callable(callable.as_ref(), HashKeyOwner::Handler { owner: Box::new(owner.clone()), name: name.as_str().into(), slot: Default::default() });
                 let runs = self.named_callable_input(callable.as_ref());
                 let detail = SymbolDetail::Handler {
                     owner,
-                    dispatchers,
+                    dispatchers: dispatchers.into(),
                     params: params.into_iter().map(Into::into).collect(),
-                    runs,
+                    runs: runs.map(Box::new),
                 };
                 let sid = self.add_symbol_ns(name, SymKind::Handler, span, selection_span, detail, ns);
                 *self.presentation_mut(sid) = crate::model::file_analysis::Presentation {

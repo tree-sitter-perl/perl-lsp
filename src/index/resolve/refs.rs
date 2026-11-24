@@ -53,7 +53,7 @@ pub(super) fn group_from_projections(
         members.push(GroupMember {
             target: TargetRef::new(
                 p.bare.clone(),
-                TargetKind::HashKeyOfInput { package: package.clone(), name: name.clone(), slot: *slot },
+                TargetKind::HashKeyOfInput { package: package.as_deref().map(str::to_string), name: name.to_string(), slot: *slot },
                 class_analysis,
             ),
             rename: MemberRename::Bare,

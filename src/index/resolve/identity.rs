@@ -94,7 +94,7 @@ fn input_group_of_callee(
             .resolve_method_in_ancestors(package, name, Some(idx))
             .map_or_else(|| package.to_string(), |m| m.class().to_string())
     });
-    let declared = HashKeyOwner::Input { package: declaring.clone(), name: name.clone(), slot: *slot };
+    let declared = HashKeyOwner::Input { package: declaring.as_deref().map(Into::into), name: name.clone(), slot: *slot };
     if let Some(p) = origin.input_projections_named(bare, &declared) {
         return Some(group_from_projections(p, origin, None, Some(idx)));
     }
@@ -400,10 +400,10 @@ pub fn resolve_symbol_scoped(
                 TargetRef::new(name, TargetKind::HashKeyOfSub { package, name: sub_name }, analysis),
             ),
             Some(HashKeyOwner::Input { package, name: sub_name, slot }) => ResolvedTarget::Target(
-                TargetRef::new(name, TargetKind::HashKeyOfInput { package, name: sub_name, slot }, analysis),
+                TargetRef::new(name, TargetKind::HashKeyOfInput { package: package.map(String::from), name: sub_name.into(), slot }, analysis),
             ),
             Some(HashKeyOwner::Handler { owner, name: handler, slot }) => ResolvedTarget::Target(
-                TargetRef::new(name, TargetKind::HashKeyOfHandler { owner, name: handler, slot }, analysis),
+                TargetRef::new(name, TargetKind::HashKeyOfHandler { owner: *owner, name: handler.into(), slot }, analysis),
             ),
             // A bridged key (DBIC column condition-arg / accessor): the fallback
             // when no field-group path caught it (e.g. single-file, no index).

@@ -22,7 +22,7 @@ fn handler(id: u32, name: &str, owner: HandlerOwner) -> Symbol {
         selection_span: at,
         scope: ScopeId(0),
         package: None,
-        detail: SymbolDetail::Handler { owner, dispatchers: vec!["emit".into()], params: vec![], runs: None },
+        detail: SymbolDetail::Handler { owner, dispatchers: vec!["emit".into()].into(), params: vec![], runs: None },
         namespace: Namespace::framework("p".to_string()),
         presentation: Default::default(),
         attributes: Vec::new(),

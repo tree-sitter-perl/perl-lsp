@@ -786,12 +786,12 @@ impl<'a> Builder<'a> {
             HashKeyOwner::Input { package, name, .. } => self
                 .symbols
                 .iter()
-                .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method) && &s.name == name && &s.package == package)
+                .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method) && *s.name == **name && s.package.as_deref() == package.as_deref())
                 .find_map(params),
             HashKeyOwner::Handler { owner: o, name, .. } => self
                 .symbols
                 .iter()
-                .filter(|s| &s.name == name && matches!(&s.detail, SymbolDetail::Handler { owner: h, .. } if h == o))
+                .filter(|s| *s.name == **name && matches!(&s.detail, SymbolDetail::Handler { owner: h, .. } if *h == **o))
                 .find_map(params),
             _ => None,
         }
@@ -831,7 +831,7 @@ impl<'a> Builder<'a> {
                     // in hand: a subclass's `new(k => …)` passes an inherited
                     // constructor key, which no local def names.
                     let class = match sub_owner {
-                        HashKeyOwner::Input { package: Some(c), .. } => c.clone(),
+                        HashKeyOwner::Input { package: Some(c), .. } => c.to_string(),
                         _ => continue,
                     };
                     let col = HashKeyOwner::Bridged { class };
