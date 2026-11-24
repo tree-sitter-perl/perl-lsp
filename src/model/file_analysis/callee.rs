@@ -144,7 +144,11 @@ impl FileAnalysis {
             }
         }
         let name = call.unqualified_target_name(self.names());
-        if let Some(package) = call.resolved_package() {
+        // A qualified token names its package; a bare one is this file's
+        // sub, else what an import binds the name to — under the name the
+        // exporter declares it by, which `-as` may differ from.
+        let qualified = split_qualified(&call.target_name, self.names()).0.is_some();
+        if let (true, Some(package)) = (qualified, call.resolved_package()) {
             return Some(self.packaged_callee(package, name, index));
         }
         if let Some(sym) = self
@@ -157,6 +161,9 @@ impl FileAnalysis {
         }
         if let Some((module, remote)) = index.and_then(|idx| self.imported_callable(name, call.span.start, idx)) {
             return Some(self.packaged_callee(&module, &remote, index));
+        }
+        if let Some(package) = call.resolved_package() {
+            return Some(self.packaged_callee(package, name, index));
         }
         Some(Callee { input: HashKeyOwner::named_input(None, name), at: None })
     }
