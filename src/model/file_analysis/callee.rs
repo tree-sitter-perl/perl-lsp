@@ -243,18 +243,30 @@ impl FileAnalysis {
     fn handler_callee(&self, owner: &HandlerOwner, name: &str, index: Option<&dyn CrossFileLookup>) -> Callee {
         let input = HashKeyOwner::Handler { owner: owner.clone(), name: name.to_string(), slot: InputSlot::Named };
         let registered = |s: &Symbol| s.name == name && matches!(&s.detail, SymbolDetail::Handler { owner: o, .. } if o == owner);
+        // A handler that runs a named callable is called as that callable.
+        let runs = |s: &Symbol| match &s.detail {
+            SymbolDetail::Handler { runs: Some(HashKeyOwner::Input { package: Some(p), name, .. }), .. } => Some((p.clone(), name.clone())),
+            _ => None,
+        };
         if let Some(sym) = self.symbols.iter().find(|s| registered(s)) {
+            if let Some((package, callable)) = runs(sym) {
+                return self.packaged_callee(&package, &callable, index);
+            }
             return Callee { input, at: Some(CalleeAt::Here(sym.id)), receiver: None };
         }
         let there = index.and_then(|idx| {
             idx.modules_with_symbol(name).into_iter().find_map(|module| {
                 idx.visible_def_candidates(&module).into_iter().find_map(|cached| {
-                    let span = idx.symbols_present(&cached).symbols().iter().find(|s| registered(s))?.selection_span;
-                    Some(CalleeAt::There { module: cached, span })
+                    let found = idx.symbols_present(&cached).symbols().iter().find(|s| registered(s)).map(|s| (s.selection_span, runs(s)))?;
+                    Some((cached, found))
                 })
             })
         });
-        Callee { input, at: there, receiver: None }
+        match there {
+            Some((_, (_, Some((package, callable))))) => self.packaged_callee(&package, &callable, index),
+            Some((module, (span, None))) => Callee { input, at: Some(CalleeAt::There { module, span }), receiver: None },
+            None => Callee { input, at: None, receiver: None },
+        }
     }
 
     /// The callable the value named by the call's token holds there.

@@ -964,7 +964,7 @@ fn call_arg_site(
     source: &[u8],
     point: tree_sitter::Point,
     call_ctx: &cursor_context::CallContext,
-) -> Option<(crate::model::file_analysis::Callee, cursor_context::ArgSite)> {
+) -> Option<(crate::model::file_analysis::Callee, cursor_context::ArgSite, bool)> {
     let handler = analysis.handler_regions().find_map(|(call, region)| {
         let site = match region {
             crate::model::file_analysis::HandlerRegion::Elements(s) => {
@@ -972,11 +972,11 @@ fn call_arg_site(
             }
             crate::model::file_analysis::HandlerRegion::After(s) => call_ctx.site.after(s.start),
         }?;
-        Some((analysis.callee_of(call, Some(module_index))?, site))
+        Some((analysis.callee_of(call, Some(module_index))?, site, true))
     });
     handler.or_else(|| {
         let callee = call_ctx.name_start.and_then(|at| analysis.callee_at(at, Some(module_index)))?;
-        Some((callee, call_ctx.site.clone()))
+        Some((callee, call_ctx.site.clone(), false))
     })
 }
 
@@ -992,11 +992,15 @@ fn call_arg_labels(
     point: tree_sitter::Point,
     call_ctx: &cursor_context::CallContext,
 ) -> Option<Vec<CompletionCandidate>> {
-    let (callee, site) = call_arg_site(analysis, module_index, tree, source, point, call_ctx)?;
+    let (callee, site, in_region) = call_arg_site(analysis, module_index, tree, source, point, call_ctx)?;
     let (at_key, used, place) = match &site.hash {
         Some((at_key, used)) => (*at_key, used.clone(), Some(site.place as u32)),
         None => {
-            let (at_key, used) = site.named_key_after(callee.named_offset(analysis, Some(module_index)));
+            // A handler region holds the handler's names from its first
+            // element, as the builder pair-walks it: what the dispatcher
+            // passes ahead of them is no place in the region.
+            let offset = if in_region { 0 } else { callee.named_offset(analysis, Some(module_index)) };
+            let (at_key, used) = site.named_key_after(offset);
             (at_key, used, None)
         }
     };

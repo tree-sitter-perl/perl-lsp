@@ -377,10 +377,12 @@ impl<'a> Builder<'a> {
                     return;
                 }
                 self.register_callable(callable.as_ref(), HashKeyOwner::Handler { owner: owner.clone(), name: name.clone(), slot: Default::default() });
+                let runs = self.named_callable_input(callable.as_ref());
                 let detail = SymbolDetail::Handler {
                     owner,
                     dispatchers,
                     params: params.into_iter().map(Into::into).collect(),
+                    runs,
                 };
                 let sid = self.add_symbol_ns(name, SymKind::Handler, span, selection_span, detail, ns);
                 *self.presentation_mut(sid) = crate::model::file_analysis::Presentation {
@@ -816,6 +818,21 @@ impl<'a> Builder<'a> {
                 .find(|(from, _)| from == owner)
                 .map_or_else(|| owner.clone(), |(_, to)| to.clone()),
             _ => owner.clone(),
+        }
+    }
+
+    /// The input of a NAMED callable a registration runs (`\&mail`, or a
+    /// declared sub's symbol). An anonymous one is adopted instead.
+    fn named_callable_input(&self, callable: Option<&crate::model::witnesses::WitnessAttachment>) -> Option<HashKeyOwner> {
+        use crate::model::witnesses::WitnessAttachment;
+        match callable? {
+            WitnessAttachment::Member { owner, name, .. } => Some(HashKeyOwner::named_input(Some(owner.clone()), name.clone())),
+            WitnessAttachment::Symbol(sid) => {
+                let sym = self.symbols.get(sid.0 as usize)?;
+                (!sym.flags.contains(crate::model::file_analysis::SymbolFlags::ANONYMOUS))
+                    .then(|| HashKeyOwner::input_of(sym, &self.namespace_ranges))
+            }
+            _ => None,
         }
     }
 

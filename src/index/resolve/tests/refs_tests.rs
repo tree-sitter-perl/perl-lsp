@@ -2744,3 +2744,36 @@ Foo->new(timeout => 1, _timeout => 2, _cache => 3);\n",
         assert!(!defs.iter().any(|d| d.span.start.row <= 2), "{miss:?} names no constructor key, got {defs:?}");
     }
 }
+
+/// A task registered by name takes the keys its enqueue passes: the
+/// dispatch is a call of the named sub, wherever it is enqueued.
+#[test]
+fn a_named_task_takes_the_keys_its_enqueue_passes() {
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let path_reg = PathBuf::from("/tmp/resolve_named_task_reg.pm");
+    let path_call = PathBuf::from("/tmp/resolve_named_task_call.pm");
+    let fa_reg = parse(
+        "package App::Tasks;\nuse Minion;\n\
+sub mail ($job, %o) { $o{timeout} }\n\
+sub setup ($minion) { $minion->add_task(mail => \\&mail) }\n1;\n",
+    );
+    let fa_call = parse(
+        "package App::Caller;\nuse Minion;\n\
+sub fire ($minion) {\n  $minion->enqueue(mail => [timeout => 1]);\n}\n1;\n",
+    );
+    idx.insert_workspace_for_test(path_reg.clone(), fa_reg.clone());
+    idx.insert_workspace_for_test(path_call.clone(), fa_call.clone());
+    let key = |p: &PathBuf| FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(p));
+    let at = |row, column| tree_sitter::Point { row, column };
+    let defs = resolve(&store, &fa_call, key(&path_call), at(3, 28), Some(&idx), OverrideScope::default()).definitions();
+    assert!(
+        defs.iter().any(|d| file_key_eq(&d.key, &key(&path_reg)) && d.span.start == at(2, 25)),
+        "the enqueued key lands on the named task's read, got {defs:?}",
+    );
+    let refs = resolve(&store, &fa_reg, key(&path_reg), at(2, 25), Some(&idx), OverrideScope::default()).references();
+    assert!(
+        refs.iter().any(|r| file_key_eq(&r.key, &key(&path_call)) && r.span.start == at(3, 28)),
+        "the task's key finds the enqueue that passes it, got {refs:?}",
+    );
+}

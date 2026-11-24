@@ -1984,6 +1984,7 @@ $minion->add_task(send_email => sub {
         ref owner,
         ref dispatchers,
         ref params,
+        ..
     } = handler.detail
     else {
         panic!("handler detail should be Handler")

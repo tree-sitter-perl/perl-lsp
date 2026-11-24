@@ -352,7 +352,7 @@ fn symbol_to_snapshot(s: &Symbol) -> Value {
                 "opaque_return": opaque_return,
             });
         }
-        SymbolDetail::Handler { owner, dispatchers, params } => {
+        SymbolDetail::Handler { owner, dispatchers, params, .. } => {
             entry["detail"] = json!({
                 "kind": "Handler",
                 "owner": format!("{:?}", owner),

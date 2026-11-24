@@ -1885,6 +1885,11 @@ pub enum SymbolDetail {
         owner: HandlerOwner,
         dispatchers: Vec<String>,
         params: Vec<ParamInfo>,
+        /// The input of the named callable it runs (`add_task(mail =>
+        /// \&mail)`): a dispatch's keys are that callable's. An anonymous
+        /// callback has none; its keys are the handler's own.
+        #[serde(default)]
+        runs: Option<HashKeyOwner>,
     },
     /// Package, Module, or other kinds needing no extra data.
     None,

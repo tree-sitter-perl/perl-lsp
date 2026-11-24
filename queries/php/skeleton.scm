@@ -34,6 +34,10 @@
 (trait_declaration
   "trait" @sym.attr
   name: (name) @def.class.name @context.class) @def.class @scope.direct
+; An enum is a class whose cases are its instances: its methods are
+; members like any class's.
+(enum_declaration
+  name: (name) @def.class.name @context.class) @def.class @scope.direct
 
 ; ---- written types ----
 ; `self` names the class it is written in, and `parent` the class it
@@ -342,6 +346,9 @@
 ; parent's identity. The same name is a class reference — goto-def,
 ; references and rename reach it — and a qualified spelling references by
 ; the whole spelling while rewriting only its leaf.
+; TODO(trait-method-alias): `use T { m as go; }` names T's `m` as the
+; class's `go`; mint the member alias so `->go(...)` resolves to `T::m`,
+; and its named arguments reach m's parameters (owner: PHP 0.12 thread).
 (class_declaration
   name: (name) @def.class.name
   (base_clause
@@ -862,6 +869,14 @@
 (object_creation_expression
   . (variable_name) @member.recv
   (arguments ((_) @arity.arg ","?)*)?) @expr.construct @arity.args
+; An attribute `#[Route(…)]` constructs its class on its arguments when
+; it is read, so its arguments are a constructor call's.
+(attribute
+  . (name) @member.recv @receiver.class @ref.type
+  parameters: (arguments ((_) @arity.arg ","?)*)?) @expr.construct @arity.args
+(attribute
+  . (qualified_name (name) @ref.type) @member.recv @receiver.class @ref.spelled
+  parameters: (arguments ((_) @arity.arg ","?)*)?) @expr.construct @arity.args
 ; `new class(…) {…}` declares a class with no name, one per place it is
 ; written, and constructs it there: its `class` keyword anchors both. Its
 ; parents and its body are a class's, its body's names in force only for
