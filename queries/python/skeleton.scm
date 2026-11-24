@@ -85,6 +85,10 @@
 ; Such a class's annotated field is a key its constructor takes, declared
 ; with the field by the one token; a `ClassVar` is the class's own, no
 ; field.
+; TODO(dataclass-inherited-fields): a dataclass subclass's `__init__` also
+; takes each dataclass ancestor's fields, ancestors first; a construction's
+; owners should include every ancestor's generated constructor input.
+; Owner: Python pack follow-up.
 ((decorated_definition
    (decorator [(identifier) @_gen
                (attribute attribute: (identifier) @_gen)
