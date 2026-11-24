@@ -301,6 +301,17 @@ pub flavor: String,
 pub imports: Vec<String>,
 #[serde(default)]
 pub base: Option<String>,
+#[serde(default)]
+pub inputs: Vec<InputAlias>,
+#[serde(default)]
+pub ctor_key_option: Option<String>,
+}
+
+pub struct InputAlias {
+pub from: String,
+#[serde(default)]
+pub slot: crate::model::file_analysis::InputSlot,
+pub to: String,
 }
 
 pub struct RefTagFunction {

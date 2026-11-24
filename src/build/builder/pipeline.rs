@@ -341,6 +341,7 @@ fn build_once(
         pending_call_arg_keys: Vec::new(),
         pending_value_call_keys: Vec::new(),
         registered_inputs: Vec::new(),
+        input_aliases: Vec::new(),
         framework_read: std::collections::HashSet::new(),
         sub_tail: std::collections::HashMap::new(),
         slot_write_rhs_span: std::collections::HashMap::new(),
@@ -410,6 +411,7 @@ fn build_once(
         role_maker_modules: std::collections::HashSet::new(),
         framework_mode_modules: std::collections::HashMap::new(),
         framework_bases: std::collections::HashMap::new(),
+        ctor_key_options: std::collections::HashMap::new(),
         extended_packages: std::collections::HashSet::new(),
         role_packages: std::collections::HashSet::new(),
         dbic_source_name: None,
@@ -470,7 +472,7 @@ fn build_once(
         .filter_map(|m| match FrameworkMode::from_flavor(&m.flavor) {
             Some(mode) => Some((
                 m.module.clone(),
-                FrameworkModeGrant { mode, imports: m.imports.clone(), base: m.base.clone() },
+                FrameworkModeGrant { mode, imports: m.imports.clone(), base: m.base.clone(), inputs: m.inputs.clone(), ctor_key_option: m.ctor_key_option.clone() },
             )),
             None => {
                 log::error!(

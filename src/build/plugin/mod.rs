@@ -1021,6 +1021,25 @@ pub struct FrameworkModeMaker {
     pub imports: Vec<String>,
     #[serde(default)]
     pub base: Option<String>,
+    /// Callables whose input is another's in a package this module makes
+    /// (Moo's `BUILDARGS` and `BUILD` take what `new` is called with).
+    #[serde(default)]
+    pub inputs: Vec<InputAlias>,
+    /// The `has` option that spells an attribute's constructor key in place
+    /// of its name (Moo's `init_arg`); `undef` there means no key.
+    #[serde(default)]
+    pub ctor_key_option: Option<String>,
+}
+
+/// In a package a framework makes, the input of callable `from` at `slot`
+/// is callable `to`'s named input: a key one reads is a key the other is
+/// called with.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InputAlias {
+    pub from: String,
+    #[serde(default)]
+    pub slot: crate::model::file_analysis::InputSlot,
+    pub to: String,
 }
 
 /// A library function that reports what a reference is (Scalar::Util's

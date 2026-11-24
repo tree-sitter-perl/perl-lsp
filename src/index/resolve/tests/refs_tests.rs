@@ -2698,3 +2698,49 @@ fn refs_to_an_input_key_joins_the_read_and_the_calls_across_files() {
     assert!(!lib_refs.iter().any(|r| (r.span.start.row, r.span.start.column) == (1, slot_col)), "not the returned slot: {results:?}");
     assert_eq!(in_file(&app).len(), 1, "the call site's key: {results:?}");
 }
+
+/// A Moo class's `BUILDARGS` and `BUILD` read what its `new` is called with.
+#[test]
+fn a_moo_constructor_s_keys_reach_buildargs_and_build() {
+    let store = OpenDocs::new();
+    let path = PathBuf::from("/tmp/resolve_moo_build_keys.pl");
+    let fa = parse(
+        "package Foo; use Moo;\n\
+sub BUILDARGS { my ($class, %args) = @_; return { t => $args{timeout} }; }\n\
+sub BUILD { my ($self, $args) = @_; $args->{retries} }\n\
+package main;\n\
+Foo->new(timeout => 1, retries => 2);\n",
+    );
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), fa.clone());
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(&path));
+    let at = |row, column| tree_sitter::Point { row, column };
+    for (call, read) in [(at(4, 10), at(1, 61)), (at(4, 24), at(2, 44))] {
+        let defs = resolve(&store, &fa, key.clone(), call, Some(&idx), OverrideScope::default()).definitions();
+        assert!(defs.iter().any(|d| d.span.start == read), "{call:?} lands on the read at {read:?}, got {defs:?}");
+    }
+}
+
+/// `init_arg` spells an attribute's constructor key; `undef` mints none.
+#[test]
+fn init_arg_spells_the_constructor_key() {
+    let store = OpenDocs::new();
+    let path = PathBuf::from("/tmp/resolve_init_arg.pl");
+    let fa = parse(
+        "package Foo; use Moo;\n\
+has _timeout => (is => 'ro', init_arg => 'timeout');\n\
+has _cache => (is => 'ro', init_arg => undef);\n\
+package main;\n\
+Foo->new(timeout => 1, _timeout => 2, _cache => 3);\n",
+    );
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), fa.clone());
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(&path));
+    let at = |row, column| tree_sitter::Point { row, column };
+    let defs = resolve(&store, &fa, key.clone(), at(4, 10), Some(&idx), OverrideScope::default()).definitions();
+    assert!(defs.iter().any(|d| d.span.start == at(1, 42)), "the key lands on the init_arg string, got {defs:?}");
+    for miss in [at(4, 24), at(4, 39)] {
+        let defs = resolve(&store, &fa, key.clone(), miss, Some(&idx), OverrideScope::default()).definitions();
+        assert!(!defs.iter().any(|d| d.span.start.row <= 2), "{miss:?} names no constructor key, got {defs:?}");
+    }
+}

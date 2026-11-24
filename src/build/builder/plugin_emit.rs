@@ -810,6 +810,11 @@ impl<'a> Builder<'a> {
                 .iter()
                 .find(|(s, _)| s == callable)
                 .map_or_else(|| owner.clone(), |(_, o)| o.clone().with_slot(*slot)),
+            HashKeyOwner::Input { .. } => self
+                .input_aliases
+                .iter()
+                .find(|(from, _)| from == owner)
+                .map_or_else(|| owner.clone(), |(_, to)| to.clone()),
             _ => owner.clone(),
         }
     }
@@ -834,7 +839,7 @@ impl<'a> Builder<'a> {
     /// it — moves to the input it was registered as. One registration per
     /// callable: the first names it.
     pub(super) fn adopt_registered_inputs(&mut self) {
-        if self.registered_inputs.is_empty() {
+        if self.registered_inputs.is_empty() && self.input_aliases.is_empty() {
             return;
         }
         let adopted = |owner: &HashKeyOwner| -> Option<HashKeyOwner> {

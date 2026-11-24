@@ -252,6 +252,8 @@ struct FrameworkModeGrant {
     mode: FrameworkMode,
     imports: Vec<String>,
     base: Option<String>,
+    inputs: Vec<crate::build::plugin::InputAlias>,
+    ctor_key_option: Option<String>,
 }
 
 /// One way a sub leaves by falling off its end.
@@ -329,6 +331,9 @@ struct Builder<'a> {
     /// and the input of what it was registered as: its keys answer to that
     /// name (`adopt_registered_inputs`).
     registered_inputs: Vec<(crate::model::file_analysis::SymbolId, HashKeyOwner)>,
+    /// `(from, to)`: a framework says `from`'s input is `to`'s
+    /// (`FrameworkModeMaker::inputs`); adopted with the registrations.
+    input_aliases: Vec<(HashKeyOwner, HashKeyOwner)>,
     /// The nodes a plugin pattern captured in a match it emitted for: a
     /// call whose arguments a framework reads is no callable taking names,
     /// so its keys are the framework's (`docs/adr/named-arguments.md`).
@@ -639,6 +644,9 @@ struct Builder<'a> {
     /// `apply_framework_bases` unless the package is in
     /// `extended_packages`.
     framework_bases: std::collections::HashMap<String, String>,
+    /// Package → the `has` option spelling its constructor keys
+    /// (`FrameworkModeMaker::ctor_key_option`).
+    ctor_key_options: std::collections::HashMap<String, String>,
     /// Packages that called `extends`: their declared parent replaces the
     /// framework base, as Moo's and Moose's `extends` reset `@ISA`.
     extended_packages: std::collections::HashSet<String>,

@@ -244,6 +244,10 @@ impl<'a> Builder<'a> {
         // Read structurally, never re-parsed.
         let mut isa_value_node: Option<Node<'a>> = None;
         let mut mojo_default_node: Option<Node<'a>> = None;
+        // The constructor key's own spelling, when the framework's option
+        // gives one: `Some(None)` is `undef`, no key at all.
+        let mut ctor_key: Option<Option<(String, Span)>> = None;
+        let ctor_key_option = self.current_package.as_ref().and_then(|p| self.ctor_key_options.get(p)).cloned();
 
         // Get the arguments node
         let args = match node.field(Field::Arguments) {
@@ -307,7 +311,16 @@ impl<'a> Builder<'a> {
             mojo_default_node = rest.iter().copied().find(|c| c.is_named());
         } else {
             for (k_node, val_node) in self.has_option_pair_nodes(&rest) {
-                match self.extract_node_string(k_node).as_deref() {
+                let key = self.extract_node_string(k_node);
+                if ctor_key.is_none() && key.is_some() && key == ctor_key_option {
+                    ctor_key = Some(if val_node.is(Kind::UndefExpression) {
+                        None
+                    } else {
+                        self.extract_node_string(val_node).map(|k| (k, crate::cst::string_content_span(val_node)))
+                    });
+                    continue;
+                }
+                match key.as_deref() {
                     Some("is") => {
                         if is_value.is_none() {
                             is_value = self.extract_node_string(val_node);
@@ -629,10 +642,16 @@ impl<'a> Builder<'a> {
             // HERE — the repr gate is encoded at the source, not re-derived
             // by consumers (Corinna's field visitor mints no InternalKey).
             for (name, _sel_span) in &attr_names {
-                for kind in [
-                    crate::model::file_analysis::AttrProjectionKind::CtorKey,
-                    crate::model::file_analysis::AttrProjectionKind::InternalKey,
-                ] {
+                // A respelled key is no projection of the attribute's name.
+                let kinds: &[crate::model::file_analysis::AttrProjectionKind] = if ctor_key.is_some() {
+                    &[crate::model::file_analysis::AttrProjectionKind::InternalKey]
+                } else {
+                    &[
+                        crate::model::file_analysis::AttrProjectionKind::CtorKey,
+                        crate::model::file_analysis::AttrProjectionKind::InternalKey,
+                    ]
+                };
+                for kind in kinds.iter().cloned() {
                     self.attr_projections.push(crate::model::file_analysis::AttrProjection {
                         class: pkg.clone(),
                         attr: name.clone(),
@@ -641,6 +660,13 @@ impl<'a> Builder<'a> {
                 }
             }
             let owner = HashKeyOwner::named_input(self.current_package.clone(), "new");
+            if let Some(spelled) = ctor_key {
+                // One spelling serves one attribute; it renames apart from it.
+                if let (Some((key, span)), [_]) = (spelled, attr_names.as_slice()) {
+                    self.add_symbol(key, SymKind::HashKeyDef, node_to_span(node), span, SymbolDetail::HashKeyDef { owner, is_dynamic: false });
+                }
+                return;
+            }
             for (name, sel_span) in &attr_names {
                 let key_id = self.add_symbol(
                     name.clone(),
