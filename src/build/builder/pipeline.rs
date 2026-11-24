@@ -340,6 +340,7 @@ fn build_once(
         pending_array_pushes: Vec::new(),
         pending_call_arg_keys: Vec::new(),
         pending_value_call_keys: Vec::new(),
+        registered_inputs: Vec::new(),
         framework_read: std::collections::HashSet::new(),
         sub_tail: std::collections::HashMap::new(),
         slot_write_rhs_span: std::collections::HashMap::new(),
@@ -710,6 +711,9 @@ fn build_once(
     // class's defs (DBIC columns, Moo slots); variables without a class
     // type keep their lexical grouping.
     bphase!("upgrade_var_hk_owners", b.upgrade_variable_hash_key_owners());
+
+    // A registered callback's keys are its registration's.
+    bphase!("adopt_registered_inputs", b.adopt_registered_inputs());
 
     // Post-pass 5: fill in tail POD docs for subs that didn't get preceding doc
     bphase!("resolve_tail_pod_docs", b.resolve_tail_pod_docs());

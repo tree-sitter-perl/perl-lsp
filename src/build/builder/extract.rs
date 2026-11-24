@@ -734,7 +734,12 @@ impl<'a> Builder<'a> {
         // even/odd iteration over the top-level children sees only the FIRST
         // pair. `pair_nodes` flattens the nesting (and skips separators), so
         // every key is walked. (CLAUDE.md: don't re-derive pair-walking.)
-        for (child, _value) in crate::cst::pair_nodes(effective) {
+        self.emit_arg_key_pairs(crate::cst::pair_nodes(effective), gate);
+    }
+
+    /// The keys of a pair walk, each bound as `gate` says.
+    pub(super) fn emit_arg_key_pairs(&mut self, pairs: Vec<(Node<'a>, Node<'a>)>, gate: Gate) {
+        for (child, _value) in pairs {
             if !matches!(
                 child.kind_of(),
                 Kind::Bareword | Kind::AutoquotedBareword | Kind::StringLiteral | Kind::InterpolatedStringLiteral
@@ -822,6 +827,37 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The keys a dispatch call passes its handler, from the region the
+    /// plugin named by one of the match's captures, each bound to the
+    /// dispatch ref at `call` (its owner is the handler's input,
+    /// `callee_of`).
+    pub(super) fn emit_handler_arg_keys(
+        &mut self,
+        region: &crate::build::plugin::HandlerArgs,
+        caps: &[(u32, Node<'a>)],
+        call: usize,
+    ) {
+        use crate::build::plugin::HandlerArgs;
+        let at = |span: &Span| caps.iter().map(|(_, n)| *n).find(|n| node_to_span(*n) == *span);
+        let mut elements = Vec::new();
+        match region {
+            HandlerArgs::Elements(span) => {
+                let Some(array) = at(span).filter(|n| n.is(Kind::AnonymousArrayExpression)) else { return };
+                crate::cst::flatten_list(crate::cst::literal_body(array), &mut elements);
+            }
+            HandlerArgs::After(span) => {
+                let Some(first) = at(span) else { return };
+                let Some(list) = self.syntax.parent(first) else { return };
+                let mut all = Vec::new();
+                crate::cst::flatten_list(list, &mut all);
+                let Some(i) = all.iter().position(|n| n.id() == first.id()) else { return };
+                elements.extend_from_slice(&all[i + 1..]);
+            }
+        }
+        let pairs = crate::cst::pair_nodes_in(&elements);
+        self.emit_arg_key_pairs(pairs, Gate::Deferred(crate::model::witnesses::RefIdx(call as u32)));
+    }
+
     /// Strict (no `found_by` broadening) check: is a HashKeyDef
     /// registered with this exact `owner` and `name`? Used by
     /// `emit_call_arg_key_accesses` to gate emission — broadening
@@ -831,7 +867,7 @@ impl<'a> Builder<'a> {
     pub(super) fn has_hash_key_def(&self, name: &str, owner: &HashKeyOwner) -> bool {
         self.symbols.iter().any(|s| {
             if s.name != name { return false; }
-            matches!(&s.detail, SymbolDetail::HashKeyDef { owner: o, .. } if o == owner)
+            matches!(&s.detail, SymbolDetail::HashKeyDef { owner: o, .. } if self.as_registered(o) == owner)
         })
     }
 

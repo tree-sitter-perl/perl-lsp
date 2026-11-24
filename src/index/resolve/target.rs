@@ -226,6 +226,7 @@ impl TargetRef {
                 | TargetKind::Package
                 | TargetKind::HashKeyOfSub { .. }
                 | TargetKind::HashKeyOfInput { .. }
+                | TargetKind::HashKeyOfHandler { .. }
                 | TargetKind::Handler { .. }
                 | TargetKind::PackageVar { .. }
                 | TargetKind::FileScopeValue
@@ -388,6 +389,10 @@ pub enum TargetKind {
     /// key). Matches `HashKeyOwner::Input` the way `HashKeyOfSub` matches
     /// `Sub`.
     HashKeyOfInput { package: Option<String>, name: String, slot: InputSlot },
+    /// A key a string-dispatched handler takes (`$minion->enqueue(mail =>
+    /// [timeout => 1])` reaches `add_task(mail => sub ($job, %o) {…})`).
+    /// Matches `HashKeyOwner::Handler` by equality.
+    HashKeyOfHandler { owner: HandlerOwner, name: String },
     /// A hash key owned by a class (Moo `has` slots, DBIC columns on a Result class).
     HashKeyOfBridged(String),
     /// An attr's internal hash slot (`$self->{attr}` — or any

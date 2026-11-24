@@ -2138,6 +2138,56 @@ sub fire ($minion) {\n  $minion->enqueue('send_email' => ['a@b']);\n}\n1;\n",
     );
 }
 
+/// A task's keys are the keys an `enqueue` passes it, across files:
+/// `enqueue(mail => [timeout => 1])` names the key the task reads as
+/// `$o{timeout}`, and the read finds the call's key back.
+#[test]
+fn a_task_takes_the_keys_its_enqueue_passes_across_files() {
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let path_reg = PathBuf::from("/tmp/resolve_minion_keys_reg.pm");
+    let path_call = PathBuf::from("/tmp/resolve_minion_keys_call.pm");
+    let fa_reg = parse(
+        "package App::Tasks;\nuse Minion;\n\
+sub setup ($minion) {\n  $minion->add_task(mail => sub ($job, %o) { $o{timeout} });\n}\n1;\n",
+    );
+    let fa_call = parse(
+        "package App::Caller;\nuse Minion;\n\
+sub fire ($minion) {\n  $minion->enqueue(mail => [timeout => 1]);\n}\n1;\n",
+    );
+    idx.insert_workspace_for_test(path_reg.clone(), fa_reg.clone());
+    idx.insert_workspace_for_test(path_call.clone(), fa_call.clone());
+    let key = |p: &PathBuf| FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(p));
+    let at = |row, column| tree_sitter::Point { row, column };
+
+    let defs = resolve(&store, &fa_call, key(&path_call), at(3, 28), Some(&idx), OverrideScope::default()).definitions();
+    assert!(
+        defs.iter().any(|d| file_key_eq(&d.key, &key(&path_reg)) && d.span.start == at(3, 48)),
+        "the enqueued key lands on the task's read, got {defs:?}",
+    );
+    let refs = resolve(&store, &fa_reg, key(&path_reg), at(3, 48), Some(&idx), OverrideScope::default()).references();
+    assert!(
+        refs.iter().any(|r| file_key_eq(&r.key, &key(&path_call)) && r.span.start == at(3, 28)),
+        "the task's key finds the enqueue that passes it, got {refs:?}",
+    );
+}
+
+/// A dotted helper's keys are the keys its chained call passes.
+#[test]
+fn a_dotted_helper_takes_the_keys_its_call_passes() {
+    let store = OpenDocs::new();
+    let path = PathBuf::from("/tmp/resolve_dotted_helper_keys.pl");
+    let fa = parse(
+        "use Mojolicious::Lite -signatures;\n\
+helper 'users.fetch' => sub ($c, %o) { $o{timeout} };\n\
+get '/' => sub ($c) { $c->users->fetch(timeout => 1) };\n",
+    );
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(&path));
+    let at = |row, column| tree_sitter::Point { row, column };
+    let defs = resolve(&store, &fa, key.clone(), at(2, 39), None, OverrideScope::default()).definitions();
+    assert!(defs.iter().any(|d| d.span.start == at(1, 42)), "the call's key lands on the helper's read, got {defs:?}");
+}
+
 /// The query-time `ReceiverGated` gap closer: a Handler `refs_to` must
 /// include a dispatch call-site in a NON-OPEN workspace file whose receiver
 /// `isa Minion` only CROSS-FILE and which does NOT `use Minion` itself. The

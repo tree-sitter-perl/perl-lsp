@@ -325,6 +325,18 @@ pub struct TopicRouteDsl {
     pub group_fn: String,
 }
 
+/// Where a dispatch call holds the arguments its handler receives, named
+/// by the span of one of the match's captures.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum HandlerArgs {
+    /// The elements of the array literal at this span
+    /// (`enqueue(mail => [to => 'x'])`).
+    Elements(Span),
+    /// The call's arguments after the one at this span
+    /// (`emit(ready => to => 'x')`).
+    After(Span),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EmitAction {
     // ==== Data emissions ====
@@ -432,6 +444,11 @@ pub enum EmitAction {
         /// whole group DX for plugins.
         #[serde(default)]
         attr: Option<String>,
+        /// The callable this method runs (a helper's callback, its
+        /// `callable_edge`): an anonymous callback's keys are the method's
+        /// named inputs, so a call of the method reaches them.
+        #[serde(default)]
+        callable: Option<crate::model::witnesses::WitnessAttachment>,
     },
     /// Synthesize a `HashKeyDef` for a constructor/stash/etc. key.
     HashKeyDef {
@@ -503,6 +520,10 @@ pub enum EmitAction {
         /// appends non-invocant params.
         #[serde(default)]
         outline_label: Option<String>,
+        /// The callable the handler runs (the callback's `callable_edge`):
+        /// an anonymous callback's keys are the handler's named inputs.
+        #[serde(default)]
+        callable: Option<crate::model::witnesses::WitnessAttachment>,
     },
     /// Emit a call-site reference for a Handler — e.g. the cursor is on
     /// `'ready'` in `$x->emit('ready', ...)`. `dispatcher` is the
@@ -519,6 +540,10 @@ pub enum EmitAction {
         /// Receiver expression text, e.g. `"$emitter"` or `"$self"`.
         /// Informational only; empty is fine.
         var_text: String,
+        /// Where this call holds the arguments it passes the handler:
+        /// their keys are the handler's named inputs.
+        #[serde(default)]
+        args: Option<HandlerArgs>,
     },
     /// Emit a MethodCall reference pointing at a named method on a known
     /// class. Used where a string or other expression represents a
@@ -2141,6 +2166,7 @@ mod tests {
             outline_label: None,
             return_via_edge: None,
             attr: None,
+            callable: None,
         };
         let json = serde_json::to_string(&action).unwrap();
         assert!(json.contains("\"Method\""));

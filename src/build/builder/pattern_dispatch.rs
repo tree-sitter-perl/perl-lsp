@@ -869,7 +869,15 @@ impl<'a> Builder<'a> {
                                 continue;
                             }
                         }
+                        let handler_args = match &a {
+                            plugin::EmitAction::DispatchCall { args: Some(region), .. } => Some(region.clone()),
+                            _ => None,
+                        };
+                        let before = self.refs.len();
                         self.apply_emit_action(p.id().to_string(), a);
+                        if let (Some(region), true) = (handler_args, self.refs.len() > before) {
+                            self.emit_handler_arg_keys(&region, caps, before);
+                        }
                     }
                     self.scope_stack.pop();
                     drop(e);
@@ -1180,7 +1188,7 @@ impl<'a> Builder<'a> {
                 }
                 EmitAction::Handler {
                     name, owner, dispatchers, params, span, selection_span,
-                    display, hide_in_outline, outline_label,
+                    display, hide_in_outline, outline_label, callable: _,
                 } => {
                     symbols.push(GatedSymbol {
                         name,

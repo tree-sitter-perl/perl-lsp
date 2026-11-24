@@ -634,6 +634,11 @@ pub(super) fn symbol_defines_target(
                 ..
             } if op == package && on == name && os == slot
         ),
+        TargetKind::HashKeyOfHandler { owner, name } => matches!(
+            &sym.detail,
+            SymbolDetail::HashKeyDef { owner: HashKeyOwner::Handler { owner: oo, name: on }, .. }
+                if oo == owner && on == name
+        ),
         TargetKind::HashKeyOfBridged(wanted) => matches!(
             &sym.detail,
             SymbolDetail::HashKeyDef { owner: HashKeyOwner::Bridged { class: n }, .. } if n == wanted
@@ -1305,6 +1310,15 @@ pub(super) fn collect_from_analysis(
                         .is_some_and(|o| owner_matches(&o)),
                 }
             },
+            (TargetKind::HashKeyOfHandler { owner, name }, RefKind::HashKeyAccess { .. }) => {
+                // A handler's keys: the reads of its own parameter and the
+                // keys each dispatch to it passes, bound to that call.
+                let wanted = HashKeyOwner::Handler { owner: owner.clone(), name: name.clone() };
+                match r.hash_key_owner() {
+                    Some(o) => *o == wanted,
+                    None => analysis.deferred_hash_key_owner(r, module_index).is_some_and(|o| o == wanted),
+                }
+            }
             (TargetKind::HashKeyOfBridged(wanted), RefKind::HashKeyAccess { .. }) => {
                 // A DBIC/Class::Accessor column. Its key uses are the
                 // condition args (`$rs->search({ col => … })`), owned by the

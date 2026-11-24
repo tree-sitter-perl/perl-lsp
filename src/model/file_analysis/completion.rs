@@ -305,6 +305,7 @@ impl FileAnalysis {
             HashKeyOwner::Sub { name, .. } => format!("{}()->{{{}}}", name, key),
             HashKeyOwner::Input { name, .. } => format!("{}({} => …)", name, key),
             HashKeyOwner::AnonInput { callable, .. } => format!("{}({} => …)", self.symbol(*callable).name, key),
+            HashKeyOwner::Handler { name, .. } => format!("{}({} => …)", name, key),
         };
         let mut seen = HashSet::new();
         let mut candidates = Vec::new();
@@ -1075,7 +1076,8 @@ impl FileAnalysis {
                     | HashKeyOwner::Bridged { .. }
                     | HashKeyOwner::Sub { .. }
                     | HashKeyOwner::Input { .. }
-                    | HashKeyOwner::AnonInput { .. } => {}
+                    | HashKeyOwner::AnonInput { .. }
+                    | HashKeyOwner::Handler { .. } => {}
                 }
             }
         }

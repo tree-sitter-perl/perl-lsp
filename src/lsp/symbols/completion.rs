@@ -590,6 +590,12 @@ fn completion_items_native(
                 // The call's callee answers first, through the one call →
                 // callee binding; the hashref-parameter body scan stays
                 // the fallback until such a parameter owns its keys.
+                // TODO(handler-region-completion): a key typed inside a
+                // dispatch's handler region (`enqueue(mail => [|])`,
+                // `emit(ready => |)`) completes the handler's labels once the
+                // call states where each argument sits (named-args layer 13's
+                // place facts): the cursor picks the region, its keys count
+                // parity from the region's start.
                 let _session = crate::model::witnesses::ResolutionSession::enter(Some(module_index));
                 let callee = call_ctx.name_start.and_then(|at| analysis.callee_at(at, Some(module_index)));
                 let labels = callee.as_ref().map(|c| c.labels(analysis, Some(module_index))).unwrap_or_default();

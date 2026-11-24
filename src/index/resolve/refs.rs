@@ -531,6 +531,7 @@ pub(super) fn matcher_view(
             }),
         TargetKind::HashKeyOfSub { .. }
         | TargetKind::HashKeyOfInput { .. }
+        | TargetKind::HashKeyOfHandler { .. }
         | TargetKind::HashKeyOfBridged(_)
         | TargetKind::InternalHashKey { .. } => refs_keyed(&view, &target.name).any(|r| {
             matches!(r.kind, RefKind::HashKeyAccess { .. })
@@ -550,6 +551,7 @@ pub(super) fn matcher_view(
             TargetKind::Sub { .. } | TargetKind::Method { .. } => "refs.upgrade_by.methodcall",
             TargetKind::HashKeyOfSub { .. }
             | TargetKind::HashKeyOfInput { .. }
+        | TargetKind::HashKeyOfHandler { .. }
             | TargetKind::HashKeyOfBridged(_)
             | TargetKind::InternalHashKey { .. } => "refs.upgrade_by.hashkey",
             _ => "refs.upgrade_by.other",
@@ -562,6 +564,7 @@ pub(super) fn matcher_view(
         TargetKind::Sub { .. } | TargetKind::Method { .. } => "refs.rowsview_by.methodcall",
         TargetKind::HashKeyOfSub { .. }
         | TargetKind::HashKeyOfInput { .. }
+        | TargetKind::HashKeyOfHandler { .. }
         | TargetKind::HashKeyOfBridged(_)
         | TargetKind::InternalHashKey { .. } => "refs.rowsview_by.hashkey",
         _ => "refs.rowsview_by.other",

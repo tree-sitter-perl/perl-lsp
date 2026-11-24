@@ -38,7 +38,7 @@ impl Callee {
                 .symbols_present(module)
                 .symbols()
                 .iter()
-                .find(|s| s.selection_span == *span && matches!(s.detail, SymbolDetail::Sub { .. }))
+                .find(|s| s.selection_span == *span && matches!(s.detail, SymbolDetail::Sub { .. } | SymbolDetail::Handler { .. }))
                 .cloned(),
         }
     }
@@ -109,7 +109,7 @@ impl Callee {
     pub fn labels(&self, origin: &FileAnalysis, index: Option<&dyn CrossFileLookup>) -> Vec<String> {
         let sym = self.symbol(origin, index);
         let params: &[ParamInfo] = match sym.as_ref().map(|s| &s.detail) {
-            Some(SymbolDetail::Sub { params, .. }) => params,
+            Some(SymbolDetail::Sub { params, .. } | SymbolDetail::Handler { params, .. }) => params,
             _ => &[],
         };
         let mut out: Vec<String> = params.iter().filter_map(ParamInfo::label).map(str::to_string).collect();
@@ -137,6 +137,10 @@ impl FileAnalysis {
         // call by a name that holds one (python's `g = lambda …; g(…)`).
         if matches!(call.kind, RefKind::Variable) {
             return self.held_callee(call, index);
+        }
+        // A dispatch call runs the handler registered under its name.
+        if let (RefKind::DispatchCall { .. }, Some(owner)) = (&call.kind, call.handler_owner()) {
+            return Some(self.handler_callee(owner, &call.target_name, index));
         }
         if !matches!(call.kind, RefKind::FunctionCall) {
             let class = self.receiver_classes(call, index, ReceiverPolicy::Edge).single()?.to_string();
@@ -182,6 +186,25 @@ impl FileAnalysis {
             return Some(self.packaged_callee(package, name, index));
         }
         Some(Callee { input: HashKeyOwner::named_input(None, name), at: None })
+    }
+
+    /// The handler registered on `owner` as `name`: this file's first
+    /// registration, else the first another file holds.
+    fn handler_callee(&self, owner: &HandlerOwner, name: &str, index: Option<&dyn CrossFileLookup>) -> Callee {
+        let input = HashKeyOwner::Handler { owner: owner.clone(), name: name.to_string() };
+        let registered = |s: &Symbol| s.name == name && matches!(&s.detail, SymbolDetail::Handler { owner: o, .. } if o == owner);
+        if let Some(sym) = self.symbols.iter().find(|s| registered(s)) {
+            return Callee { input, at: Some(CalleeAt::Here(sym.id)) };
+        }
+        let there = index.and_then(|idx| {
+            idx.modules_with_symbol(name).into_iter().find_map(|module| {
+                idx.visible_def_candidates(&module).into_iter().find_map(|cached| {
+                    let span = idx.symbols_present(&cached).symbols().iter().find(|s| registered(s))?.selection_span;
+                    Some(CalleeAt::There { module: cached, span })
+                })
+            })
+        });
+        Callee { input, at: there }
     }
 
     /// The callable the value named by the call's token holds there.

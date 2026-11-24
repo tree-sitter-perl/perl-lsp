@@ -69,7 +69,7 @@ impl HandlerDisplay {
 /// hash keys and dispatch handlers are different concepts even though
 /// both happen to be keyed by a name under a class. Keeping them split
 /// prevents overload creep — each stays free to evolve on its own axis.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum HandlerOwner {
     /// Handler is registered on a specific class (typical for Mojo
     /// events, Moose roles, DBIC relationships, etc.).
@@ -664,6 +664,12 @@ pub enum HashKeyOwner {
     /// closure, a lambda: its calls reach it through the value that holds
     /// it, so it is the declaration's own and file-local, like `Variable`.
     AnonInput { callable: SymbolId, slot: InputSlot },
+    /// The input of a string-dispatched handler (a Minion task, a Mojo
+    /// event): what its dispatch calls pass (`enqueue(mail => [to => …])`,
+    /// `emit(ready => to => …)`), answered by the parameters of the
+    /// callback it was registered with. Its own namespace, apart from any
+    /// method of the owner class of the same name.
+    Handler { owner: HandlerOwner, name: String },
 }
 
 /// Where in a callable's input a key sits.
@@ -683,6 +689,9 @@ impl HashKeyOwner {
     /// a callable no package holds, the namespace its declaration sits in
     /// — a module's function is that module's, not every module's.
     pub fn input_of(sym: &Symbol, namespaces: &[NamespaceRange]) -> Self {
+        if let SymbolDetail::Handler { owner, .. } = &sym.detail {
+            return HashKeyOwner::Handler { owner: owner.clone(), name: sym.name.clone() };
+        }
         if sym.flags.contains(SymbolFlags::ANONYMOUS) {
             return HashKeyOwner::AnonInput { callable: sym.id, slot: InputSlot::Named };
         }

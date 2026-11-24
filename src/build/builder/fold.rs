@@ -1953,7 +1953,7 @@ impl<'a> Builder<'a> {
         let HashKeyOwner::Input { package, name, .. } = owner else { return false };
         self.symbols.iter().any(|s| match (&s.kind, &s.detail) {
             (SymKind::Sub | SymKind::Method, _) => &s.name == name && &s.package == package,
-            (SymKind::HashKeyDef, SymbolDetail::HashKeyDef { owner: o, .. }) => o == owner,
+            (SymKind::HashKeyDef, SymbolDetail::HashKeyDef { owner: o, .. }) => self.as_registered(o) == owner,
             _ => false,
         })
     }
