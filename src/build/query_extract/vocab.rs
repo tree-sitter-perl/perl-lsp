@@ -563,6 +563,11 @@ spelled! {
         /// What follows a call argument's label as written (`: `, `=`), set
         /// on the `@arity.label` pattern: what label completion writes.
         LabelWritten = "label.written",
+        /// The name of the def a pattern's `@def.<kind>.anchor` declares,
+        /// where the language writes the def for the code (python's
+        /// `@dataclass` writes an `__init__`); without it the pack's
+        /// `default_name` names an anchored def.
+        DefName = "def.name",
     }
 }
 

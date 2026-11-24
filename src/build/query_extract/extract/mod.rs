@@ -46,6 +46,9 @@ enum Payload {
     Qualifier(String),
     /// A `@ctl.gate`'s statement: the node the `gate` walk ends at.
     Runs(crate::cst::NodeId),
+    /// The name an anchored def is declared under, as its pattern's
+    /// `#set! def.name` writes it.
+    Named(String),
 }
 
 /// A capture before it is placed: the live node it tags, and the event.
@@ -611,6 +614,23 @@ pub fn extract_in(
                     None => event,
                 })
             }
+            // A def the language writes for the code (python's generated
+            // `__init__`) is named by its pattern, at the token that
+            // writes it.
+            Capture::Def { part: DefPart::Anchor, .. } => {
+                let event = Event::at(node, cap, node.utf8_text(source).unwrap_or("").to_string(), match_id);
+                let named = compiled
+                    .query
+                    .property_settings(pattern)
+                    .iter()
+                    .find(|s| *s.key == *SettingKey::DefName.spelling())
+                    .and_then(|s| s.value.as_deref())
+                    .map(str::to_string);
+                flat.push(match named {
+                    Some(n) => with(event, Payload::Named(n)),
+                    None => event,
+                })
+            }
             // The class is the pattern's word, not the node's.
             Capture::Expr(ExprCap::ReturnClass) => {
                 let class = compiled
@@ -631,10 +651,12 @@ pub fn extract_in(
     // carries its own body scope) must open AFTER the def is recorded, so
     // the symbol attributes to its ENCLOSING scope, not its own body —
     // hence scope ranks last. A header holds no def of its own node, and a
-    // token can be the whole of one (`-> T`), so it opens first. Otherwise
+    // token can be the whole of one (`-> T`), so it opens first. A context
+    // a token opens is in force for every other capture on it (a def the
+    // class name writes is the class's), so it opens first too. Otherwise
     // captures keep their match order.
     let tie_rank = |e: &Event| match e.cap {
-        Capture::Scope(ScopeCap::Header) => 0,
+        Capture::Scope(ScopeCap::Header) | Capture::Context(_) => 0,
         Capture::Scope(_) => 2,
         _ => 1,
     };

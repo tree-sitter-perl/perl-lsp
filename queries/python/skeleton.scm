@@ -54,6 +54,55 @@
        definition: (function_definition name: (identifier) @mark.constructor))]))
  (#eq? @mark.constructor "__init__"))
 
+; A class the standard library builds from its annotated fields has the
+; constructor it writes: `@dataclass` an `__init__`, a `NamedTuple` base a
+; `__new__`, a `TypedDict` base the dict's `__init__`. Each takes the
+; fields as its keys (below), so `A(timeout=1)` passes the field.
+; The constructor is declared at the class's name, which writes it.
+; TODO(dataclass-framework-family): attrs (`@attr.s`, `@define`) and
+; pydantic (`BaseModel`) build the same constructor; they are frameworks,
+; so their vocabulary is a plugin's data document once pack plugins land
+; (owner: frameworks epic, after 0.11).
+((decorated_definition
+   (decorator [(identifier) @_gen
+               (attribute attribute: (identifier) @_gen)
+               (call function: [(identifier) @_gen (attribute attribute: (identifier) @_gen)])])
+   definition: (class_definition
+     name: (identifier) @def.method @def.method.anchor @mark.constructor))
+ (#eq? @_gen "dataclass")
+ (#set! def.name "__init__"))
+((class_definition
+   name: (identifier) @def.method @def.method.anchor @mark.constructor
+   superclasses: (argument_list [(identifier) @_gen (attribute attribute: (identifier) @_gen)]))
+ (#eq? @_gen "NamedTuple")
+ (#set! def.name "__new__"))
+((class_definition
+   name: (identifier) @def.method @def.method.anchor @mark.constructor
+   superclasses: (argument_list [(identifier) @_gen (attribute attribute: (identifier) @_gen)]))
+ (#eq? @_gen "TypedDict")
+ (#set! def.name "__init__"))
+
+; Such a class's annotated field is a key its constructor takes, declared
+; with the field by the one token; a `ClassVar` is the class's own, no
+; field.
+((decorated_definition
+   (decorator [(identifier) @_gen
+               (attribute attribute: (identifier) @_gen)
+               (call function: [(identifier) @_gen (attribute attribute: (identifier) @_gen)])])
+   definition: (class_definition
+     body: (block
+       (expression_statement
+         (assignment left: (identifier) @def.input.name type: (type) @_ty) @def.input @def.pair))))
+ (#eq? @_gen "dataclass")
+ (#not-match? @_ty "^(typing[.])?ClassVar"))
+((class_definition
+   superclasses: (argument_list [(identifier) @_gen (attribute attribute: (identifier) @_gen)])
+   body: (block
+     (expression_statement
+       (assignment left: (identifier) @def.input.name type: (type) @_ty) @def.input @def.pair)))
+ (#any-of? @_gen "NamedTuple" "TypedDict")
+ (#not-match? @_ty "^(typing[.])?ClassVar"))
+
 ; `@scope.sub`: params/locals are sub-body content — shielded from the
 ; outline and the class-content lane (a method local carries the sticky
 ; class package; the Sub boundary is what marks it a local, not a member).

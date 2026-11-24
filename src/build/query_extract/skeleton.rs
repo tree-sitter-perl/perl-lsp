@@ -848,12 +848,21 @@ impl SkeletonAnalysis {
             }
         }
         // A parameter's key is a key of the named input of the callable
-        // whose scope it binds in.
+        // whose scope it binds in; a key a class body declares (a
+        // dataclass field) is one of its class's constructor's.
         for (i, s) in self.symbols.iter().enumerate() {
             if s.kind != DefCap::Input {
                 continue;
             }
             let callable = self.scopes.get(s.scope.0 as usize).and_then(|sc| sc.owner).map(|id| &symbols[id.0 as usize]);
+            let callable = callable.or_else(|| {
+                let class = symbols[i].package.as_deref()?;
+                symbols.iter().find(|c| {
+                    c.kind == SymKind::Method
+                        && c.package.as_deref() == Some(class)
+                        && c.flags.contains(crate::model::file_analysis::SymbolFlags::CONSTRUCTOR)
+                })
+            });
             if let Some(callable) = callable {
                 symbols[i].detail = crate::model::file_analysis::SymbolDetail::HashKeyDef {
                     owner: crate::model::file_analysis::HashKeyOwner::input_of(callable, &self.namespace_ranges),

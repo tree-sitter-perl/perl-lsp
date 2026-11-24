@@ -2636,3 +2636,42 @@ fn a_lambda_called_by_its_name_takes_its_keys() {
     edits.sort();
     assert_eq!(edits, [(3, 11), (3, 20), (4, 2)]);
 }
+
+/// A class the standard library builds from its annotated fields has the
+/// constructor it writes, and each field is a key that constructor takes:
+/// `A(timeout=1)` goes to the field, and renaming the field renames it.
+#[test]
+fn a_generated_constructor_takes_its_fields() {
+    let src = "from dataclasses import dataclass
+from typing import NamedTuple, TypedDict, ClassVar
+@dataclass(frozen=True)
+class A:
+    timeout: int
+    retries: int = 3
+    limit: ClassVar[int] = 1
+class B(NamedTuple):
+    timeout: int
+class C(TypedDict):
+    timeout: int
+A(timeout=1)
+B(timeout=1)
+C(timeout=1)
+";
+    let fa = py_in(src, Some(&module(&["m"], false)));
+    let lines: Vec<&str> = src.lines().collect();
+    for (call, field) in [(11, 4), (12, 8), (13, 10)] {
+        let def = fa
+            .find_definition(Point::new(call, lines[call].find("timeout").unwrap()), None)
+            .unwrap_or_else(|| panic!("label on line {call} goes to its field"));
+        assert_eq!((def.start.row, def.start.column), (field, 4), "line {call}");
+    }
+    let mut edits: Vec<usize> =
+        fa.rename_at(Point::new(4, 4), "t").expect("renames").into_iter().map(|(s, _)| s.start.row).collect();
+    edits.sort();
+    edits.dedup();
+    assert_eq!(edits, [4, 11]);
+    assert!(
+        !fa.symbols().iter().any(|s| s.name == "limit" && matches!(s.kind, SymKind::HashKeyDef)),
+        "a ClassVar is no field"
+    );
+}
