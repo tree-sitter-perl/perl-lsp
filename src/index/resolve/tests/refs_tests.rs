@@ -2218,6 +2218,30 @@ package main;\nBar->new(name => 1);\n",
     assert!(refs.iter().any(|r| r.span.start == at(7, 9)), "the `has` finds the subclass's call, got {refs:?}");
 }
 
+/// The shapes that collect a call's names, and a slice's keys, link like
+/// `my %args = @_; $args{k}` does.
+#[test]
+fn collecting_shapes_and_slices_take_the_call_s_keys() {
+    let store = OpenDocs::new();
+    let path = PathBuf::from("/tmp/resolve_collecting_shapes.pl");
+    let fa = parse(
+        "use strict;\n\
+sub a { my $o = {@_}; $o->{timeout} }\n\
+sub b { my %o = (retries => 3, @_); $o{timeout} }\n\
+sub c { my $class = shift; my %o = @_ == 1 ? %{$_[0]} : @_; $o{timeout} }\n\
+sub d { my %o = @_; my ($t) = @o{qw(timeout retries)}; }\n\
+a(timeout => 1); b(timeout => 1); main->c(timeout => 1); d(timeout => 1);\n",
+    );
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), fa.clone());
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(&path));
+    let at = |row, column| tree_sitter::Point { row, column };
+    for (call, read) in [(at(5, 3), at(1, 27)), (at(5, 20), at(2, 39)), (at(5, 43), at(3, 63)), (at(5, 60), at(4, 36))] {
+        let defs = resolve(&store, &fa, key.clone(), call, Some(&idx), OverrideScope::default()).definitions();
+        assert!(defs.iter().any(|d| d.span.start == read), "{call:?} lands on the read at {read:?}, got {defs:?}");
+    }
+}
+
 /// A dotted helper's keys are the keys its chained call passes.
 #[test]
 fn a_dotted_helper_takes_the_keys_its_call_passes() {

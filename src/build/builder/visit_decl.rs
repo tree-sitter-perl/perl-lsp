@@ -130,6 +130,10 @@ impl<'a> Builder<'a> {
 
             // Hash access
             Kind::HashElementExpression => self.visit_hash_element(node),
+            Kind::SliceExpression | Kind::KeyvalExpression => {
+                self.visit_hash_slice(node);
+                self.queue_children(node);
+            }
 
             // Dereference expressions → rep observations on the operand
             Kind::ArrayElementExpression => {
@@ -1025,23 +1029,38 @@ impl<'a> Builder<'a> {
                 };
 
                 if let Some(right) = assign.field(Field::Right) {
-                    // Pattern: my (...) = @_
-                    if right.is(Kind::Array) && crate::cst::names_arg_array(right, self.source) {
-                        if let Some(left) = assign.field(Field::Left) {
-                            let at_params: Vec<ParamInfo> = self.collect_vars_from_decl(left)
-                                .into_iter()
-                                .map(|(name, span)| {
-                                    let pass = crate::model::conventions::unpacked_param_pass(&name);
-                                    ParamInfo { name, default: None, pass, key: None, is_invocant: false, binding_site: Some(span.start) }
-                                })
-                                .collect();
-                            // Combine any preceding shift params with @_ params
-                            if !shift_params.is_empty() {
-                                shift_params.extend(at_params);
-                                return shift_params;
-                            }
-                            return at_params;
+                    // Pattern: my (...) = @_, and the values that collect the
+                    // rest into one binding (`my %a = (retries => 3, @_)`,
+                    // `my $a = {@_}`).
+                    let whole = right.is(Kind::Array) && crate::cst::names_arg_array(right, self.source);
+                    let rest = crate::cst::collects_arg_rest(right, self.source);
+                    let left = assign.field(Field::Left);
+                    let vars = left.map(|l| self.collect_vars_from_decl(l)).unwrap_or_default();
+                    // A scalar takes a list's last element, never the rest.
+                    let collects = match (rest, vars.as_slice()) {
+                        (Some(crate::cst::ArgRest::Hash), [_]) => true,
+                        (Some(crate::cst::ArgRest::List), [(name, _)]) => {
+                            crate::model::conventions::unpacked_param_pass(name) != ParamPass::Positional
                         }
+                        _ => false,
+                    };
+                    if whole || collects {
+                        let at_params: Vec<ParamInfo> = vars
+                            .into_iter()
+                            .map(|(name, span)| {
+                                let pass = match rest {
+                                    Some(crate::cst::ArgRest::Hash) => ParamPass::RestNamed,
+                                    _ => crate::model::conventions::unpacked_param_pass(&name),
+                                };
+                                ParamInfo { name, default: None, pass, key: None, is_invocant: false, binding_site: Some(span.start) }
+                            })
+                            .collect();
+                        // Combine any preceding shift params with @_ params
+                        if !shift_params.is_empty() {
+                            shift_params.extend(at_params);
+                            return shift_params;
+                        }
+                        return at_params;
                     }
 
                     // Pattern: my ($a, $b, ...) = (shift, shift, ...) — Mojo's

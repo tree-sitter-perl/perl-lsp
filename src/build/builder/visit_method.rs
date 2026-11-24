@@ -552,6 +552,22 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Each constant key a hash slice names is a key access on the hash it
+    /// slices, as `$h{k}` is: `@args{qw(timeout retries)}` reads two.
+    pub(super) fn visit_hash_slice(&mut self, node: Node<'a>) {
+        let Some((base, keys)) = crate::cst::hash_slice_keys(node, self.source) else { return };
+        let var_text = crate::cst::canonical_container_name(self.syntax, base, self.source)
+            .or_else(|| {
+                let operand = if base.is(Kind::Scalar) { Some(base) } else { crate::cst::deref_operand(base) };
+                operand.filter(|o| o.is(Kind::Scalar)).and_then(|o| o.utf8_text(self.source).ok()).map(str::to_string)
+            })
+            .unwrap_or_default();
+        let access = self.determine_access(node);
+        for (key, span) in keys {
+            self.add_ref(RefKind::HashKeyAccess { var_text: var_text.clone(), dies_on_undef: false }, span, key, access);
+        }
+    }
+
     pub(super) fn visit_hash_element(&mut self, node: Node<'a>) {
         // Infer HashRef on the operand variable (e.g. $x in $x->{key})
         self.infer_deref_type(node, TypeObservation::HashRefAccess);
