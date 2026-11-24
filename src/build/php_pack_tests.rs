@@ -4446,7 +4446,8 @@ class Kid extends Base {
 }
 
 /// A callable that declares no return returns what its body returns; a
-/// closure's `return` is the closure's, never the callable's around it.
+/// closure's `return` is the closure's, never the callable's around it,
+/// and a returned closure is the value.
 #[cfg(feature = "php")]
 #[test]
 fn an_undeclared_return_is_what_the_body_returns() {
@@ -4469,7 +4470,10 @@ function clock() { return new Clock(); }
     let ret = |m: &str| fa.find_method_return_type("Box", m, None, None);
     assert_eq!(ret("clock"), clock);
     assert_eq!(ret("sorted"), clock, "the closures' returns are their own");
-    assert_eq!(ret("maker"), None, "a closure is no `Clock`");
+    assert!(
+        matches!(ret("maker"), Some(T::CodeRef { return_edge: Some(_) })),
+        "a closure is no `Clock`: it is the closure"
+    );
     assert_eq!(ret("declared"), Some(T::ClassName("Box".into())), "a declared return is the value");
     assert_eq!(fa.sub_return_type_at_arity("clock", Some(0)), clock, "a function");
 }
@@ -5832,4 +5836,37 @@ fn a_construction_completes_its_constructors_labels() {
     };
     let src = "<?php\nclass Point { function __construct(public int $x, private int $y = 0) {} }\n$p = new Point(y: 1, |);\n";
     assert_eq!(labels(src), ["x:"]);
+}
+
+/// A closure is a callable written as a value: a call through the variable
+/// holding it (`$g(b: 2)`) passes keys of the closure's own parameters, so
+/// goto-def on a label lands on the parameter and the parameter's
+/// references reach the label, an arrow function's alike.
+#[cfg(feature = "php")]
+#[test]
+fn a_closure_called_through_its_variable_takes_its_keys() {
+    let src = "<?php
+$g = function (int $a, int $b = 1) { return $b; };
+$g(1, b: 2);
+$h = fn($limit) => $limit;
+$h(limit: 3);
+";
+    let fa = php(src);
+    let lines: Vec<&str> = src.lines().collect();
+    let at = |row: usize, needle: &str| tree_sitter::Point::new(row, lines[row].find(needle).unwrap());
+    let def = fa.find_definition(at(2, "b:"), None).expect("label goes to the closure's parameter");
+    assert_eq!((def.start.row, def.start.column), (1, lines[1].find("$b").unwrap() + 1));
+    let def = fa.find_definition(at(4, "limit:"), None).expect("arrow function label");
+    assert_eq!((def.start.row, def.start.column), (3, lines[3].find("$limit").unwrap() + 1));
+    let mut edits: Vec<(usize, usize)> = fa
+        .rename_at(tree_sitter::Point::new(1, lines[1].find("$b").unwrap() + 1), "c")
+        .expect("renames")
+        .into_iter()
+        .map(|(s, _)| (s.start.row, s.start.column))
+        .collect();
+    edits.sort();
+    assert_eq!(
+        edits,
+        [(1, lines[1].find("$b").unwrap() + 1), (1, lines[1].rfind("$b").unwrap() + 1), (2, lines[2].find("b:").unwrap())]
+    );
 }

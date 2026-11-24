@@ -60,6 +60,8 @@
 (function_definition) @scope.sub
 ; A lambda is a callable too: what it yields is its own.
 (lambda) @scope.sub
+; …and a value: the value is the callable.
+(lambda) @def.anon
 ; A comprehension runs in a function of its own: its loop variables are its
 ; locals, in force from its first token (the element is written before the
 ; `for` that binds it), and never the names of the code around it.
@@ -143,8 +145,8 @@
 (default_parameter name: (identifier) @def.var.name @def.var)
 (typed_default_parameter name: (identifier) @def.var.name @def.var)
 ; A `def`'s parameter is also the key a call may pass it by (`f(a=1)`):
-; the one token declares the name and the key. A lambda is called by no
-; name, so its parameters are keys of nothing; `*args` and `**kw` collect
+; the one token declares the name and the key, a lambda's too, which a
+; call reaches through the value that holds it; `*args` and `**kw` collect
 ; what no key names. (A positional-only parameter, before a `/`, mints a
 ; key no call can write.)
 (function_definition
@@ -170,6 +172,29 @@
   [(keyword_separator) (list_splat_pattern) (typed_parameter (list_splat_pattern))]
   [(identifier) (typed_parameter . (identifier)) (default_parameter) (typed_default_parameter)] @arity.by_name)
 (parameters
+  [(identifier) (typed_parameter . (identifier)) (default_parameter) (typed_default_parameter)] @arity.by_place
+  (positional_separator))
+
+; A lambda's parameter list is a `def`'s, written without parentheses.
+(lambda
+  parameters: (lambda_parameters (identifier) @def.input @def.var @def.pair))
+(lambda
+  parameters: (lambda_parameters
+    [(typed_parameter . (identifier) @def.input.name @def.var.name)
+     (default_parameter name: (identifier) @def.input.name @def.var.name)
+     (typed_default_parameter name: (identifier) @def.input.name @def.var.name)] @def.input @def.var @def.pair))
+
+(lambda parameters: (lambda_parameters) @arity.sig)
+(lambda_parameters [(identifier) (typed_parameter . (identifier))] @arity.required @arity.either)
+(lambda_parameters
+  [(default_parameter value: (_) @arity.default)
+   (typed_default_parameter value: (_) @arity.default)] @arity.optional @arity.either)
+(lambda_parameters [(list_splat_pattern) (typed_parameter (list_splat_pattern))] @arity.variadic @arity.rest_places)
+(lambda_parameters [(dictionary_splat_pattern) (typed_parameter (dictionary_splat_pattern))] @arity.variadic @arity.rest_names)
+(lambda_parameters
+  [(keyword_separator) (list_splat_pattern) (typed_parameter (list_splat_pattern))]
+  [(identifier) (typed_parameter . (identifier)) (default_parameter) (typed_default_parameter)] @arity.by_name)
+(lambda_parameters
   [(identifier) (typed_parameter . (identifier)) (default_parameter) (typed_default_parameter)] @arity.by_place
   (positional_separator))
 

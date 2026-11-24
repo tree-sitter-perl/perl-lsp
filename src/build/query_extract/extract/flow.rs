@@ -114,6 +114,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                 token: ref_span,
                 expr,
                 written: false,
+                arg_keys: super::members::call_labels(ad, e.match_id),
             });
             out.witnesses.push(skeleton_witness(
                 WitnessAttachment::Expr(span),

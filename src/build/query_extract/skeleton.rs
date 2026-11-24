@@ -426,12 +426,15 @@ pub struct VarRead {
     /// `@def.assigned`): the read denotes the place written, and the
     /// token's reference is the write's.
     pub written: bool,
+    /// The keys a call passes the value by name, where the read is the
+    /// callee of a call (php's `$g(a: 1)`): keys of the callable it holds.
+    pub arg_keys: Vec<(String, crate::model::file_analysis::Span)>,
 }
 
 impl VarRead {
     /// A read whose token is its whole value.
     pub fn token(name: String, scope: crate::model::file_analysis::ScopeId, span: crate::model::file_analysis::Span, expr: ExprId) -> Self {
-        VarRead { name, scope, span, token: span, expr, written: false }
+        VarRead { name, scope, span, token: span, expr, written: false, arg_keys: Vec::new() }
     }
 }
 
@@ -827,8 +830,10 @@ impl SkeletonAnalysis {
             .filter(|s| matches!(s.kind, SymKind::Class))
             .map(|s| s.name.clone())
             .collect();
-        for s in &mut symbols {
+        // A closure written in a class is a value, never one of its methods.
+        for (s, skel) in symbols.iter_mut().zip(&self.symbols) {
             if matches!(s.kind, SymKind::Sub)
+                && skel.kind != DefCap::Anon
                 && s.package.as_deref().is_some_and(|p| class_names.contains(p))
             {
                 s.kind = SymKind::Method;
@@ -869,7 +874,10 @@ impl SkeletonAnalysis {
         let method_class: Vec<Option<String>> = {
             let mut out: Vec<Option<String>> = Vec::with_capacity(self.scopes.len());
             for sc in &self.scopes {
-                let class = match sc.owner.and_then(|sid| symbols.get(sid.0 as usize)) {
+                // A closure is transparent too: it runs on the object of
+                // the method it is written in.
+                let named_owner = sc.owner.filter(|sid| self.symbols.get(sid.0 as usize).is_some_and(|k| k.kind != DefCap::Anon));
+                let class = match named_owner.and_then(|sid| symbols.get(sid.0 as usize)) {
                     Some(owner) => owner.package.clone().filter(|_| matches!(owner.kind, SymKind::Method)),
                     None if sc.implicit_receiver => None,
                     None => sc.parent.and_then(|p| out.get(p.0 as usize).cloned().flatten()),
@@ -1127,6 +1135,18 @@ impl SkeletonAnalysis {
             }
             for w in receiver_witnesses.drain(..) {
                 bag.push(w);
+            }
+            // A callable written as a value (a closure, a lambda) is the
+            // value: a call through whatever holds it reaches the callable.
+            for (sym, skel) in symbols.iter().zip(&self.symbols) {
+                if skel.kind == DefCap::Anon {
+                    let at = Span { start: skel.start, end: skel.end };
+                    bag.push(mk(
+                        WA::Expr(at),
+                        WP::InferredType(InferredType::CodeRef { return_edge: Some(WA::Symbol(sym.id)) }),
+                        at,
+                    ));
+                }
             }
             // A class VIEWED AS A CALLABLE (a functional cast / constructor,
             // `Widget(x)`) produces an instance of itself. Its `Symbol` answers
@@ -1407,7 +1427,10 @@ impl SkeletonAnalysis {
         // a C enum constant or global is registered in the pack index; the use
         // resolves the same way a bare call does). rule #7: the token gets a
         // ref whether or not the def is local.
-        let mut unresolved_reads: Vec<(String, crate::model::file_analysis::ScopeId, Span)> = Vec::new();
+        let mut unresolved_reads: Vec<(String, crate::model::file_analysis::ScopeId, Span, &[(String, Span)])> = Vec::new();
+        // A read a call calls, by its row in `local_refs`, and the keys the
+        // call passes by name: bound to the read once its index is final.
+        let mut value_call_keys: Vec<(usize, &[(String, Span)])> = Vec::new();
         // The binders' one rule (`variable_use`); a use it finds no
         // declaration for is unresolved.
         let resolve_var = |name: &String, chain: crate::model::file_analysis::LookupChain, span: &Span| {
@@ -1436,7 +1459,7 @@ impl SkeletonAnalysis {
                 evaluated_before: None,
             });
         }
-        for super::VarRead { name, scope: read_scope, span: value_span, token: read_span, expr, written } in &self.var_reads {
+        for super::VarRead { name, scope: read_scope, span: value_span, token: read_span, expr, written, arg_keys } in &self.var_reads {
             // A written token denotes the place it writes, which the places
             // below need; its ref is the write's.
             let is_write = *written;
@@ -1461,7 +1484,11 @@ impl SkeletonAnalysis {
                 continue;
             }
             match resolved {
-                Some(did) => local_refs.push(crate::model::file_analysis::Ref {
+                Some(did) => {
+                    if !arg_keys.is_empty() {
+                        value_call_keys.push((local_refs.len(), arg_keys));
+                    }
+                    local_refs.push(crate::model::file_analysis::Ref {
                     kind: crate::model::file_analysis::RefKind::Variable,
                     span: *read_span,
                     scope: *read_scope,
@@ -1471,8 +1498,9 @@ impl SkeletonAnalysis {
                     folded_from: None,
                     arg_count: None,
                     evaluated_before: None,
-                }),
-                None => unresolved_reads.push((name.clone(), *read_scope, *read_span)),
+                    })
+                }
+                None => unresolved_reads.push((name.clone(), *read_scope, *read_span, arg_keys)),
             }
         }
         // A receiver parameter in a body that elides its receiver IS that
@@ -1812,9 +1840,12 @@ impl SkeletonAnalysis {
                 )
             }))
             .collect();
-        for (name, scope, span) in unresolved_reads {
+        for (name, scope, span, arg_keys) in unresolved_reads {
             if claimed.contains(&(span.start.row, span.start.column, name.clone())) {
                 continue;
+            }
+            if !arg_keys.is_empty() {
+                value_call_keys.push((local_refs.len(), arg_keys));
             }
             local_refs.push(crate::model::file_analysis::Ref {
                 kind: crate::model::file_analysis::RefKind::Variable,
@@ -1828,7 +1859,27 @@ impl SkeletonAnalysis {
                 evaluated_before: None,
             });
         }
+        let base = refs.len();
         refs.extend(local_refs);
+        // A value call's named arguments are keys bound to the read it calls,
+        // owned by whatever callable the value holds (`callee_of`).
+        for (row, keys) in value_call_keys {
+            let call = crate::model::witnesses::RefIdx((base + row) as u32);
+            let scope = refs[base + row].scope;
+            for (name, span) in keys {
+                refs.push(crate::model::file_analysis::Ref {
+                    kind: crate::model::file_analysis::RefKind::HashKeyAccess { var_text: String::new(), dies_on_undef: false },
+                    span: *span,
+                    scope,
+                    target_name: name.clone(),
+                    access: crate::model::file_analysis::AccessKind::Read,
+                    binding: Some(crate::model::file_analysis::RefBinding::CallArgKey { call }),
+                    folded_from: None,
+                    arg_count: None,
+                    evaluated_before: None,
+                });
+            }
+        }
         // Field/member uses recovered from `#define` bodies (`->op_next`): the
         // receiver is a macro parameter with no type, so resolve the field to
         // its declaring class from THIS file's own field symbols and freeze the
@@ -2434,7 +2485,7 @@ fn skel_symbol(i: usize, s: &SkelSymbol) -> crate::model::file_analysis::Symbol 
                 is_dynamic: false,
             },
             // A callable whose parameter list the document states.
-            (DefCap::Sub | DefCap::Method, _) if s.params.is_some() => SymbolDetail::Sub {
+            (DefCap::Sub | DefCap::Method | DefCap::Anon, _) if s.params.is_some() => SymbolDetail::Sub {
                 params: s.params.clone().unwrap_or_default(),
                 is_method: s.kind == DefCap::Method,
                 doc: None,

@@ -133,17 +133,17 @@ impl FileAnalysis {
     /// runs what its receiver's MRO dispatches it to. `None` when the
     /// call has no single callee (a union receiver reaches one per arm).
     pub fn callee_of(&self, call: &Ref, index: Option<&dyn CrossFileLookup>) -> Option<Callee> {
-        // A value call reaches the callable its operand holds.
+        // A value call reaches the callable its operand holds; so does a
+        // call by a name that holds one (python's `g = lambda …; g(…)`).
         if matches!(call.kind, RefKind::Variable) {
-            let held = self.inferred_type_via_bag(&call.target_name, call.span.start)?;
-            return match held.held_callable()? {
-                HeldCallable::Symbol(sid) => Some(self.callee_here(self.symbol(sid))),
-                HeldCallable::Named { package, name } => Some(self.packaged_callee(package, name, index)),
-            };
+            return self.held_callee(call, index);
         }
         if !matches!(call.kind, RefKind::FunctionCall) {
             let class = self.receiver_classes(call, index, ReceiverPolicy::Edge).single()?.to_string();
             return self.member_callee(call, &class, index);
+        }
+        if let Some(held) = self.held_callee(call, index) {
+            return Some(held);
         }
         if let Some(class) = self.class_named_by_call(call, index) {
             return self.constructor_callee(&class, index);
@@ -182,6 +182,15 @@ impl FileAnalysis {
             return Some(self.packaged_callee(package, name, index));
         }
         Some(Callee { input: HashKeyOwner::named_input(None, name), at: None })
+    }
+
+    /// The callable the value named by the call's token holds there.
+    fn held_callee(&self, call: &Ref, index: Option<&dyn CrossFileLookup>) -> Option<Callee> {
+        let held = self.inferred_type_via_bag(&call.target_name, call.span.start)?;
+        match held.held_callable()? {
+            HeldCallable::Symbol(sid) => Some(self.callee_here(self.symbol(sid))),
+            HeldCallable::Named { package, name } => Some(self.packaged_callee(package, name, index)),
+        }
     }
 
     /// The callee of the call a key is passed to.

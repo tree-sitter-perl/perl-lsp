@@ -234,12 +234,13 @@ impl<'t> CursorDocument<'t, '_> {
                 return;
             };
             // A construction (`new Foo(…)`) calls the constructor of the
-            // class its type token names.
+            // class its type token names; a value call (`$g(…)`), the
+            // callable the value it reads holds.
             let constructs = caps.iter().any(|(_, c)| *c == Capture::Expr(ExprCap::Construct));
             let Some(callee) = caps
                 .iter()
                 .find(|(_, c)| {
-                    matches!(c, Capture::Ref(RefCap::Call | RefCap::MemberCall))
+                    matches!(c, Capture::Ref(RefCap::Call | RefCap::MemberCall) | Capture::Expr(ExprCap::ReadVarName))
                         || (constructs && *c == Capture::Ref(RefCap::Type))
                 })
                 .map(|(n, _)| *n)

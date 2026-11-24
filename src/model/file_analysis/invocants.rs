@@ -100,7 +100,8 @@ impl FileAnalysis {
                     }
                 }
                 RefKind::HashKeyAccess { .. } => {
-                    if let Some(owner) = r.hash_key_owner() {
+                    let owner = r.hash_key_owner().cloned().or_else(|| self.deferred_hash_key_owner(r, module_index));
+                    if let Some(owner) = &owner {
                         for def in self.hash_key_defs_for_owner(owner) {
                             if def.name == r.target_name {
                                 return Some((def.id, true));

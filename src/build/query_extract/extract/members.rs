@@ -161,7 +161,7 @@ pub(super) fn finish(st: &mut ExtractState) {
         let Some(row) = st.minted[ix].def_row else { continue };
         let kind = st.out.symbols[row].kind;
         match kind.sym_kind() {
-            _ if matches!(kind, DefCap::Sub | DefCap::Method) => {
+            _ if matches!(kind, DefCap::Sub | DefCap::Method | DefCap::Anon) => {
                 let name_end = st.out.symbols[row].name_end;
                 let sig = ad
                     .within(e)

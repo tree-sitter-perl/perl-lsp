@@ -97,6 +97,9 @@
 (method_declaration) @scope.sub.closed
 (anonymous_function) @scope.sub.closed
 (arrow_function) @scope.sub
+; A closure is a callable written as a value: the value is the callable.
+(anonymous_function) @def.anon
+(arrow_function) @def.anon
 
 ; ---- parameters ----
 ; A parameter is a local of its callable, named like every variable by
@@ -107,19 +110,13 @@
 ; declared type is its elements', so the local stays untyped.
 ; TODO(php-implicit-nullable): `string $m = null` declares `?string`; the
 ; bound is `string`, so a `null === $m` guard reads as both.
-; A function's or method's parameter is also the key a call may pass it
-; by (`f(a: 1)`): the one token declares the local and the key. A closure
-; is called by no name, so its parameters are keys of nothing.
-((formal_parameters
-   (simple_parameter
-     type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot.entry
-     name: (variable_name (name) @def.local.name @def.input.name @flow.target) @def.local.spelled) @def.local @def.input @def.pair) @_params
- (#has-parent? @_params function_definition method_declaration))
-((formal_parameters
-   (simple_parameter
-     type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot.entry
-     name: (variable_name (name) @def.local.name @flow.target) @def.local.spelled) @def.local) @_params
- (#not-has-parent? @_params function_definition method_declaration))
+; A parameter is also the key a call may pass it by (`f(a: 1)`): the one
+; token declares the local and the key. A closure's keys are its own, and
+; a call reaches them through the value that holds it (`$g(a: 1)`).
+(formal_parameters
+  (simple_parameter
+    type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot.entry
+    name: (variable_name (name) @def.local.name @def.input.name @flow.target) @def.local.spelled) @def.local @def.input @def.pair)
 (variadic_parameter
   name: (variable_name (name) @def.local.name) @def.local.spelled) @def.local
 
@@ -384,9 +381,10 @@
 
 ; ---- variables ----
 ; A variable read is the whole `$x`'s value and a reference to the name
-; `x`. A static property's `Foo::$x` is a member, not a variable.
+; `x`. A static property's `Foo::$x` is a member, not a variable; a
+; called variable is its call's (below).
 ((variable_name (name) @expr.read.var.name) @expr.read.var
- (#not-has-parent? @expr.read.var scoped_property_access_expression)
+ (#not-has-parent? @expr.read.var scoped_property_access_expression function_call_expression)
  (#not-eq? @expr.read.var "$this"))
 ; `$this` is no local: it is the object the enclosing method runs on, an
 ; instance of the class the call is made on, and its name token refers to
@@ -636,6 +634,16 @@
 (function_call_expression
   function: (qualified_name (name) @ref.call) @ref.spelled
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
+; A variable called (`$g(a: 1)`) is a read of the value it holds, and the
+; call reaches the callable that value is: its named arguments are that
+; callable's keys.
+; TODO(callable-values): a first-class callable (`f(...)`, `$o->m(...)`),
+; an object with `__invoke`, and a string or array callable (`'f'`,
+; `[$o, 'm']`) are callables held as values too, and a call through them
+; reaches none yet: each value is a code ref to the callable it names.
+(function_call_expression
+  function: (variable_name (name) @expr.read.var.name) @expr.read.var
+  arguments: (arguments ((_) @arity.arg ","?)*) @arity.args)
 (arguments (argument (variadic_unpacking)) @arity.spread)
 ((argument name: (name) @arity.label) (#set! label.written ": "))
 

@@ -413,9 +413,11 @@ impl FileAnalysis {
                     if r.target_name != sym.name {
                         continue;
                     }
+                    // A call's key is its callee's, whichever callable
+                    // the call reaches.
                     let matches = match r.hash_key_owner() {
                         Some(ro) => owner.found_by(ro),
-                        None => false,
+                        None => self.deferred_hash_key_owner(r, module_index).is_some_and(|ro| owner.found_by(&ro)),
                     };
                     if matches {
                         results.push((r.span, r.access));
@@ -494,6 +496,12 @@ impl FileAnalysis {
             .and_then(|s| self.param_group_of(s))
         {
             return Some(g);
+        }
+        // Cursor on a call's key whose callee is a parameter group here.
+        if let Some(r) = self.ref_at(point).filter(|r| r.hash_key_owner().is_none() && r.arg_key_call().is_some()) {
+            if let Some(g) = self.deferred_hash_key_owner(r, None).and_then(|o| self.input_group_named(&r.target_name, &o)) {
+                return Some(g);
+            }
         }
         // Cursor on a `has`-decl token: any of the stacked synthesized
         // symbols (accessor Method / ctor HashKeyDef) selects the pair.
@@ -797,14 +805,19 @@ impl FileAnalysis {
             SymKind::HashKeyDef => (twin_of(SymKind::Variable)?, sym),
             _ => return None,
         };
-        let SymbolDetail::HashKeyDef { owner: owner @ HashKeyOwner::Input { package, .. }, .. } = &key.detail else {
+        let SymbolDetail::HashKeyDef { owner, .. } = &key.detail else {
             return None;
+        };
+        let package = match owner {
+            HashKeyOwner::Input { package, .. } => package.as_ref(),
+            HashKeyOwner::AnonInput { callable, .. } => self.symbol(*callable).package.as_ref(),
+            _ => return None,
         };
         Some(FieldGroup {
             spelling_sym: Some(var.id),
             private: true,
             decl_span: None,
-            class: package.clone().unwrap_or_default(),
+            class: package.cloned().unwrap_or_default(),
             bare: key.name.clone(),
             input: Some(owner.clone()),
             attr: false,
@@ -954,17 +967,7 @@ impl FileAnalysis {
         }
         // Constructor keys at call sites.
         if let Some(owner) = &g.input {
-            for r in self.refs().iter().filter(|r| r.target_name == g.bare) {
-                let o = match r.hash_key_owner() {
-                    Some(o) => Some(o.clone()),
-                    None if r.arg_key_call().is_some() => self.deferred_hash_key_owner(r, None),
-                    None => None,
-                };
-                let Some(o) = o else { continue };
-                if o.found_by(owner) || self.declaring_input(&o, None).as_ref() == Some(owner) {
-                    spans.push(r.span);
-                }
-            }
+            spans.extend(self.input_key_sites(owner, &g.bare));
         }
         // Reader calls (`$p->x`) and reads (`obj.count`) dispatching to
         // this class.
@@ -995,6 +998,23 @@ impl FileAnalysis {
         }
         spans.sort_by_key(|s| (s.start.row, s.start.column));
         spans.dedup();
+        spans
+    }
+
+    /// The keys this file's calls pass `owner`'s callable by the name `bare`.
+    fn input_key_sites(&self, owner: &HashKeyOwner, bare: &str) -> Vec<Span> {
+        let mut spans = Vec::new();
+        for r in self.refs().iter().filter(|r| r.target_name == bare) {
+            let o = match r.hash_key_owner() {
+                Some(o) => Some(o.clone()),
+                None if r.arg_key_call().is_some() => self.deferred_hash_key_owner(r, None),
+                None => None,
+            };
+            let Some(o) = o else { continue };
+            if o.found_by(owner) || self.declaring_input(&o, None).as_ref() == Some(owner) {
+                spans.push(r.span);
+            }
+        }
         spans
     }
 
@@ -1147,6 +1167,11 @@ impl FileAnalysis {
         // A `has`/column group's decl token IS its only spelling here; a
         // field-backed group's decl is the variable spelling's own token (the
         // rest of `variable_spans` are body uses), sigil-skipped like them.
+        // An anonymous callable's keys are reached only from this file: no
+        // cross-file member carries them, so its call sites are spellings.
+        if let Some(owner @ HashKeyOwner::AnonInput { .. }) = &g.input {
+            variable_spans.extend(self.input_key_sites(owner, &g.bare));
+        }
         let mut decl_spans: Vec<Span> = g
             .spelling_sym
             .map(|vs| vec![self.bare_spelling(&g, vs, self.symbol(vs).selection_span)])

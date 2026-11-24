@@ -42,9 +42,11 @@ pub fn php_pack() -> LangPack {
         type_display: display_type,
         shape_name: |raw| raw.to_string(),
         // An anonymous class is one class per place it is written: PHP
-        // names it `class@anonymous` and where it stands.
+        // names it `class@anonymous` and where it stands; a closure is
+        // `{closure}`.
         default_name: |kind, at| match kind {
             DefCap::Class => Some(format!("class@anonymous:{}:{}", at.row + 1, at.column + 1)),
+            DefCap::Anon => Some("{closure}".to_string()),
             _ => None,
         },
         annot_type: declared_type,

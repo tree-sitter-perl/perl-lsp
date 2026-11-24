@@ -1267,9 +1267,12 @@ fn remap_spans(
         }
     }
     for read in var_reads.iter_mut() {
-        let crate::build::query_extract::VarRead { name: _, scope: _, span, token, expr: _, written: _ } = read;
+        let crate::build::query_extract::VarRead { name: _, scope: _, span, token, expr: _, written: _, arg_keys } = read;
         *span = rspan(*span);
         *token = rspan(*token);
+        for (_, key) in arg_keys.iter_mut() {
+            *key = rspan(*key);
+        }
     }
     for (_, _, span) in var_writes.iter_mut() {
         *span = rspan(*span);

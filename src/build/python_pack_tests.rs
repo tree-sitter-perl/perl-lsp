@@ -2618,3 +2618,21 @@ fn a_module_functions_keys_are_its_modules() {
     assert_eq!(refs_from("pkg/m1.py"), ["app.py", "m1.py"]);
     assert_eq!(refs_from("pkg/m2.py"), ["m2.py"]);
 }
+
+/// A lambda is a callable written as a value: a call by the name holding
+/// it passes keys of the lambda's own parameters, which no other callable
+/// of the same parameter name shares.
+#[cfg(feature = "python")]
+#[test]
+fn a_lambda_called_by_its_name_takes_its_keys() {
+    let src = "def f(timeout):\n    return timeout\nf(timeout=1)\ng = lambda timeout: timeout\ng(timeout=2)\n";
+    let fa = py_in(src, None);
+    let def = fa.find_definition(Point::new(4, 2), None).expect("label goes to the lambda's parameter");
+    assert_eq!((def.start.row, def.start.column), (3, 11));
+    let def = fa.find_definition(Point::new(2, 2), None).expect("the def's label stays the def's");
+    assert_eq!((def.start.row, def.start.column), (0, 6));
+    let mut edits: Vec<(usize, usize)> =
+        fa.rename_at(Point::new(3, 11), "t").expect("renames").into_iter().map(|(s, _)| (s.start.row, s.start.column)).collect();
+    edits.sort();
+    assert_eq!(edits, [(3, 11), (3, 20), (4, 2)]);
+}
