@@ -18,6 +18,9 @@ pub struct Callee {
     /// callable is known only by name (a framework constructor nothing
     /// indexed declares).
     pub at: Option<CalleeAt>,
+    /// The rule for the parameter the call's receiver fills, for a member
+    /// call; `None` for a call with no receiver.
+    pub receiver: Option<ReceiverParam>,
 }
 
 /// Where a callee is declared.
@@ -47,7 +50,8 @@ impl Callee {
     /// callable's own input first — an inherited method's keys are its
     /// declaring class's — then the input the call names, under which a
     /// framework declares a class's constructor keys.
-    pub fn owners(&self, origin: &FileAnalysis, index: Option<&dyn CrossFileLookup>) -> Vec<HashKeyOwner> {
+    pub fn owners(&self, origin: &FileAnalysis, index: Option<&dyn CrossFileLookup>, place: Option<u32>) -> Vec<HashKeyOwner> {
+        let slot = self.slot_at(origin, index, place);
         let declared = match self.at.as_ref() {
             Some(CalleeAt::Here(id)) => Some(HashKeyOwner::input_of(origin.symbol(*id), &origin.namespace_ranges)),
             Some(CalleeAt::There { module, span }) => index.and_then(|idx| {
@@ -57,11 +61,51 @@ impl Callee {
             }),
             None => None,
         };
-        let mut out: Vec<HashKeyOwner> = declared.into_iter().collect();
-        if !out.contains(&self.input) {
-            out.push(self.input.clone());
+        let mut out: Vec<HashKeyOwner> = declared.into_iter().map(|o| o.with_slot(slot)).collect();
+        let input = self.input.clone().with_slot(slot);
+        if !out.contains(&input) {
+            out.push(input);
         }
         out
+    }
+
+    /// The owner of a key the call passes: its names, or for a key in the
+    /// hash literal at `place`, the parameter that argument binds.
+    pub fn input_at(&self, origin: &FileAnalysis, index: Option<&dyn CrossFileLookup>, place: Option<u32>) -> HashKeyOwner {
+        self.input.clone().with_slot(self.slot_at(origin, index, place))
+    }
+
+    /// The keys a call may write in the hash literal it passes at
+    /// `place`, or by name for `None`: the parameter's keys where that
+    /// argument binds one, else the call's [`labels`](Self::labels).
+    pub fn labels_at(&self, origin: &FileAnalysis, index: Option<&dyn CrossFileLookup>, place: Option<u32>) -> Vec<String> {
+        if self.slot_at(origin, index, place) == InputSlot::Named {
+            return self.labels(origin, index);
+        }
+        let mut out: Vec<String> = Vec::new();
+        for (_, def) in self.key_defs(origin, index, place) {
+            if !out.contains(&def.name) {
+                out.push(def.name);
+            }
+        }
+        out
+    }
+
+    /// How many written arguments the callee takes by place before the
+    /// names it collects.
+    pub fn named_offset(&self, origin: &FileAnalysis, index: Option<&dyn CrossFileLookup>) -> usize {
+        match self.symbol(origin, index).map(|s| s.detail) {
+            Some(SymbolDetail::Sub { params, .. } | SymbolDetail::Handler { params, .. }) => named_offset(&params, self.receiver),
+            _ => 0,
+        }
+    }
+
+    fn slot_at(&self, origin: &FileAnalysis, index: Option<&dyn CrossFileLookup>, place: Option<u32>) -> InputSlot {
+        let Some(place) = place else { return InputSlot::Named };
+        match self.symbol(origin, index).map(|s| s.detail) {
+            Some(SymbolDetail::Sub { params, .. } | SymbolDetail::Handler { params, .. }) => slot_at_place(&params, self.receiver, place),
+            _ => InputSlot::Named,
+        }
     }
 
     /// The files whose key declarations the call's keys may name, the
@@ -84,8 +128,13 @@ impl Callee {
 
     /// Every key declaration the call's keys may name, with the file
     /// holding it (`None` the asking file), the callee's own first.
-    pub fn key_defs(&self, origin: &FileAnalysis, index: Option<&dyn CrossFileLookup>) -> Vec<(Option<Arc<CachedModule>>, Symbol)> {
-        let owners = self.owners(origin, index);
+    pub fn key_defs(
+        &self,
+        origin: &FileAnalysis,
+        index: Option<&dyn CrossFileLookup>,
+        place: Option<u32>,
+    ) -> Vec<(Option<Arc<CachedModule>>, Symbol)> {
+        let owners = self.owners(origin, index, place);
         let mut out = Vec::new();
         for home in self.key_homes(index) {
             let fa = match (&home, index) {
@@ -115,7 +164,7 @@ impl Callee {
         let mut out: Vec<String> = params.iter().filter_map(ParamInfo::label).map(str::to_string).collect();
         // A parameter taken only by place is spelled as the key it mints.
         let refused = |k: &str| params.iter().any(|p| p.label().is_none() && !p.pass.is_rest() && p.name == k);
-        for (_, def) in self.key_defs(origin, index) {
+        for (_, def) in self.key_defs(origin, index, None) {
             if !refused(&def.name) && !out.contains(&def.name) {
                 out.push(def.name);
             }
@@ -144,7 +193,8 @@ impl FileAnalysis {
         }
         if !matches!(call.kind, RefKind::FunctionCall) {
             let class = self.receiver_classes(call, index, ReceiverPolicy::Edge).single()?.to_string();
-            return self.member_callee(call, &class, index);
+            let receiver = Some(self.names().receiver);
+            return self.member_callee(call, &class, index).map(|c| Callee { receiver, ..c });
         }
         if let Some(held) = self.held_callee(call, index) {
             return Some(held);
@@ -185,16 +235,16 @@ impl FileAnalysis {
         if let Some(package) = call.resolved_package() {
             return Some(self.packaged_callee(package, name, index));
         }
-        Some(Callee { input: HashKeyOwner::named_input(None, name), at: None })
+        Some(Callee { input: HashKeyOwner::named_input(None, name), at: None, receiver: None })
     }
 
     /// The handler registered on `owner` as `name`: this file's first
     /// registration, else the first another file holds.
     fn handler_callee(&self, owner: &HandlerOwner, name: &str, index: Option<&dyn CrossFileLookup>) -> Callee {
-        let input = HashKeyOwner::Handler { owner: owner.clone(), name: name.to_string() };
+        let input = HashKeyOwner::Handler { owner: owner.clone(), name: name.to_string(), slot: InputSlot::Named };
         let registered = |s: &Symbol| s.name == name && matches!(&s.detail, SymbolDetail::Handler { owner: o, .. } if o == owner);
         if let Some(sym) = self.symbols.iter().find(|s| registered(s)) {
-            return Callee { input, at: Some(CalleeAt::Here(sym.id)) };
+            return Callee { input, at: Some(CalleeAt::Here(sym.id)), receiver: None };
         }
         let there = index.and_then(|idx| {
             idx.modules_with_symbol(name).into_iter().find_map(|module| {
@@ -204,7 +254,7 @@ impl FileAnalysis {
                 })
             })
         });
-        Callee { input, at: there }
+        Callee { input, at: there, receiver: None }
     }
 
     /// The callable the value named by the call's token holds there.
@@ -214,6 +264,15 @@ impl FileAnalysis {
             HeldCallable::Symbol(sid) => Some(self.callee_here(self.symbol(sid))),
             HeldCallable::Named { package, name } => Some(self.packaged_callee(package, name, index)),
         }
+    }
+
+    /// Every dispatch call that says where it writes its handler's
+    /// arguments, with that region.
+    pub fn handler_regions(&self) -> impl Iterator<Item = (&Ref, HandlerRegion)> + '_ {
+        self.refs.iter().filter_map(|r| match &r.kind {
+            RefKind::DispatchCall { args: Some(region), .. } => Some((r, *region)),
+            _ => None,
+        })
     }
 
     /// The callee of the call a key is passed to.
@@ -234,7 +293,7 @@ impl FileAnalysis {
     }
 
     fn callee_here(&self, sym: &Symbol) -> Callee {
-        Callee { input: HashKeyOwner::input_of(sym, &self.namespace_ranges), at: Some(CalleeAt::Here(sym.id)) }
+        Callee { input: HashKeyOwner::input_of(sym, &self.namespace_ranges), at: Some(CalleeAt::Here(sym.id)), receiver: None }
     }
 
     /// `package`'s `name`: declared here, else in the candidate file the
@@ -258,8 +317,8 @@ impl FileAnalysis {
         match there {
             // The callable's own package owns its keys: a re-exported
             // sub's is the module that declares it.
-            Some((declared, at)) => Callee { input: HashKeyOwner::named_input(declared, name), at: Some(at) },
-            None => Callee { input: HashKeyOwner::named_input(Some(package.to_string()), name), at: None },
+            Some((declared, at)) => Callee { input: HashKeyOwner::named_input(declared, name), at: Some(at), receiver: None },
+            None => Callee { input: HashKeyOwner::named_input(Some(package.to_string()), name), at: None, receiver: None },
         }
     }
 
@@ -267,14 +326,14 @@ impl FileAnalysis {
     fn member_callee(&self, call: &Ref, class: &str, index: Option<&dyn CrossFileLookup>) -> Option<Callee> {
         let member = self.called_member(call, class, index)?.into_owned();
         let at = self.member_at(class, &member, index);
-        Some(Callee { input: HashKeyOwner::named_input(Some(class.to_string()), member), at })
+        Some(Callee { input: HashKeyOwner::named_input(Some(class.to_string()), member), at, receiver: None })
     }
 
     /// The constructor a construction of `class` runs.
     fn constructor_callee(&self, class: &str, index: Option<&dyn CrossFileLookup>) -> Option<Callee> {
         let (_, member) = self.constructor_of(class, index)?;
         let at = self.member_at(class, &member, index);
-        Some(Callee { input: HashKeyOwner::named_input(Some(class.to_string()), member), at })
+        Some(Callee { input: HashKeyOwner::named_input(Some(class.to_string()), member), at, receiver: None })
     }
 
     fn member_at(&self, class: &str, member: &str, index: Option<&dyn CrossFileLookup>) -> Option<CalleeAt> {
@@ -320,5 +379,5 @@ fn callee_there(index: &dyn CrossFileLookup, module: Arc<CachedModule>, span: Sp
     let fa = index.symbols_present(&module);
     let sym = fa.symbols().iter().find(|s| s.selection_span == span);
     let input = sym.map_or_else(|| HashKeyOwner::named_input(None, ""), |s| HashKeyOwner::input_of(s, &fa.namespace_ranges));
-    Callee { input, at: Some(CalleeAt::There { module, span }) }
+    Callee { input, at: Some(CalleeAt::There { module, span }), receiver: None }
 }

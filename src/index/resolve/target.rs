@@ -392,7 +392,7 @@ pub enum TargetKind {
     /// A key a string-dispatched handler takes (`$minion->enqueue(mail =>
     /// [timeout => 1])` reaches `add_task(mail => sub ($job, %o) {…})`).
     /// Matches `HashKeyOwner::Handler` by equality.
-    HashKeyOfHandler { owner: HandlerOwner, name: String },
+    HashKeyOfHandler { owner: HandlerOwner, name: String, slot: InputSlot },
     /// A hash key owned by a class (Moo `has` slots, DBIC columns on a Result class).
     HashKeyOfBridged(String),
     /// An attr's internal hash slot (`$self->{attr}` — or any

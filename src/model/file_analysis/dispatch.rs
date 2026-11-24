@@ -669,17 +669,47 @@ pub enum HashKeyOwner {
     /// `emit(ready => to => …)`), answered by the parameters of the
     /// callback it was registered with. Its own namespace, apart from any
     /// method of the owner class of the same name.
-    Handler { owner: HandlerOwner, name: String },
+    Handler {
+        owner: HandlerOwner,
+        name: String,
+        #[serde(default)]
+        slot: InputSlot,
+    },
 }
 
 /// Where in a callable's input a key sits.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
 pub enum InputSlot {
     /// Among the callable's named arguments.
+    #[default]
     Named,
+    /// In the hash the argument bound to parameter `n` holds
+    /// (`sub f ($job, $o) { $o->{timeout} }`, `f($job, {timeout => 1})`).
+    /// `n` counts the callable's whole parameter list, its invocant too,
+    /// so the declaration and every way of calling it agree.
+    At(u16),
 }
 
 impl HashKeyOwner {
+    /// The same callable's keys at `slot`; an owner that is no
+    /// callable's input stays as it is.
+    pub fn with_slot(self, slot: InputSlot) -> Self {
+        match self {
+            HashKeyOwner::Input { package, name, .. } => HashKeyOwner::Input { package, name, slot },
+            HashKeyOwner::AnonInput { callable, .. } => HashKeyOwner::AnonInput { callable, slot },
+            HashKeyOwner::Handler { owner, name, .. } => HashKeyOwner::Handler { owner, name, slot },
+            other => other,
+        }
+    }
+
+    /// Where among its callable's input this owner's keys sit.
+    pub fn input_slot(&self) -> Option<InputSlot> {
+        match self {
+            HashKeyOwner::Input { slot, .. } | HashKeyOwner::AnonInput { slot, .. } | HashKeyOwner::Handler { slot, .. } => Some(*slot),
+            _ => None,
+        }
+    }
+
     /// A callable's named-argument keys: what `f(key => …)` passes.
     pub fn named_input(package: Option<String>, name: impl Into<String>) -> Self {
         HashKeyOwner::Input { package, name: name.into(), slot: InputSlot::Named }
@@ -690,7 +720,7 @@ impl HashKeyOwner {
     /// — a module's function is that module's, not every module's.
     pub fn input_of(sym: &Symbol, namespaces: &[NamespaceRange]) -> Self {
         if let SymbolDetail::Handler { owner, .. } = &sym.detail {
-            return HashKeyOwner::Handler { owner: owner.clone(), name: sym.name.clone() };
+            return HashKeyOwner::Handler { owner: owner.clone(), name: sym.name.clone(), slot: InputSlot::Named };
         }
         if sym.flags.contains(SymbolFlags::ANONYMOUS) {
             return HashKeyOwner::AnonInput { callable: sym.id, slot: InputSlot::Named };

@@ -1234,7 +1234,7 @@ impl<'a> Builder<'a> {
                 }
                 EmitAction::DispatchCall { name, dispatcher, owner, span, .. } => {
                     refs.push(GatedRef {
-                        kind: RefKind::DispatchCall { dispatcher },
+                        kind: RefKind::DispatchCall { dispatcher, args: None },
                         span,
                         target_name: name,
                         access: crate::model::file_analysis::AccessKind::Read,

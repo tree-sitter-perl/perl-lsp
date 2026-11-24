@@ -337,6 +337,16 @@ pub enum HandlerArgs {
     After(Span),
 }
 
+impl HandlerArgs {
+    /// The region as the model records it on the dispatch's ref.
+    pub fn region(self) -> crate::model::file_analysis::HandlerRegion {
+        match self {
+            HandlerArgs::Elements(s) => crate::model::file_analysis::HandlerRegion::Elements(s),
+            HandlerArgs::After(s) => crate::model::file_analysis::HandlerRegion::After(s),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EmitAction {
     // ==== Data emissions ====

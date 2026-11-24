@@ -402,8 +402,8 @@ pub fn resolve_symbol_scoped(
             Some(HashKeyOwner::Input { package, name: sub_name, slot }) => ResolvedTarget::Target(
                 TargetRef::new(name, TargetKind::HashKeyOfInput { package, name: sub_name, slot }, analysis),
             ),
-            Some(HashKeyOwner::Handler { owner, name: handler }) => ResolvedTarget::Target(
-                TargetRef::new(name, TargetKind::HashKeyOfHandler { owner, name: handler }, analysis),
+            Some(HashKeyOwner::Handler { owner, name: handler, slot }) => ResolvedTarget::Target(
+                TargetRef::new(name, TargetKind::HashKeyOfHandler { owner, name: handler, slot }, analysis),
             ),
             // A bridged key (DBIC column condition-arg / accessor): the fallback
             // when no field-group path caught it (e.g. single-file, no index).

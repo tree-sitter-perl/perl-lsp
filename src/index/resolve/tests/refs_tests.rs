@@ -2172,6 +2172,31 @@ sub fire ($minion) {\n  $minion->enqueue(mail => [timeout => 1]);\n}\n1;\n",
     );
 }
 
+/// A hash written as a call's argument holds the keys of the parameter
+/// that argument binds, and a callee's names start after its places.
+#[test]
+fn keys_link_by_place() {
+    let store = OpenDocs::new();
+    let path = PathBuf::from("/tmp/resolve_keys_by_place.pl");
+    let fa = parse(
+        "use strict;\n\
+sub f { my ($x, $o) = @_; $o->{timeout} }\n\
+f(1, {timeout => 1});\n\
+sub g { my ($x, %a) = @_; $a{retries} }\n\
+g(1, retries => 2);\n",
+    );
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), fa.clone());
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(&path));
+    let at = |row, column| tree_sitter::Point { row, column };
+    let defs = resolve(&store, &fa, key.clone(), at(2, 6), Some(&idx), OverrideScope::default()).definitions();
+    assert!(defs.iter().any(|d| d.span.start == at(1, 31)), "the hash's key lands on the parameter's read, got {defs:?}");
+    let refs = resolve(&store, &fa, key.clone(), at(1, 31), Some(&idx), OverrideScope::default()).references();
+    assert!(refs.iter().any(|r| r.span.start == at(2, 6)), "the read finds the call's key, got {refs:?}");
+    let defs = resolve(&store, &fa, key, at(4, 5), Some(&idx), OverrideScope::default()).definitions();
+    assert!(defs.iter().any(|d| d.span.start == at(3, 29)), "a name after a place lands on its read, got {defs:?}");
+}
+
 /// A dotted helper's keys are the keys its chained call passes.
 #[test]
 fn a_dotted_helper_takes_the_keys_its_call_passes() {

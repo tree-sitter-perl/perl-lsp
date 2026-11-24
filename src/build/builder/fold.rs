@@ -651,22 +651,24 @@ impl<'a> Builder<'a> {
                 pending.push(Path::Deferred(RefIdx(i as u32), args));
             }
         }
+        // A method call's receiver fills the first parameter (`$_[0]`).
+        let member = Some(crate::model::conventions::PERL_SPELLINGS.receiver);
         for path in pending {
             match path {
                 Path::Claimed(owner, args) => {
-                    self.emit_call_arg_key_accesses(args, Gate::Open(owner));
+                    self.emit_call_arg_key_accesses(args, Gate::Open(owner), member);
                 }
                 Path::Strict(owner, args) => {
-                    self.emit_call_arg_key_accesses(args, Gate::Strict(owner));
+                    self.emit_call_arg_key_accesses(args, Gate::Strict(owner), member);
                 }
                 Path::StrictOrDefer(owner, call, args) => {
-                    self.emit_call_arg_key_accesses(args, Gate::StrictOrDefer(owner, call));
+                    self.emit_call_arg_key_accesses(args, Gate::StrictOrDefer(owner, call), member);
                 }
                 Path::Deferred(call, args) => {
-                    self.emit_call_arg_key_accesses(args, Gate::Deferred(call));
+                    self.emit_call_arg_key_accesses(args, Gate::Deferred(call), member);
                 }
                 Path::ColumnKeyed(owner, args) => {
-                    self.emit_call_arg_key_accesses(args, Gate::ColumnKeyed(owner));
+                    self.emit_call_arg_key_accesses(args, Gate::ColumnKeyed(owner), member);
                 }
             }
         }
@@ -1953,12 +1955,13 @@ impl<'a> Builder<'a> {
         let HashKeyOwner::Input { package, name, .. } = owner else { return false };
         self.symbols.iter().any(|s| match (&s.kind, &s.detail) {
             (SymKind::Sub | SymKind::Method, _) => &s.name == name && &s.package == package,
-            (SymKind::HashKeyDef, SymbolDetail::HashKeyDef { owner: o, .. }) => self.as_registered(o) == owner,
+            (SymKind::HashKeyDef, SymbolDetail::HashKeyDef { owner: o, .. }) => self.as_registered(o) == *owner,
             _ => false,
         })
     }
 
     pub(super) fn bind_collected_keys(&mut self) {
+        use crate::model::file_analysis::InputSlot;
         let mut declared: std::collections::HashSet<(HashKeyOwner, String)> = std::collections::HashSet::new();
         let mut minted: Vec<(String, Span, ScopeId, HashKeyOwner)> = Vec::new();
         for r in self.refs.iter_mut() {
@@ -1969,10 +1972,16 @@ impl<'a> Builder<'a> {
             let scope = &self.scopes[def_scope.0 as usize];
             let Some(callable) = scope.owner.map(|id| &self.symbols[id.0 as usize]) else { continue };
             let SymbolDetail::Sub { params, .. } = &callable.detail else { continue };
-            if !params.iter().any(|p| p.pass == ParamPass::RestNamed && p.name == *name) {
-                continue;
-            }
-            let owner = HashKeyOwner::input_of(callable, &self.namespace_ranges);
+            // `%args` collects the names a call passes; `$o` (`$o->{key}`)
+            // holds the hash the argument at its place is.
+            let slot = match params.iter().enumerate().find(|(_, p)| p.name == *name) {
+                Some((_, p)) if p.pass == ParamPass::RestNamed => InputSlot::Named,
+                Some((j, p)) if matches!(p.pass, ParamPass::Positional | ParamPass::Either) && !p.is_invocant => {
+                    InputSlot::At(j as u16)
+                }
+                _ => continue,
+            };
+            let owner = HashKeyOwner::input_of(callable, &self.namespace_ranges).with_slot(slot);
             if declared.insert((owner.clone(), r.target_name.clone())) {
                 minted.push((r.target_name.clone(), r.span, r.scope, owner.clone()));
             }
@@ -2006,7 +2015,7 @@ impl<'a> Builder<'a> {
                 }
                 None => Gate::Deferred(call),
             };
-            self.emit_call_arg_key_accesses(args, gate);
+            self.emit_call_arg_key_accesses(args, gate, None);
         }
         for (args, call, name, here) in std::mem::take(&mut self.pending_call_arg_keys) {
             let pinned = self.refs[call].resolved_package().map(str::to_string);
@@ -2028,7 +2037,7 @@ impl<'a> Builder<'a> {
             } else {
                 Gate::Strict(owner)
             };
-            self.emit_call_arg_key_accesses(args, gate);
+            self.emit_call_arg_key_accesses(args, gate, None);
         }
     }
 

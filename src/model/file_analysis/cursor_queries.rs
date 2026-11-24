@@ -166,7 +166,7 @@ impl FileAnalysis {
                     // key's call; a call's key belongs to the callable the
                     // call dispatches to.
                     if let Some(def) = self.arg_key_callee(r, module_index).and_then(|callee| {
-                        callee.key_defs(self, module_index).into_iter().find(|(home, d)| home.is_none() && d.name == r.target_name)
+                        callee.key_defs(self, module_index, r.arg_key_place()).into_iter().find(|(home, d)| home.is_none() && d.name == r.target_name)
                     }) {
                         return Some(def.1.selection_span);
                     }
@@ -1071,7 +1071,7 @@ impl FileAnalysis {
 
         // A key of the call's arguments: the callee's named input.
         if let Some(enclosing) = enclosing_call {
-            return self.callee_of(enclosing, module_index).map(|c| c.input);
+            return self.callee_of(enclosing, module_index).map(|c| c.input_at(self, module_index, key_ref.arg_key_place()));
         }
         // Variable bound to an imported function call: `$c = get_config();
         // $c->{key}`. The build-time walk only pins the owner when the sub's

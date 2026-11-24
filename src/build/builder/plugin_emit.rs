@@ -376,7 +376,7 @@ impl<'a> Builder<'a> {
                 if already {
                     return;
                 }
-                self.register_callable(callable.as_ref(), HashKeyOwner::Handler { owner: owner.clone(), name: name.clone() });
+                self.register_callable(callable.as_ref(), HashKeyOwner::Handler { owner: owner.clone(), name: name.clone(), slot: Default::default() });
                 let detail = SymbolDetail::Handler {
                     owner,
                     dispatchers,
@@ -459,7 +459,7 @@ impl<'a> Builder<'a> {
             }
             // The arguments a dispatch call passes its handler are read
             // where the match's captures are in hand (`dispatch_pattern_plugins`).
-            plugin::EmitAction::DispatchCall { name, dispatcher, owner, span, var_text, args: _ } => {
+            plugin::EmitAction::DispatchCall { name, dispatcher, owner, span, var_text, args } => {
                 // Same pattern as HashKeyAccess: record the owner so
                 // `build_indices` can link the ref to its Handler def in
                 // O(1) and `resolve::refs_to` matches cross-file by
@@ -473,7 +473,7 @@ impl<'a> Builder<'a> {
                     name.clone(),
                 )) {
                     self.refs.push(Ref {
-                        kind: RefKind::DispatchCall { dispatcher },
+                        kind: RefKind::DispatchCall { dispatcher, args: args.map(plugin::HandlerArgs::region) },
                         span,
                         scope: self.current_scope(),
                         target_name: name,
@@ -803,12 +803,14 @@ impl<'a> Builder<'a> {
     /// The owner a key of `owner` answers to once registrations are
     /// adopted: a registered anonymous callable's input is the one it was
     /// registered as. Gates that run before adoption compare through it.
-    pub(super) fn as_registered<'o>(&'o self, owner: &'o HashKeyOwner) -> &'o HashKeyOwner {
+    pub(super) fn as_registered(&self, owner: &HashKeyOwner) -> HashKeyOwner {
         match owner {
-            HashKeyOwner::AnonInput { callable, .. } => {
-                self.registered_inputs.iter().find(|(s, _)| s == callable).map_or(owner, |(_, o)| o)
-            }
-            _ => owner,
+            HashKeyOwner::AnonInput { callable, slot } => self
+                .registered_inputs
+                .iter()
+                .find(|(s, _)| s == callable)
+                .map_or_else(|| owner.clone(), |(_, o)| o.clone().with_slot(*slot)),
+            _ => owner.clone(),
         }
     }
 
@@ -837,7 +839,7 @@ impl<'a> Builder<'a> {
         }
         let adopted = |owner: &HashKeyOwner| -> Option<HashKeyOwner> {
             let to = self.as_registered(owner);
-            (to != owner).then(|| to.clone())
+            (to != *owner).then_some(to)
         };
         let mut sym_moves = Vec::new();
         for s in &self.symbols {

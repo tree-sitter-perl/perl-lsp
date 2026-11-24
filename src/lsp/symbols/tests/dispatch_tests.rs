@@ -1226,3 +1226,62 @@ $p->move();
     assert_eq!(labels("x => 1, "), ["y =>"], "the attrs not yet passed");
     assert_eq!(labels("move("), ["dx =>", "dy =>"]);
 }
+
+/// The labels offered where `marker` stands in `src` (the marker removed).
+fn labels_where(src_with_marker: &str, marker: &str) -> Vec<String> {
+    let at = src_with_marker.find(marker).expect("marker");
+    let src = src_with_marker.replacen(marker, "", 1);
+    let before = &src[..at];
+    let line = before.matches('\n').count() as u32;
+    let character = (at - before.rfind('\n').map_or(0, |i| i + 1)) as u32;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(&src, None).unwrap();
+    let analysis = crate::build::builder::build(&tree, src.as_bytes());
+    let idx = ModuleIndex::new_for_test();
+    completion_items_for_test(&analysis, &tree, &src, Position { line, character }, &idx, None)
+        .into_iter()
+        // A label is written with its separator (`retries =>`).
+        .map(|i| i.label.split_whitespace().next().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// The arguments a dispatch hands its handler complete the handler's keys:
+/// the names inside `enqueue`'s array, the keys of a hash at a place.
+#[test]
+fn a_task_s_keys_complete_inside_the_enqueue_array() {
+    let named = labels_where(
+        "use v5.36; use Minion;\nmy $minion = Minion->new;\n\
+$minion->add_task(mail => sub ($job, %o) { $o{timeout} + $o{retries} });\n\
+$minion->enqueue(mail => [timeout => 1, ^]);\n",
+        "^",
+    );
+    assert!(named.iter().any(|l| l == "retries"), "the task's names, got {named:?}");
+    assert!(!named.iter().any(|l| l == "timeout"), "a written name is not offered again, got {named:?}");
+
+    let hashed = labels_where(
+        "use v5.36; use Minion;\nmy $minion = Minion->new;\n\
+$minion->add_task(mail => sub ($job, $o) { $o->{timeout} });\n\
+$minion->enqueue(mail => [{^}]);\n",
+        "^",
+    );
+    assert!(hashed.iter().any(|l| l == "timeout"), "the hash parameter's keys, got {hashed:?}");
+}
+
+/// A call's keys after the places its callee takes first complete the
+/// names the callee collects, and a hash written at a place completes
+/// that parameter's keys.
+#[test]
+fn keys_complete_by_place() {
+    let after = labels_where(
+        "use strict;\nsub f { my ($x, %a) = @_; $a{timeout} + $a{retries} }\nf(1, timeout => 1, ^);\n",
+        "^",
+    );
+    assert!(after.iter().any(|l| l == "retries"), "names after the place, got {after:?}");
+
+    let at = labels_where(
+        "use strict;\nsub f { my ($x, $o) = @_; $o->{timeout} }\nf(1, {^});\n",
+        "^",
+    );
+    assert!(at.iter().any(|l| l == "timeout"), "the second argument's keys, got {at:?}");
+}

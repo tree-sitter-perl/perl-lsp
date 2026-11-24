@@ -466,6 +466,7 @@ fn completion_items_native(
                 suppress_firehose = true;
             } else if call_ctx.active_param > 0 && has_any_handlers
                 && !matches!(slot, Slot::Key { .. })
+                && call_arg_labels(analysis, module_index, tree, source.as_bytes(), point, &call_ctx).is_none()
             {
                 // Past arg-0 in a known dispatcher: the only sensible
                 // completion is variables-in-scope (candidates for
@@ -514,6 +515,13 @@ fn completion_items_native(
             // the hash_expression directly so unrelated nearby calls
             // don't interfere. Works for both class-typed hashes and
             // sub-owned ones.
+            // A hash literal written as a call's argument holds the keys of
+            // the parameter that argument binds.
+            if let Some(labels) = cursor_context::find_call_context(tree, source.as_bytes(), point)
+                .and_then(|ctx| call_arg_labels(analysis, module_index, tree, source.as_bytes(), point, &ctx))
+            {
+                labels
+            } else {
             let used = cursor_context::used_keys_in_enclosing_hash(tree, source.as_bytes(), point);
             let class_name = owner.owner_type.as_ref().and_then(|t| t.class_name());
             let candidates = if let Some(cn) = class_name {
@@ -530,6 +538,7 @@ fn completion_items_native(
                 analysis.complete_hash_keys(&owner.var_text, point, Some(module_index))
             };
             candidates.into_iter().filter(|c| !used.contains(&c.label)).collect()
+            }
         }
         Slot::Import { ref module } => {
             if let Some(ref name) = module {
@@ -588,25 +597,12 @@ fn completion_items_native(
                 cursor_context::find_call_context(tree, source.as_bytes(), point)
             {
                 // The call's callee answers first, through the one call →
-                // callee binding; the hashref-parameter body scan stays
-                // the fallback until such a parameter owns its keys.
-                // TODO(handler-region-completion): a key typed inside a
-                // dispatch's handler region (`enqueue(mail => [|])`,
-                // `emit(ready => |)`) completes the handler's labels once the
-                // call states where each argument sits (named-args layer 13's
-                // place facts): the cursor picks the region, its keys count
-                // parity from the region's start.
+                // callee binding — or, inside the arguments a dispatch hands
+                // its handler, the handler. The hashref-parameter body scan
+                // stays the fallback.
                 let _session = crate::model::witnesses::ResolutionSession::enter(Some(module_index));
-                let callee = call_ctx.name_start.and_then(|at| analysis.callee_at(at, Some(module_index)));
-                let labels = callee.as_ref().map(|c| c.labels(analysis, Some(module_index))).unwrap_or_default();
-                if call_ctx.at_key_position && !labels.is_empty() {
-                    let used: Vec<String> = call_ctx.used_keys.iter().cloned().collect();
-                    items.extend(crate::model::file_analysis::FileAnalysis::complete_call_labels(
-                        callee.as_ref().expect("labels came from it"),
-                        &labels,
-                        &used,
-                        crate::model::conventions::NAMED_ARG_WRITTEN,
-                    ));
+                if let Some(labels) = call_arg_labels(analysis, module_index, tree, source.as_bytes(), point, &call_ctx) {
+                    items.extend(labels);
                 } else if call_ctx.at_key_position {
                     items.extend(analysis.complete_keyval_args(
                         &call_ctx.name,
@@ -956,4 +952,63 @@ mod cap_tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "get_config");
     }
+}
+
+/// The cursor's place among a call's written arguments, against the
+/// callee it is written to: inside the arguments a dispatch hands its
+/// handler, the handler; else the call's own callee.
+fn call_arg_site(
+    analysis: &FileAnalysis,
+    module_index: &ModuleIndex,
+    tree: &tree_sitter::Tree,
+    source: &[u8],
+    point: tree_sitter::Point,
+    call_ctx: &cursor_context::CallContext,
+) -> Option<(crate::model::file_analysis::Callee, cursor_context::ArgSite)> {
+    let handler = analysis.handler_regions().find_map(|(call, region)| {
+        let site = match region {
+            crate::model::file_analysis::HandlerRegion::Elements(s) => {
+                cursor_context::arg_site_in_array(tree, source, (s.start, s.end), point)
+            }
+            crate::model::file_analysis::HandlerRegion::After(s) => call_ctx.site.after(s.start),
+        }?;
+        Some((analysis.callee_of(call, Some(module_index))?, site))
+    });
+    handler.or_else(|| {
+        let callee = call_ctx.name_start.and_then(|at| analysis.callee_at(at, Some(module_index)))?;
+        Some((callee, call_ctx.site.clone()))
+    })
+}
+
+/// The keys the cursor may write at its place in a call: a key in a hash
+/// literal argument is the parameter's that argument binds, a flat one is
+/// among the names the callee collects after its places. `None` when the
+/// cursor is at no key or the callee declares none.
+fn call_arg_labels(
+    analysis: &FileAnalysis,
+    module_index: &ModuleIndex,
+    tree: &tree_sitter::Tree,
+    source: &[u8],
+    point: tree_sitter::Point,
+    call_ctx: &cursor_context::CallContext,
+) -> Option<Vec<CompletionCandidate>> {
+    let (callee, site) = call_arg_site(analysis, module_index, tree, source, point, call_ctx)?;
+    let (at_key, used, place) = match &site.hash {
+        Some((at_key, used)) => (*at_key, used.clone(), Some(site.place as u32)),
+        None => {
+            let (at_key, used) = site.named_key_after(callee.named_offset(analysis, Some(module_index)));
+            (at_key, used, None)
+        }
+    };
+    let labels = callee.labels_at(analysis, Some(module_index), place);
+    if !at_key || labels.is_empty() {
+        return None;
+    }
+    let used: Vec<String> = used.into_iter().collect();
+    Some(crate::model::file_analysis::FileAnalysis::complete_call_labels(
+        &callee,
+        &labels,
+        &used,
+        crate::model::conventions::NAMED_ARG_WRITTEN,
+    ))
 }

@@ -775,6 +775,7 @@ struct Builder<'a> {
 ///     fills the owner once the enclosing call's receiver type
 ///     resolves (in-file via `RefTable::call_spanning` recursion, or
 ///     cross-file once `module_index` is available).
+#[derive(Clone)]
 enum Gate {
     Strict(HashKeyOwner),
     /// Strict, but the owner's class is not defined in this file, so a

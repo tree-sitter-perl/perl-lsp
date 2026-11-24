@@ -70,6 +70,87 @@ pub struct CallContext {
     /// Where the callee's name token starts, when the tree states one:
     /// what names the call's ref (`FileAnalysis::callee_at`).
     pub name_start: Option<Point>,
+    /// Where the cursor sits among the call's written arguments.
+    pub site: ArgSite,
+}
+
+/// Where the cursor sits among a call's written arguments, read off the
+/// tree so a consumer can place it against the callee's parameters.
+#[derive(Debug, Clone, Default)]
+pub struct ArgSite {
+    /// The written argument the cursor is in, or the one it starts.
+    pub place: usize,
+    /// When that argument is a hash literal the cursor is inside: whether
+    /// the cursor is at one of its keys, and the keys it already writes.
+    pub hash: Option<(bool, HashSet<String>)>,
+    /// Each written argument's key text, where it is one.
+    pub keys: Vec<Option<String>>,
+    /// Each written argument's span.
+    pub spans: Vec<(Point, Point)>,
+}
+
+impl ArgSite {
+    /// The site among the arguments after the one holding `at`
+    /// (`emit(ready => |)` → the handler's own arguments); `None` when the
+    /// cursor is not past it.
+    pub fn after(&self, at: Point) -> Option<ArgSite> {
+        let k = self.spans.iter().position(|&(s, e)| s <= at && at < e)?;
+        if self.place <= k {
+            return None;
+        }
+        Some(ArgSite {
+            place: self.place - (k + 1),
+            hash: self.hash.clone(),
+            keys: self.keys[k + 1..].to_vec(),
+            spans: self.spans[k + 1..].to_vec(),
+        })
+    }
+
+    /// Whether the cursor is at a key of the names a callee collects after
+    /// `offset` places, and the names already written there.
+    pub fn named_key_after(&self, offset: usize) -> (bool, HashSet<String>) {
+        let at_key = self.place >= offset && (self.place - offset) % 2 == 0;
+        let used = self.keys.iter().skip(offset).step_by(2).flatten().cloned().collect();
+        (at_key, used)
+    }
+}
+
+/// The site among `elements`, the written arguments of a call or region.
+fn arg_site(elements: &[Node], source: &[u8], point: Point) -> ArgSite {
+    let place = elements.iter().take_while(|e| e.end_position() <= point).count();
+    let hash = elements
+        .get(place)
+        .filter(|h| h.is(Kind::AnonymousHashExpression) && h.start_position() < point)
+        .map(|h| {
+            let body = crate::cst::literal_body(*h);
+            let at_key = body.id() == h.id() || count_separators_before(body, point) % 2 == 0;
+            (at_key, used_keys_in_pairs(*h, source))
+        });
+    ArgSite {
+        place,
+        hash,
+        keys: elements.iter().map(|e| extract_key_text(*e, source)).collect(),
+        spans: elements.iter().map(|e| (e.start_position(), e.end_position())).collect(),
+    }
+}
+
+/// The site inside the array literal at `span` (a dispatch's handler
+/// arguments, `enqueue(mail => [|])`); `None` when the cursor is outside it.
+pub fn arg_site_in_array(tree: &Tree, source: &[u8], span: (Point, Point), point: Point) -> Option<ArgSite> {
+    if !(span.0 < point && point < span.1) {
+        return None;
+    }
+    let array = tree.root_node().descendant_for_point_range(span.0, span.1)?;
+    if !array.is(Kind::AnonymousArrayExpression) || array.start_position() != span.0 || array.end_position() != span.1 {
+        return None;
+    }
+    let body = crate::cst::literal_body(array);
+    let elements: Vec<Node> = if body.id() == array.id() {
+        array.named().filter(|n| !n.is_extra()).collect()
+    } else {
+        crate::cst::list_elements(body)
+    };
+    Some(arg_site(&elements, source, point))
 }
 
 // ---- Cursor context detection (text-only, no tree) ----
@@ -709,6 +790,11 @@ pub fn find_call_context(tree: &Tree, source: &[u8], point: Point) -> Option<Cal
 
     let first_arg_string = args_node.and_then(|args| first_arg_as_string(args, source));
 
+    let site = match args_node {
+        Some(args) => arg_site(&crate::cst::list_elements_or_self(args), source, point),
+        None => ArgSite::default(),
+    };
+
     Some(CallContext {
         name,
         is_method,
@@ -718,6 +804,7 @@ pub fn find_call_context(tree: &Tree, source: &[u8], point: Point) -> Option<Cal
         used_keys,
         first_arg_string,
         name_start,
+        site,
     })
 }
 

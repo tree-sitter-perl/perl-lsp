@@ -694,7 +694,7 @@ impl<'a> Builder<'a> {
         }
     }
 
-    pub(super) fn emit_call_arg_key_accesses(&mut self, args_node: Node<'a>, gate: Gate) {
+    pub(super) fn emit_call_arg_key_accesses(&mut self, args_node: Node<'a>, gate: Gate, receiver: Option<crate::model::file_analysis::ReceiverParam>) {
         // Unwrap one level into a hash literal / paren wrapper —
         // search's `{KEY=>...}` is `anonymous_hash_expression`
         // wrapping a `list_expression` of pairs; constructors are
@@ -729,16 +729,77 @@ impl<'a> Builder<'a> {
                 _ => return,
             }
         }
-        // Pair-walk via the shared `cst::pair_nodes`: Perl tucks the tail pairs
-        // of `a => 1, b => 2` into a right-nested `list_expression`, so manual
-        // even/odd iteration over the top-level children sees only the FIRST
-        // pair. `pair_nodes` flattens the nesting (and skips separators), so
-        // every key is walked. (CLAUDE.md: don't re-derive pair-walking.)
-        self.emit_arg_key_pairs(crate::cst::pair_nodes(effective), gate);
+        if matches!(gate, Gate::ColumnKeyed(_)) {
+            // Pair-walk via the shared `cst::pair_nodes`: Perl tucks the tail
+            // pairs of `a => 1, b => 2` into a right-nested `list_expression`,
+            // which `pair_nodes` flattens.
+            self.emit_arg_key_pairs(crate::cst::pair_nodes(effective), &gate, None);
+            return;
+        }
+        let elements = if crate::cst::is_list_literal(args_node) {
+            crate::cst::list_elements(args_node)
+        } else {
+            vec![args_node]
+        };
+        self.emit_arg_elements(&elements, &gate, receiver);
     }
 
-    /// The keys of a pair walk, each bound as `gate` says.
-    pub(super) fn emit_arg_key_pairs(&mut self, pairs: Vec<(Node<'a>, Node<'a>)>, gate: Gate) {
+    /// The keys a call's written arguments pass: each hash literal's,
+    /// at its place, and the names its flat pairs pass, from where the
+    /// callee's named arguments begin.
+    pub(super) fn emit_arg_elements(&mut self, elements: &[Node<'a>], gate: &Gate, receiver: Option<crate::model::file_analysis::ReceiverParam>) {
+        use crate::model::file_analysis::slot_at_place;
+        let owner = match gate {
+            Gate::Strict(o) | Gate::StrictOrDefer(o, _) | Gate::Open(o) | Gate::ColumnKeyed(o) => Some(o),
+            Gate::Deferred(_) => None,
+        };
+        let params = owner.and_then(|o| self.local_params_of(o));
+        for (i, el) in elements.iter().enumerate() {
+            if el.is(Kind::AnonymousHashExpression) {
+                let place = i as u32;
+                let gate = match (gate, &params) {
+                    (Gate::Strict(o), Some(ps)) => Gate::Strict(o.clone().with_slot(slot_at_place(ps, receiver, place))),
+                    (Gate::StrictOrDefer(o, c), Some(ps)) => Gate::StrictOrDefer(o.clone().with_slot(slot_at_place(ps, receiver, place)), *c),
+                    (Gate::Open(o), Some(ps)) => Gate::Open(o.clone().with_slot(slot_at_place(ps, receiver, place))),
+                    _ => gate.clone(),
+                };
+                self.emit_arg_key_pairs(crate::cst::pair_nodes(*el), &gate, Some(place));
+            }
+        }
+        // A callee that takes places before its names (`my ($x, %o) = @_`)
+        // reads its pairs after them.
+        // TODO(named-arg-binding): a callee another file declares pairs from
+        // the first argument; its places are the index's to count.
+        let first = params.as_deref().map_or(0, |ps| crate::model::file_analysis::named_offset(ps, receiver)).min(elements.len());
+        self.emit_arg_key_pairs(crate::cst::pair_nodes_in(&elements[first..]), gate, None);
+    }
+
+    /// The parameters of the callable `owner` is the input of, where this
+    /// file declares it.
+    pub(super) fn local_params_of(&self, owner: &HashKeyOwner) -> Option<Vec<crate::model::file_analysis::ParamInfo>> {
+        let params = |s: &Symbol| match &s.detail {
+            SymbolDetail::Sub { params, .. } | SymbolDetail::Handler { params, .. } => Some(params.clone()),
+            _ => None,
+        };
+        match owner {
+            HashKeyOwner::AnonInput { callable, .. } => self.symbols.get(callable.0 as usize).and_then(params),
+            HashKeyOwner::Input { package, name, .. } => self
+                .symbols
+                .iter()
+                .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method) && &s.name == name && &s.package == package)
+                .find_map(params),
+            HashKeyOwner::Handler { owner: o, name, .. } => self
+                .symbols
+                .iter()
+                .filter(|s| &s.name == name && matches!(&s.detail, SymbolDetail::Handler { owner: h, .. } if h == o))
+                .find_map(params),
+            _ => None,
+        }
+    }
+
+    /// The keys of a pair walk, each bound as `gate` says; `place` is the
+    /// written argument whose hash literal they sit in.
+    pub(super) fn emit_arg_key_pairs(&mut self, pairs: Vec<(Node<'a>, Node<'a>)>, gate: &Gate, place: Option<u32>) {
         for (child, _value) in pairs {
             if !matches!(
                 child.kind_of(),
@@ -757,7 +818,7 @@ impl<'a> Builder<'a> {
             // (`RefBinding::CallArgKey`).
             use crate::model::file_analysis::RefBinding;
             let owned = |owner: HashKeyOwner| RefBinding::HashKey { owner, sym: None };
-            let binding: RefBinding = match &gate {
+            let binding: RefBinding = match gate {
                 Gate::Strict(owner) => {
                     if !self.has_hash_key_def(&key, owner) { continue; }
                     owned(owner.clone())
@@ -785,11 +846,11 @@ impl<'a> Builder<'a> {
                     if self.has_hash_key_def(&key, owner) {
                         owned(owner.clone())
                     } else {
-                        RefBinding::CallArgKey { call: *call }
+                        RefBinding::CallArgKey { call: *call, place }
                     }
                 }
                 Gate::Open(owner) => owned(owner.clone()),
-                Gate::Deferred(call) => RefBinding::CallArgKey { call: *call },
+                Gate::Deferred(call) => RefBinding::CallArgKey { call: *call, place },
             };
             let access = self.determine_access(child);
             // `scope_at_point` instead of `current_scope` so this
@@ -843,19 +904,21 @@ impl<'a> Builder<'a> {
         match region {
             HandlerArgs::Elements(span) => {
                 let Some(array) = at(span).filter(|n| n.is(Kind::AnonymousArrayExpression)) else { return };
-                crate::cst::flatten_list(crate::cst::literal_body(array), &mut elements);
+                // One element is the literal's own child; several sit in a list.
+                match crate::cst::literal_body(array) {
+                    body if body.id() == array.id() => elements.extend(array.named().filter(|n| !n.is_extra())),
+                    body => elements = crate::cst::list_elements(body),
+                }
             }
             HandlerArgs::After(span) => {
                 let Some(first) = at(span) else { return };
                 let Some(list) = self.syntax.parent(first) else { return };
-                let mut all = Vec::new();
-                crate::cst::flatten_list(list, &mut all);
+                let all = crate::cst::list_elements(list);
                 let Some(i) = all.iter().position(|n| n.id() == first.id()) else { return };
                 elements.extend_from_slice(&all[i + 1..]);
             }
         }
-        let pairs = crate::cst::pair_nodes_in(&elements);
-        self.emit_arg_key_pairs(pairs, Gate::Deferred(crate::model::witnesses::RefIdx(call as u32)));
+        self.emit_arg_elements(&elements, &Gate::Deferred(crate::model::witnesses::RefIdx(call as u32)), None);
     }
 
     /// Strict (no `found_by` broadening) check: is a HashKeyDef
@@ -867,7 +930,7 @@ impl<'a> Builder<'a> {
     pub(super) fn has_hash_key_def(&self, name: &str, owner: &HashKeyOwner) -> bool {
         self.symbols.iter().any(|s| {
             if s.name != name { return false; }
-            matches!(&s.detail, SymbolDetail::HashKeyDef { owner: o, .. } if self.as_registered(o) == owner)
+            matches!(&s.detail, SymbolDetail::HashKeyDef { owner: o, .. } if self.as_registered(o) == *owner)
         })
     }
 
@@ -974,3 +1037,4 @@ impl ElementWrite {
         matches!(self, ElementWrite::Compound)
     }
 }
+

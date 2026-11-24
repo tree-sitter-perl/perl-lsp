@@ -703,7 +703,7 @@ impl<'a> CandidateSet<'a> {
                 // declaration lives.
                 if let Some(callee) = analysis.arg_key_callee(r, Some(idx)) {
                     if let Some((Some(home), def)) =
-                        callee.key_defs(analysis, Some(idx)).into_iter().find(|(_, d)| d.name == r.target_name)
+                        callee.key_defs(analysis, Some(idx), r.arg_key_place()).into_iter().find(|(_, d)| d.name == r.target_name)
                     {
                         return vec![RefLocation::at(FileKey::Path(home.path.clone()), def.selection_span, AccessKind::Declaration)];
                     }
