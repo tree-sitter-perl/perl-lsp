@@ -375,7 +375,7 @@ fn completion_items_native(
     // The slot verdict (`docs/adr/cursor-slots.md`) — Perl's detector
     // wraps `cursor_context`'s tree-then-text chain unchanged.
     let crate::lsp::cursor_slot::DetectedSlot { slot, arm: slot_arm } = crate::lsp::cursor_slot::detect_slot(
-        analysis, tree, source, point, "perl", None, Some(module_index));
+        analysis, tree, source, point, "perl", None, Some(module_index), None);
     // Bare-sigil trigger (`$|`/`@|`/`%|`) decoded once so the match below
     // doesn't need a second borrow of `slot` inside its own arm.
     let sigil_trigger = slot.sigil();

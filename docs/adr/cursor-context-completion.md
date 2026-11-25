@@ -167,6 +167,20 @@ error, on the finished one. The labels resolve at detection against the
 analysis that named the callee, since the callee's symbol lives there, and
 `Slot::Label` carries them resolved.
 
+That finished analysis is a whole-file analysis (230 ms on laravel's
+152 KB `Builder.php`), and before the index lands it is the only thing that
+can name an unclosed call's callee. So an open document holds the callee it
+resolved there, as it holds its stable outline (`HeldCallee`, on
+`Document`, counter `cursor.held_callee.hit`): the answer is reused while
+the text up to the callee's end and the text from the cursor on are
+unchanged, which is exactly typing the call's arguments. Only the callee
+and its labels are held; the labels already used and the one being written
+are read afresh each keystroke. A written-buffer answer is never held, and
+is always tried first, so an answer the index can give replaces the held
+one. The index landing adds files and takes no declaration away, so a held
+answer stays right until the call head or the text after the cursor changes,
+though not always the richest the index could now give.
+
 ### Receiver → members: tree-free, reusing the bag
 
 The backend owns the tree work (it has the parser + cached tree); once it

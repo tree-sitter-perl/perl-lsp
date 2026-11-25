@@ -4546,7 +4546,7 @@ fn completion_items_in(path: &str, lang: &str, src: &str) -> Vec<tower_lsp::lsp_
     let tree = driver.for_path(&path).unwrap().make_parser().parse(&src, None).unwrap();
     let store = crate::index::open_docs::OpenDocs::new();
     let canon = crate::util::canonical_path::CanonicalPath::fixture(path);
-    let (items, _) = crate::lsp::backend::pack_completion(&store, &fa, &src, &tree, point, lang, Some(&canon), &idx);
+    let (items, _) = crate::lsp::backend::pack_completion(&store, &fa, &src, &tree, point, lang, Some(&canon), &idx, None);
     items
 }
 
@@ -5945,11 +5945,55 @@ fn a_label_reads_the_finished_buffer_only_where_the_written_one_has_no_call() {
             driver.analyze(patched)
         };
         let sp = crate::build::cursor_sentinel::sentinel_parse(&mut parser, &php_pack(), &src, &tree, cursor).unwrap();
-        let labels = crate::build::cursor_sentinel::call_labels(&sp, &php_pack(), &fa, None, &completed).unwrap();
+        let labels = crate::build::cursor_sentinel::call_labels(&sp, &php_pack(), &fa, None, &completed, None).unwrap();
         (labels.len(), analyzed.get())
     };
     assert_eq!(ask("connect(|"), (2, 1));
     assert_eq!(ask("connect(ho|, timeout: 1);\n"), (1, 0));
+}
+
+/// An open document holds the callee its unclosed call resolved through
+/// the finished buffer: typing the call's arguments analyzes the finished
+/// buffer once and answers as a fresh analysis would, and an edit before the
+/// callee or after the cursor resolves it again.
+#[cfg(feature = "php")]
+#[test]
+fn an_unclosed_call_holds_its_callee_across_keystrokes() {
+    let driver = crate::build::language_driver::LanguageRegistry::compiled().for_path(std::path::Path::new("t.php")).unwrap();
+    let held = crate::build::cursor_sentinel::HeldCallee::default();
+    let decl = "<?php\nfunction connect(string $host, int $timeout = 30) {}\nfunction pick(int $n) {}\n";
+    let ask = |body: &str, held: Option<&crate::build::cursor_sentinel::HeldCallee>| {
+        let marked = format!("{decl}{body}");
+        let cursor = marked.find('|').unwrap();
+        let src = marked.replacen('|', "", 1);
+        let fa = driver.analyze(&src);
+        let mut parser = driver.make_parser();
+        let tree = parser.parse(&src, None).unwrap();
+        let analyzed = std::cell::Cell::new(0);
+        let completed = |patched: &str| {
+            analyzed.set(analyzed.get() + 1);
+            driver.analyze(patched)
+        };
+        let sp = crate::build::cursor_sentinel::sentinel_parse(&mut parser, &php_pack(), &src, &tree, cursor).unwrap();
+        let mut labels: Vec<String> = crate::build::cursor_sentinel::call_labels(&sp, &php_pack(), &fa, None, &completed, held)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
+        labels.sort();
+        (labels, analyzed.get())
+    };
+    let (mut fresh_analyses, mut held_analyses) = (0, 0);
+    for body in ["connect(|", "connect(h|", "connect(host: 'h', |", "connect(host: 'h', ti|"] {
+        let (fresh, analyzed) = ask(body, None);
+        let (labels, analyzed_held) = ask(body, Some(&held));
+        assert_eq!(labels, fresh, "{body:?}");
+        fresh_analyses += analyzed;
+        held_analyses += analyzed_held;
+    }
+    assert_eq!((fresh_analyses, held_analyses), (4, 1));
+    assert_eq!(ask("connect(host: 'h', |\n// edited\n", Some(&held)), (vec!["timeout:".to_string()], 1), "an edit after the cursor");
+    assert_eq!(ask("pick(|\n// edited\n", Some(&held)), (vec!["n:".to_string()], 1), "another callee");
 }
 
 /// The written buffer's unclosed call can swallow the rest of the file,

@@ -447,6 +447,7 @@ pub fn call_labels(
     analysis: &FileAnalysis,
     module_index: Option<&dyn CrossFileLookup>,
     completed: &dyn Fn(&str) -> FileAnalysis,
+    held: Option<&HeldCallee>,
 ) -> Option<Vec<crate::model::file_analysis::CompletionCandidate>> {
     let site = label_site(sp, cfg)?;
     let _session = crate::model::witnesses::ResolutionSession::enter(module_index);
@@ -456,13 +457,67 @@ pub fn call_labels(
     let on = |fa: &FileAnalysis| {
         let callee = fa.callee_at(site.callee.start, module_index)?;
         let labels = callee.labels(fa, module_index);
-        (callee.at.is_some() || !labels.is_empty())
-            .then(|| FileAnalysis::complete_call_labels(&callee, &labels, &site.used, &site.written))
+        (callee.at.is_some() || !labels.is_empty()).then_some((callee, labels))
     };
     let start = point_to_byte(sp.src, site.callee.start);
     let written_failed = || sp.closed_open || parsed_as_error(sp.written, start, sp.cursor);
-    let labels = on(analysis).or_else(|| written_failed().then(|| on(sp.finished(completed))).flatten());
-    Some(labels.unwrap_or_default())
+    let answer = on(analysis).or_else(|| {
+        if !written_failed() {
+            return None;
+        }
+        let head = &sp.src[..point_to_byte(sp.src, site.callee.end)];
+        let tail = &sp.src[sp.cursor.min(sp.src.len())..];
+        if let Some(answer) = held.and_then(|h| h.get(head, tail)) {
+            return Some(answer);
+        }
+        let answer = on(sp.finished(completed))?;
+        if let Some(h) = held {
+            h.hold(head, tail, &answer);
+        }
+        Some(answer)
+    });
+    Some(
+        answer
+            .map(|(callee, labels)| FileAnalysis::complete_call_labels(&callee, &labels, &site.used, &site.written))
+            .unwrap_or_default(),
+    )
+}
+
+/// The callee an open document's unclosed call last resolved through the
+/// finished buffer, held across keystrokes as the document holds its stable
+/// outline: analyzing the finished buffer costs a whole-file analysis, and
+/// typing an argument changes neither what names the callee nor where it is
+/// declared.
+///
+/// The answer holds while the text up to the callee's end and the text from
+/// the cursor on are as they were when it was made: only the argument being
+/// typed between them moved, which `complete_call_labels` re-reads each time
+/// (the labels already used, the one being written). A written-buffer answer
+/// is never held; it is cheap and always tried first, so the index landing
+/// still answers through it. One entry per document.
+#[derive(Default)]
+pub struct HeldCallee(std::sync::Mutex<Option<Held>>);
+
+struct Held {
+    head: String,
+    tail: String,
+    callee: crate::model::file_analysis::Callee,
+    labels: Vec<String>,
+}
+
+impl HeldCallee {
+    fn get(&self, head: &str, tail: &str) -> Option<(crate::model::file_analysis::Callee, Vec<String>)> {
+        let held = self.0.lock().ok()?;
+        let h = held.as_ref().filter(|h| h.head == head && h.tail == tail)?;
+        crate::util::ghost_stats::count("cursor.held_callee.hit");
+        Some((h.callee.clone(), h.labels.clone()))
+    }
+
+    fn hold(&self, head: &str, tail: &str, (callee, labels): &(crate::model::file_analysis::Callee, Vec<String>)) {
+        if let Ok(mut held) = self.0.lock() {
+            *held = Some(Held { head: head.to_owned(), tail: tail.to_owned(), callee: callee.clone(), labels: labels.clone() });
+        }
+    }
 }
 
 /// The completion context at a dangling member access: the receiver's type

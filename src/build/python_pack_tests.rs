@@ -1293,7 +1293,7 @@ def f(c: Counter):
     let tree = parser.parse(src, None).unwrap();
     let store = crate::index::open_docs::OpenDocs::new();
     let (items, _) =
-        crate::lsp::backend::pack_completion(&store, &fa, src, &tree, Point::new(8, 6), "python", Some(&crate::util::canonical_path::CanonicalPath::resolve(path.clone())), &idx);
+        crate::lsp::backend::pack_completion(&store, &fa, src, &tree, Point::new(8, 6), "python", Some(&crate::util::canonical_path::CanonicalPath::resolve(path.clone())), &idx, None);
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
     for name in ["n", "count", "bump", "__init__"] {
         assert!(labels.contains(&name), "{name} in {labels:?}");
@@ -2534,7 +2534,7 @@ fn a_call_argument_completes_the_callees_labels() {
     };
     let labels = |byte: usize| -> Vec<(String, Option<String>)> {
         let (items, _) =
-            crate::lsp::backend::pack_completion(&store, &fa, &app_src, &tree, point_of(byte), "python", Some(&canon), &idx);
+            crate::lsp::backend::pack_completion(&store, &fa, &app_src, &tree, point_of(byte), "python", Some(&canon), &idx, None);
         items.into_iter().filter(|i| i.label.ends_with('=')).map(|i| (i.label, i.insert_text)).collect()
     };
     assert_eq!(
@@ -2560,7 +2560,7 @@ fn calling_a_class_completes_its_init_labels() {
     let tree = parser.parse(src, None).unwrap();
     let store = crate::index::open_docs::OpenDocs::new();
     let canon = crate::util::canonical_path::CanonicalPath::resolve(path.clone());
-    let (items, _) = crate::lsp::backend::pack_completion(&store, &fa, src, &tree, Point::new(4, 6), "python", Some(&canon), &idx);
+    let (items, _) = crate::lsp::backend::pack_completion(&store, &fa, src, &tree, Point::new(4, 6), "python", Some(&canon), &idx, None);
     let labels: Vec<String> = items.into_iter().map(|i| i.label).filter(|l| l.ends_with('=')).collect();
     assert_eq!(labels, ["x=", "y="]);
 }
@@ -2697,7 +2697,7 @@ fn an_unclosed_call_completes_its_labels() {
         let tree = driver.for_path(&path).unwrap().make_parser().parse(&src, None).unwrap();
         let store = crate::index::open_docs::OpenDocs::new();
         let canon = crate::util::canonical_path::CanonicalPath::fixture(path);
-        let (items, _) = crate::lsp::backend::pack_completion(&store, &fa, &src, &tree, point, "python", Some(&canon), &idx);
+        let (items, _) = crate::lsp::backend::pack_completion(&store, &fa, &src, &tree, point, "python", Some(&canon), &idx, None);
         let mut l: Vec<String> = items.into_iter().map(|i| i.label).filter(|l| l.ends_with('=')).collect();
         l.sort();
         l

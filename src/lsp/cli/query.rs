@@ -322,6 +322,7 @@ impl<'a> ScopedOpenDoc<'a> {
             baseline_surface: None,
             path: Some(path.to_path_buf()),
             canonical_path: Default::default(),
+            held_callee: Default::default(),
         };
         ws.insert_open(url.clone(), doc);
         let key = ws.key_of(&url);
@@ -636,7 +637,7 @@ fn run_one(
                 let canon = doc.path.as_ref().map(CanonicalPath::resolve);
                 tphase!("completion_items", backend::pack_completion(
                     ws, &doc.analysis, &doc.text, &doc.tree, point, doc.language,
-                    canon.as_ref(), idx))
+                    canon.as_ref(), idx, Some(&doc.held_callee)))
             } else {
                 tphase!("completion_items", symbols::completion_items(
                     ws, &open_docs::FileKey::Path(CanonicalPath::resolve(file)),

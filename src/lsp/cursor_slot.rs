@@ -229,6 +229,7 @@ pub fn detect_slot(
     language: &str,
     path: Option<&std::path::Path>,
     module_index: Option<&dyn CrossFileLookup>,
+    held: Option<&crate::build::cursor_sentinel::HeldCallee>,
 ) -> DetectedSlot {
     let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let cursor = crate::build::cursor_sentinel::point_to_byte(source, point);
@@ -289,7 +290,7 @@ pub fn detect_slot(
     // identifier universe still answers, the callee's named inputs join it.
     if let Some(labels) = sp
         .as_ref()
-        .and_then(|sp| crate::build::cursor_sentinel::call_labels(sp, &lang_pack, analysis, module_index, &completed))
+        .and_then(|sp| crate::build::cursor_sentinel::call_labels(sp, &lang_pack, analysis, module_index, &completed, held))
     {
         return DetectedSlot {
             slot: Slot::Label { prefix: identifier_prefix(source, cursor).to_string(), labels },
