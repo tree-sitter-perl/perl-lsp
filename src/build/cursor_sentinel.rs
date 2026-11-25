@@ -76,6 +76,7 @@ pub struct Receiver {
 /// the patched buffer. The cursor is expected to sit just after a `.` /
 /// `->` (possibly with trailing whitespace / a partial member already
 /// typed — the caller strips that; here we patch exactly at `cursor`).
+#[cfg(test)]
 pub fn patch(src: &str, cursor: usize) -> String {
     let mut out = String::with_capacity(src.len() + SENTINEL.len());
     out.push_str(&src[..cursor]);
@@ -209,6 +210,17 @@ pub struct SentinelParse<'w> {
 
 /// The sentinel parse at `cursor`, or `None` where no arm may splice: the
 /// cursor sits in a string, char or comment of the written parse.
+///
+/// A construct the user is still typing has no closer yet (`f(a, ti|`), so
+/// the sentinel can land in an ERROR with no call around it, or in a list
+/// that swallowed the code after it. Then the parse is retried once with
+/// the closer of the innermost open bracket before the cursor that nothing
+/// closes, and the retry is kept only when that bracket and the spliced
+/// closer are children of one node that parsed. The pairs are the
+/// document's (`query_extract::Recovery`), and the check never asks which
+/// arm will read the tree. At most two parses per request, at any depth:
+/// outer brackets belong to the constructs around the cursor, and the code
+/// after the cursor may close them.
 pub fn sentinel_parse<'w>(
     parser: &mut Parser,
     cfg: &crate::build::query_extract::LangPack,
@@ -219,19 +231,162 @@ pub fn sentinel_parse<'w>(
     if cursor_in_skip(written, src, cursor, cfg) {
         return None;
     }
-    let patched = patch(src, cursor);
-    let mut edited = written.clone();
+    let (patched, tree) = reparse_with(parser, src, written, cursor, SENTINEL)?;
+    let plain = SentinelParse { written, src, cursor, patched, tree };
+    if !plain.tree.root_node().has_error() {
+        return Some(plain);
+    }
+    let Some(rec) = crate::build::query_extract::recovery(&written.language(), cfg).filter(|r| !r.is_empty()) else {
+        return Some(plain);
+    };
+    let Some(open) = unclosed_open(&plain.tree, cursor, rec) else { return Some(plain) };
+    let Some((close, close_text)) = rec.closer_of(open.kind) else { return Some(plain) };
+    // The space keeps a closer from fusing with the sentinel into one word.
+    let insert = format!("{SENTINEL} {close_text}");
+    crate::util::ghost_stats::count("cursor.recovery.retry");
+    let Some((patched, tree)) = reparse_with(parser, src, written, cursor, &insert) else { return Some(plain) };
+    let at = cursor + SENTINEL.len() + 1;
+    if pair_holds(&tree, open.at, open.kind, at, close) {
+        return Some(SentinelParse { written, src, cursor, patched, tree });
+    }
+    crate::util::ghost_stats::count("cursor.recovery.rejected");
+    Some(plain)
+}
+
+/// Reparse `src` with `insert` spliced at `cursor`, reusing `old`: the
+/// splice is a pure insertion on one row, so the edit is exact and only the
+/// damaged region reparses. Every byte before `cursor` keeps its offset.
+fn reparse_with(parser: &mut Parser, src: &str, old: &Tree, cursor: usize, insert: &str) -> Option<(String, Tree)> {
+    let mut patched = String::with_capacity(src.len() + insert.len());
+    patched.push_str(&src[..cursor]);
+    patched.push_str(insert);
+    patched.push_str(&src[cursor..]);
+    let mut edited = old.clone();
     let pos = byte_to_point(src, cursor);
     edited.edit(&InputEdit {
         start_byte: cursor,
         old_end_byte: cursor,
-        new_end_byte: cursor + SENTINEL.len(),
+        new_end_byte: cursor + insert.len(),
         start_position: pos,
         old_end_position: pos,
-        new_end_position: Point::new(pos.row, pos.column + SENTINEL.len()),
+        new_end_position: Point::new(pos.row, pos.column + insert.len()),
     });
     let tree = parser.parse(&patched, Some(&edited))?;
-    Some(SentinelParse { written, src, cursor, patched, tree })
+    Some((patched, tree))
+}
+
+/// An open bracket token: where it starts and its kind.
+#[derive(Clone, Copy)]
+struct OpenToken {
+    at: usize,
+    kind: u16,
+}
+
+/// The innermost declared open bracket before `cursor` that the plain
+/// sentinel parse leaves without a real closer, or `None` when the
+/// innermost one is closed (the cursor is inside a construct that parsed,
+/// whatever the rest of the file did).
+///
+/// One descent from the root to the sentinel, then each node on that path
+/// read from the inside out: its children before the cursor, right to
+/// left, popping a bracket per closer. A child that parsed whole is
+/// balanced by the grammar and skipped; one holding an error is read too,
+/// since an ERROR keeps the tokens it could not place.
+fn unclosed_open(tree: &Tree, cursor: usize, rec: &crate::build::query_extract::Recovery) -> Option<OpenToken> {
+    let path = path_to(tree.root_node(), cursor, cursor + SENTINEL.len());
+    let mut pending = 0usize;
+    for (depth, anc) in path.iter().enumerate().rev() {
+        let mut w = anc.walk();
+        let mut todo: Vec<Node> = anc.children(&mut w).filter(|c| c.end_byte() <= cursor).collect();
+        while let Some(n) = todo.pop() {
+            if n.child_count() > 0 {
+                if n.has_error() {
+                    let mut w = n.walk();
+                    todo.extend(n.children(&mut w));
+                }
+                continue;
+            }
+            if n.is_named() || n.is_missing() {
+                continue;
+            }
+            let kind = n.kind_id();
+            if rec.is_close(kind) {
+                pending += 1;
+            } else if rec.is_open(kind) {
+                if pending > 0 {
+                    pending -= 1;
+                    continue;
+                }
+                let open = OpenToken { at: n.start_byte(), kind };
+                // Its closer, if the plain parse gave it one, is a sibling
+                // after the cursor that the grammar did not invent; a
+                // bracket an ERROR holds has none.
+                let holder = holder_of(&path[..=depth], n.start_byte());
+                let (close, _) = rec.closer_of(kind)?;
+                let closed = holder.is_some_and(|h| {
+                    let mut w = h.walk();
+                    let found = !h.is_error()
+                        && h.children(&mut w).any(|c| c.start_byte() >= cursor && !c.is_missing() && c.kind_id() == close);
+                    found
+                });
+                return (!closed).then_some(open);
+            }
+        }
+    }
+    None
+}
+
+/// The nodes from `root` down to the smallest one covering `start..end`.
+fn path_to(root: Node<'_>, start: usize, end: usize) -> Vec<Node<'_>> {
+    let mut path = vec![root];
+    loop {
+        let node = *path.last().expect("the path starts at the root");
+        let mut w = node.walk();
+        let next = node.children(&mut w).find(|c| c.start_byte() <= start && c.end_byte() >= end);
+        match next {
+            Some(c) => path.push(c),
+            None => return path,
+        }
+    }
+}
+
+/// The node that holds the leaf starting at `at` as a direct child: the
+/// deepest one on the descent from `path`'s innermost node toward `at`.
+fn holder_of<'t>(path: &[Node<'t>], at: usize) -> Option<Node<'t>> {
+    let mut node = *path.last()?;
+    loop {
+        let mut w = node.walk();
+        let child = node.children(&mut w).find(|c| c.start_byte() <= at && at < c.end_byte().max(c.start_byte() + 1))?;
+        if child.child_count() == 0 {
+            return (child.start_byte() == at).then_some(node);
+        }
+        node = child;
+    }
+}
+
+/// The retry did what it meant to: the open bracket at `open_at` and the
+/// closer spliced at `close_at` are children of one node that parsed, the
+/// closer real, not one the grammar invented. Nodes above the holder may
+/// be ERRORs (`f(a, g(|` closes `g`'s call inside a statement that stays
+/// broken). A descent from the root toward the pair, so no step climbs.
+fn pair_holds(tree: &Tree, open_at: usize, open: u16, close_at: usize, close: u16) -> bool {
+    let mut node = tree.root_node();
+    loop {
+        let mut w = node.walk();
+        let kids: Vec<Node> = node.children(&mut w).collect();
+        let leaf = |at: usize, kind: u16| {
+            kids.iter().any(|c| c.child_count() == 0 && c.start_byte() == at && c.kind_id() == kind && !c.is_missing())
+        };
+        if leaf(open_at, open) && leaf(close_at, close) {
+            // An ERROR around the holder is the rest of the statement, still
+            // half-typed; only the holder itself must have parsed.
+            return !node.is_error();
+        }
+        match kids.into_iter().find(|c| c.start_byte() <= open_at && c.end_byte() > close_at) {
+            Some(c) => node = c,
+            None => return false,
+        }
+    }
 }
 
 /// The identity being typed at the cursor, where the document spells one a

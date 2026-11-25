@@ -1008,3 +1008,10 @@
       type: "const" @import.constant
       . (name) @import.name @ref.constant
       alias: (name)? @import.alias)))
+
+; ---- half-typed code: the expression brackets the cursor reparse may close
+; when the user has not typed the closer yet (`f(a, |`). A token fact, stated
+; once for the document. Never a block brace: an unclosed `{` is the normal
+; state while writing a body, and closing it would buy a retry per request
+; for nothing a cursor arm reads. ----
+((ERROR) (#recover-pair! "(" ")") (#recover-pair! "[" "]"))

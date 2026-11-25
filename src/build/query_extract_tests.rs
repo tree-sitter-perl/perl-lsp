@@ -4580,3 +4580,18 @@ fn a_gate_reaches_its_statement_through_any_depth_of_stores() {
     assert_eq!(ends("/x/s.cpp", &format!("{cpp}void f() {{ int a = 1, b = fatal(); }}\n"), "f"), Ends::UNWINDS);
     assert!(ends("/x/s.cpp", &format!("{cpp}void f() {{ int c = 0; int a = c && fatal(); }}\n"), "f").completes());
 }
+
+/// A recovery pair is two tokens of the grammar, and an open takes one
+/// closer: anything else fails the compile instead of closing the wrong
+/// bracket at a cursor.
+#[test]
+fn a_recovery_pair_names_tokens_of_the_grammar_once() {
+    let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
+    let read = |src: &str| Recovery::read(&tree_sitter::Query::new(&lang, src).unwrap(), &lang);
+    let ok = read(r#"((ERROR) (#recover-pair! "(" ")") (#recover-pair! "[" "]"))"#).unwrap();
+    let paren = lang.id_for_node_kind("(", false);
+    assert_eq!(ok.closer_of(paren).map(|(_, t)| t), Some(")"));
+    assert!(read(r#"((ERROR) (#recover-pair! "(" "<<<"))"#).unwrap_err().contains("not a token"));
+    assert!(read(r#"((ERROR) (#recover-pair! "(" ")") (#recover-pair! "(" "]"))"#).unwrap_err().contains("two closers"));
+    assert!(read(r#"((ERROR) (#recover-pair! "("))"#).is_err());
+}

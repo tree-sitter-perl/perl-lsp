@@ -66,6 +66,25 @@ pub struct MemberCompletionCtx { receiver_type: Option<InferredType>, op_fix: Op
 arm that reads the finished buffer (member, identity, domain comparison),
 so a completion pays one reparse whichever arm answers.
 
+**Half-typed brackets.** A call the user is still writing has no closer
+(`f(a, ti|`), so the plain splice can leave the sentinel in an ERROR with no
+call around it, or in a list that swallowed the code after it. When the plain
+parse has an error, `sentinel_parse` finds the innermost declared open bracket
+before the cursor that nothing closes (one descent from the root to the
+sentinel, reading each node's children before the cursor right to left and
+descending only into subtrees that hold an error) and reparses once with
+`__CURSOR__ <closer>`. The retry is kept only when that open and the spliced
+closer are children of one non-ERROR node and the closer is not MISSING;
+anything else keeps the plain parse. No terminator vocabulary, no arm-specific
+accept, and at most two parses per request at any depth: the outer brackets
+belong to the code after the cursor. Which tokens pair is the document's
+`#recover-pair!` declaration (`pack-vocabulary.md`). Counters:
+`cursor.recovery.retry`, `cursor.recovery.rejected`. Known hole: cpp
+`g(a, |` with no `;` before the `}` retries into a tree whose call is right
+but whose enclosing `void f() {…}` reads as a declaration with an initializer
+list. No cpp arm reads that tree today; pack signature help must, with it as
+its first test.
+
 Two properties make it cheap and exact:
 
 - **Free anchor.** The splice lands *at* the cursor, strictly after the
