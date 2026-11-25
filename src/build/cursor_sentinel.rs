@@ -206,6 +206,23 @@ pub struct SentinelParse<'w> {
     pub cursor: usize,
     pub patched: String,
     pub tree: Tree,
+    /// Whether `patched` closes a bracket the written buffer left open
+    /// after the sentinel (`sentinel_parse`'s retry was kept).
+    pub closed_open: bool,
+    /// The analysis of `patched`, made the first time an arm needs what
+    /// the written buffer failed to state, and never twice per request.
+    finished: std::cell::OnceCell<FileAnalysis>,
+}
+
+impl SentinelParse<'_> {
+    /// The finished buffer's analysis through `completed` (the language's
+    /// own analysis of a buffer), shared by every arm of this request.
+    pub fn finished(&self, completed: &dyn Fn(&str) -> FileAnalysis) -> &FileAnalysis {
+        self.finished.get_or_init(|| {
+            crate::util::ghost_stats::count("cursor.finished_analysis");
+            completed(&self.patched)
+        })
+    }
 }
 
 /// The sentinel parse at `cursor`, or `None` where no arm may splice: the
@@ -232,7 +249,7 @@ pub fn sentinel_parse<'w>(
         return None;
     }
     let (patched, tree) = reparse_with(parser, src, written, cursor, SENTINEL)?;
-    let plain = SentinelParse { written, src, cursor, patched, tree };
+    let plain = SentinelParse { written, src, cursor, patched, tree, closed_open: false, finished: Default::default() };
     if !plain.tree.root_node().has_error() {
         return Some(plain);
     }
@@ -247,7 +264,7 @@ pub fn sentinel_parse<'w>(
     let Some((patched, tree)) = reparse_with(parser, src, written, cursor, &insert) else { return Some(plain) };
     let at = cursor + SENTINEL.len() + 1;
     if pair_holds(&tree, open.at, open.kind, at, close) {
-        return Some(SentinelParse { written, src, cursor, patched, tree });
+        return Some(SentinelParse { written, src, cursor, patched, tree, closed_open: true, finished: Default::default() });
     }
     crate::util::ghost_stats::count("cursor.recovery.rejected");
     Some(plain)
@@ -412,6 +429,42 @@ pub fn label_site(
         .label_site_at(sp.cursor, word_start)
 }
 
+/// The labels a call may still pass where the cursor writes one of its
+/// arguments as a bare word (`label_site`), `None` where it writes no
+/// argument. Empty when the callee takes no label or none resolves.
+///
+/// The callee is read through the one call → callee binding every
+/// named-argument consumer shares (`FileAnalysis::callee_at`), on the
+/// written buffer's analysis. A call the user has not closed (`f(a, |`)
+/// often leaves no call there, or one that swallowed the rest of the file
+/// and the declaration with it; then, where the written buffer failed to
+/// close or parse the call, the finished buffer's analysis answers: the
+/// same document over the same callee bytes. The labels are resolved against
+/// the analysis that named the callee, since its symbol lives there.
+pub fn call_labels(
+    sp: &SentinelParse<'_>,
+    cfg: &crate::build::query_extract::LangPack,
+    analysis: &FileAnalysis,
+    module_index: Option<&dyn CrossFileLookup>,
+    completed: &dyn Fn(&str) -> FileAnalysis,
+) -> Option<Vec<crate::model::file_analysis::CompletionCandidate>> {
+    let site = label_site(sp, cfg)?;
+    let _session = crate::model::witnesses::ResolutionSession::enter(module_index);
+    // An answer is one that found the callee's declaration, or labels
+    // without one: a call by name alone may be the written buffer's
+    // misreading, the declaration swallowed by the unclosed call.
+    let on = |fa: &FileAnalysis| {
+        let callee = fa.callee_at(site.callee.start, module_index)?;
+        let labels = callee.labels(fa, module_index);
+        (callee.at.is_some() || !labels.is_empty())
+            .then(|| FileAnalysis::complete_call_labels(&callee, &labels, &site.used, &site.written))
+    };
+    let start = point_to_byte(sp.src, site.callee.start);
+    let written_failed = || sp.closed_open || parsed_as_error(sp.written, start, sp.cursor);
+    let labels = on(analysis).or_else(|| written_failed().then(|| on(sp.finished(completed))).flatten());
+    Some(labels.unwrap_or_default())
+}
+
 /// The completion context at a dangling member access: the receiver's type
 /// (for listing members) plus, when the typed operator disagrees with the
 /// receiver's pointer depth, the single-level `.`↔`->` fix to swap it. One
@@ -453,7 +506,7 @@ pub fn member_completion_ctx(
     module_index: Option<&dyn CrossFileLookup>,
     completed: &dyn Fn(&str) -> FileAnalysis,
 ) -> Option<MemberCompletionCtx> {
-    let SentinelParse { written: old, src, cursor, ref patched, ref tree } = *sp;
+    let SentinelParse { written: old, src, cursor, ref patched, ref tree, .. } = *sp;
     let doc = CursorDocument::new(tree, patched.as_bytes(), cfg)?;
     let site = doc.member_named_at(cursor)?;
     // Downstream projects `class_name()` without an index, so the
@@ -463,7 +516,7 @@ pub fn member_completion_ctx(
     let receiver_type = resolve_node_type(site.recv, &doc, cfg, &patched, analysis, module_index)
         .or_else(|| {
             parsed_as_error(old, site.recv.start_byte(), site_end)
-                .then(|| resolve_node_type(site.recv, &doc, cfg, &patched, &completed(&patched), module_index))
+                .then(|| resolve_node_type(site.recv, &doc, cfg, &patched, sp.finished(completed), module_index))
                 .flatten()
         })
         .map(|t| analysis.refine_instance_dispatch(t, module_index));

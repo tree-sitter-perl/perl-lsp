@@ -5891,3 +5891,74 @@ $h(limit: 3);
         [(1, lines[1].find("$b").unwrap() + 1), (1, lines[1].rfind("$b").unwrap() + 1), (2, lines[2].find("b:").unwrap())]
     );
 }
+
+/// A call the user has not closed completes the labels it would have
+/// closed: the cursor reparse closes the innermost open bracket, and the
+/// callee is read on the finished buffer where the written one left none.
+#[cfg(feature = "php")]
+#[test]
+fn an_unclosed_call_completes_its_labels() {
+    let decl = "<?php\nfunction connect(string $host, int $timeout = 30, bool $retry = false) {}\nfunction pick(int $n) {}\n";
+    let labels = |body: &str| -> Vec<String> {
+        let mut l: Vec<String> =
+            completion_items(&format!("{decl}{body}")).into_iter().map(|i| i.label).filter(|l| l.ends_with(':')).collect();
+        l.sort();
+        l
+    };
+    let all = ["host:", "retry:", "timeout:"];
+    for (body, want) in [
+        ("connect(ti|", &all[..]),
+        ("connect(host: 'h', |", &["retry:", "timeout:"][..]),
+        ("connect(host: 'h', |\n$x = 2;\n", &["retry:", "timeout:"]),
+        ("function h() {\n    $y = connect(host: 'h', |\n    return $y;\n}\n", &["retry:", "timeout:"]),
+        ("connect(host: pick(|", &["n:"]),
+        ("connect(host: pick(|\n$x = 2;\n", &["n:"]),
+        ("connect([1, 2], |", &all),
+        ("$z = [connect(|", &all),
+        ("connect([1, |", &[]),
+        ("connect(host: (|", &[]),
+        ("connect(ho|, retry: true);\n", &["host:", "timeout:"]),
+        ("connect(pick(|, retry: true);\n", &["n:"]),
+        ("if (connect(|\n) {\n}\n", &all),
+    ] {
+        assert_eq!(labels(body), want, "{body:?}");
+    }
+}
+
+/// The finished buffer is analyzed for a label only where the written
+/// buffer's analysis has no call to read.
+#[cfg(feature = "php")]
+#[test]
+fn a_label_reads_the_finished_buffer_only_where_the_written_one_has_no_call() {
+    let driver = crate::build::language_driver::LanguageRegistry::compiled().for_path(std::path::Path::new("t.php")).unwrap();
+    let decl = "<?php\nfunction connect(string $host, int $timeout = 30) {}\n";
+    let ask = |body: &str| {
+        let marked = format!("{decl}{body}");
+        let cursor = marked.find('|').unwrap();
+        let src = marked.replacen('|', "", 1);
+        let fa = driver.analyze(&src);
+        let mut parser = driver.make_parser();
+        let tree = parser.parse(&src, None).unwrap();
+        let analyzed = std::cell::Cell::new(0);
+        let completed = |patched: &str| {
+            analyzed.set(analyzed.get() + 1);
+            driver.analyze(patched)
+        };
+        let sp = crate::build::cursor_sentinel::sentinel_parse(&mut parser, &php_pack(), &src, &tree, cursor).unwrap();
+        let labels = crate::build::cursor_sentinel::call_labels(&sp, &php_pack(), &fa, None, &completed).unwrap();
+        (labels.len(), analyzed.get())
+    };
+    assert_eq!(ask("connect(|"), (2, 1));
+    assert_eq!(ask("connect(ho|, timeout: 1);\n"), (1, 0));
+}
+
+/// The written buffer's unclosed call can swallow the rest of the file,
+/// the callee's declaration with it: a call by name alone is no answer,
+/// and the finished buffer's analysis names the declaration.
+#[cfg(feature = "php")]
+#[test]
+fn an_unclosed_call_before_its_callees_declaration_completes_its_labels() {
+    let src = "<?php\nclass B {\n  public function where($column) {\n    $this->orderBy(column: 'id', |\n    return $this;\n  }\n  public function orderBy($column, $direction = 'asc') { return $this; }\n}\n";
+    let labels: Vec<String> = completion_items(src).into_iter().map(|i| i.label).filter(|l| l.ends_with(':')).collect();
+    assert_eq!(labels, ["direction:"]);
+}

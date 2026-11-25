@@ -2675,3 +2675,49 @@ C(timeout=1)
         "a ClassVar is no field"
     );
 }
+
+/// A call the user has not closed completes the labels it would have
+/// closed: the cursor reparse closes the innermost open bracket, and the
+/// callee is read on the finished buffer where the written one left none.
+#[cfg(feature = "python")]
+#[test]
+fn an_unclosed_call_completes_its_labels() {
+    let decl = "def local(name, size=1):\n    pass\n\ndef pick(n, m=2):\n    pass\n\nclass K:\n    def go(self, speed=1):\n        pass\n\nk = K()\n";
+    let labels = |body: &str| -> Vec<String> {
+        let marked = format!("{decl}{body}");
+        let at = marked.find('|').unwrap();
+        let src = marked.replacen('|', "", 1);
+        let row = src[..at].matches('\n').count();
+        let point = Point::new(row, at - src[..at].rfind('\n').map_or(0, |n| n + 1));
+        let path = std::path::PathBuf::from("complete.py");
+        let driver = crate::build::language_driver::LanguageRegistry::compiled();
+        let idx = crate::index::module_index::ModuleIndex::new_for_test();
+        idx.insert_workspace_for_test(path.clone(), driver.for_path(&path).unwrap().analyze(&src));
+        let fa = idx.workspace_file_for_test(&path).unwrap();
+        let tree = driver.for_path(&path).unwrap().make_parser().parse(&src, None).unwrap();
+        let store = crate::index::open_docs::OpenDocs::new();
+        let canon = crate::util::canonical_path::CanonicalPath::fixture(path);
+        let (items, _) = crate::lsp::backend::pack_completion(&store, &fa, &src, &tree, point, "python", Some(&canon), &idx);
+        let mut l: Vec<String> = items.into_iter().map(|i| i.label).filter(|l| l.ends_with('=')).collect();
+        l.sort();
+        l
+    };
+    let both = ["name=", "size="];
+    for (body, want) in [
+        ("local(|", &both[..]),
+        ("local(name=1, |", &["size="][..]),
+        ("local(name=1, |\nx = 2\n", &["size="]),
+        ("def h():\n    x = local(name=1, |\n    return x\n", &["size="]),
+        ("local(name=1, pick(|", &["m=", "n="]),
+        ("local(name=1, pick(|\nx = 2\n", &["m=", "n="]),
+        ("local([1, 2], |", &both),
+        ("local([1, |", &[]),
+        ("local(name=1, {'a': |", &[]),
+        ("local(name=1, (|", &[]),
+        ("k.go(|", &["speed="]),
+        ("local(na|, size=2)\n", &["name="]),
+        ("local(pick(|, size=2)\n", &["m=", "n="]),
+    ] {
+        assert_eq!(labels(body), want, "{body:?}");
+    }
+}

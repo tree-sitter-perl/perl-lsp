@@ -115,8 +115,8 @@ pub fn pack_completion(
     let mut items = symbols::in_scope_completion(analysis, point);
     // `f(ti|` — the word may be a value or a label: the callee's named
     // inputs join the identifier universe, ahead of it.
-    if let crate::lsp::cursor_slot::Slot::Label { site, .. } = &slot {
-        items.extend(call_labels(analysis, xidx, site));
+    if let crate::lsp::cursor_slot::Slot::Label { labels, .. } = &slot {
+        items.extend(labels.iter().cloned().map(symbols::candidate_to_completion_item));
     }
     let macros_live = macro_completion(source, point, language, path, &mut items);
     let closure_live = closure_symbol_completion(
@@ -124,23 +124,6 @@ pub fn pack_completion(
     // The shared finisher — the same cap, prefix rule, and flag
     // composition the Perl assembly exits through.
     symbols::finish_completion(items, &slot, false, macros_live || closure_live)
-}
-
-/// The labels a call may still pass: the call's callee (`callee_of`),
-/// read through the one call → callee binding every named-argument
-/// consumer shares.
-fn call_labels(
-    analysis: &crate::model::file_analysis::FileAnalysis,
-    module_index: &dyn crate::model::file_analysis::CrossFileLookup,
-    site: &crate::build::query_extract::LabelSite,
-) -> Vec<CompletionItem> {
-    let _session = crate::model::witnesses::ResolutionSession::enter(Some(module_index));
-    let Some(callee) = analysis.callee_at(site.callee.start, Some(module_index)) else { return Vec::new() };
-    let labels = callee.labels(analysis, Some(module_index));
-    crate::model::file_analysis::FileAnalysis::complete_call_labels(&callee, &labels, &site.used, &site.written)
-        .into_iter()
-        .map(symbols::candidate_to_completion_item)
-        .collect()
 }
 
 /// Move a domain's enum members to the front of the completion list with a

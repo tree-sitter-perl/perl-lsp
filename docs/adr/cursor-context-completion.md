@@ -156,6 +156,17 @@ stays untyped without the second analysis. Ungated, that analysis ran for
 every untyped receiver and took the composer completion census from 899 s
 to 1,209 s.
 
+The finished buffer's analysis is made once per request
+(`SentinelParse::finished`, counter `cursor.finished_analysis`) and every
+arm that needs it reads that one. The label arm is the other reader: a call
+the user has not closed (`connect(host: 'h', |`) usually leaves no call ref
+in the written analysis, so `cursor_sentinel::call_labels` reads the callee
+(`FileAnalysis::callee_at`) on the written analysis first and, only where
+that has none and the written tree read the callee through the cursor as an
+error, on the finished one. The labels resolve at detection against the
+analysis that named the callee, since the callee's symbol lives there, and
+`Slot::Label` carries them resolved.
+
 ### Receiver → members: tree-free, reusing the bag
 
 The backend owns the tree work (it has the parser + cached tree); once it

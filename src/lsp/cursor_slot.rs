@@ -83,7 +83,9 @@ pub enum Slot {
     /// which may be a value OR the label of a named argument: the
     /// identifier universe plus the callee's named inputs. `prefix` is as
     /// in `Identifier`.
-    Label { prefix: String, site: crate::build::query_extract::LabelSite },
+    /// `labels` are the callee's, resolved at detection: the callee may be
+    /// known only to the analysis of the buffer the sentinel finished.
+    Label { prefix: String, labels: Vec<crate::model::file_analysis::CompletionCandidate> },
     /// `use Foo qw(|` — the named module's import surface.
     Import { module: Option<String> },
     /// `use |` (typing the module name) or `Foo::|` (a qualified-path
@@ -285,9 +287,12 @@ pub fn detect_slot(
     }
     // `f(ti|` — a bare word in a call's arguments may be a label; the
     // identifier universe still answers, the callee's named inputs join it.
-    if let Some(site) = sp.as_ref().and_then(|sp| crate::build::cursor_sentinel::label_site(sp, &lang_pack)) {
+    if let Some(labels) = sp
+        .as_ref()
+        .and_then(|sp| crate::build::cursor_sentinel::call_labels(sp, &lang_pack, analysis, module_index, &completed))
+    {
         return DetectedSlot {
-            slot: Slot::Label { prefix: identifier_prefix(source, cursor).to_string(), site },
+            slot: Slot::Label { prefix: identifier_prefix(source, cursor).to_string(), labels },
             arm: DetectorArm::CallLabel,
         };
     }
