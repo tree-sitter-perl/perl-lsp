@@ -209,7 +209,7 @@ pub(crate) fn cli_cursor(q: &str, root: &str, rest: &[String]) {
         line: target.point.row,
         col: target.point.column,
         query: None,
-        newname: None,
+        newname: None, text: None,
     };
     print_run_one(&ws, &idx, &req, target.fmt);
 }
@@ -226,7 +226,7 @@ pub(crate) fn cli_document_link(root: &str, file: &str) {
         line: 0,
         col: 0,
         query: None,
-        newname: None,
+        newname: None, text: None,
     };
     print_run_one(&ws, &idx, &req, CoordFmt::EditorOneBasedChar);
 }
@@ -242,7 +242,7 @@ pub(crate) fn cli_semantic_tokens(root: &str, file: &str) {
         line: 0,
         col: 0,
         query: None,
-        newname: None,
+        newname: None, text: None,
     };
     // semantic-tokens output is independent of the coordinate seam; the batch
     // dialect keeps it unchanged.
@@ -278,6 +278,9 @@ struct BatchReq {
     #[serde(default)] col: usize,
     #[serde(default)] query: Option<String>,
     #[serde(default)] newname: Option<String>,
+    /// The file's buffer as an editor holds it, in place of what is on
+    /// disk (a half-typed call the disk never saw).
+    #[serde(default)] text: Option<String>,
 }
 
 /// Single source of truth for every cursor/query CLI capability. Both the
@@ -1326,7 +1329,11 @@ pub(crate) fn cli_batch(root: &str) {
             // output dialect is fixed to what gold fixtures encode: the location
             // modes render 1-based/char (this fmt), while rename/workspace-symbol
             // stay engine-coordinated within `run_one` itself.
-            run_one(&ws, &idx, &req, CoordFmt::EditorOneBasedChar)
+            let run = || run_one(&ws, &idx, &req, CoordFmt::EditorOneBasedChar);
+            match req.text.clone() {
+                Some(text) => crate::util::text::with_held_buffer(std::path::Path::new(&req.file), text, run),
+                None => run(),
+            }
         };
         let resp = match result {
             Ok(s)  => serde_json::json!({"id": req.id, "ok": true,  "out": s}),
@@ -1728,7 +1735,7 @@ pub(crate) fn cli_workspace_symbol(root: &str, query: &str) {
     let req = BatchReq {
         id: String::new(), q: "workspace-symbol".into(),
         file: String::new(), line: 0, col: 0,
-        query: Some(query.to_string()), newname: None,
+        query: Some(query.to_string()), newname: None, text: None,
     };
     // workspace-symbol emits engine-coordinated spans (0-based/byte) directly,
     // independent of the location seam; the dialect here is nominal.
