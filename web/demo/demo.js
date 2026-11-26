@@ -34,6 +34,18 @@ const SCENES = [
     { id: 'flow-try', title: 'try / catch', note: 'Assigned in try, untouched in catch: the two ways out are joined.', file: 'flow.pl', on: 'return $item;', nth: 1, offset: 8, action: HOVER },
     { id: 'flow-deref', title: 'The wrong kind of reference', note: 'ref() proved an array; a hash deref on the next line would die at runtime.', file: 'flow.pl', on: '$input->{count}', offset: 9, action: HOVER },
   ]],
+  ['Unions, shapes and named arguments', [
+    { id: 'union', title: 'One of two classes', note: 'pick_discount() returns a Percent on one path and a Fixed on the other.', file: 'shapes.pl', on: '$discount = ', action: HOVER },
+    { id: 'union-arms', title: 'A call on a union', note: 'describe() is answered for both classes: Percent overrides it, Fixed inherits it.', file: 'shapes.pl', on: '$discount->describe', offset: 12, action: HOVER },
+    { id: 'union-def', title: 'Both definitions', note: 'Go to definition offers the two describe() subs the call can reach.', file: 'shapes.pl', on: '$discount->describe', offset: 12, action: DEFINITION },
+    { id: 'union-warn', title: 'A method only one arm has', note: 'rate() exists on Percent but not on Fixed, and the warning says which.', file: 'shapes.pl', on: '$discount->rate', offset: 12, action: HOVER },
+    { id: 'shape', title: 'A hash that grows', note: 'host and paths were added by later statements; all three keys complete.', file: 'shapes.pl', on: '$settings->{port}', offset: 12, action: 'editor.action.triggerSuggest' },
+    { id: 'named-complete', title: 'Named argument completion', note: 'new() reads carrier, express and insured from %args; the two not yet passed are offered.', file: 'shapes.pl', on: "carrier => 'dhl', ", offset: 18, action: 'editor.action.triggerSuggest' },
+    { id: 'named-def', title: 'A named argument to its reader', note: 'weight => jumps to $opt{weight} inside quote().', file: 'shapes.pl', on: 'weight => 2', action: DEFINITION },
+    { id: 'named-rename', title: 'Rename a named argument', note: 'Renaming carrier here renames the key new() reads.', file: 'shapes.pl', on: "carrier => 'dhl'", action: 'editor.action.rename' },
+    { id: 'tuple', title: 'A list return', note: 'quote() returns (price, route); each variable gets its own type.', file: 'shapes.pl', on: '$price,', action: HOVER },
+    { id: 'tuple-sub', title: 'The list as a type', note: 'The sub itself returns a sequence of a number and a string.', file: 'shapes.pl', on: '->quote', offset: 3, action: HOVER },
+  ]],
   ['Navigation', [
     { id: 'def', title: 'Go to definition, across files', note: 'From the call into lib/Shop/Util.pm.', file: 'app.pl', on: 'format_price(', action: DEFINITION },
     { id: 'role', title: 'A method from a role', note: 'describe() is not in Shop::Item; it comes from the role it consumes.', file: 'app.pl', on: '$book->describe', offset: 7, action: DEFINITION },
