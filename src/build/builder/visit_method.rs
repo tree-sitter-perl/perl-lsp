@@ -88,6 +88,14 @@ impl<'a> Builder<'a> {
     /// bare `use` may have exported one, so only a package the file has
     /// named by this point (declared, `use`d or `require`d) makes it a
     /// method call here.
+    ///
+    /// TODO(indirect-held-reading): a site this file cannot decide — the
+    /// class is a package only another file names (`throw Error::Simple(..)`
+    /// under `use Error`), or a sub a bare `use` exports by default — takes
+    /// the function reading. The exact rule holds both readings and decides
+    /// at query time, with the index, from this package's own `use` rows and
+    /// those modules' exports. Owner: the whole-program engine's held
+    /// readings.
     pub(super) fn indirect_method_call(&self, node: Node<'a>) -> Option<crate::cst::IndirectObjectCall<'a>> {
         let io = crate::cst::indirect_object_call(node, self.source)?;
         if self.is_indirect_object_filehandle_call(node) {
