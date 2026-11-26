@@ -133,6 +133,7 @@ residuals, or (d) explicitly out of scope. Nothing is unaccounted for.
 | `adr/use-after-move.md` residual classes | **Epic 16** Phase D: `adr/cfg-tier.md` lists must/may use-after-move among the diagnostics not in the tier yet. The ADR's decidable subset is the honest floor until then |
 | `prompt-lsp-surface-parity.md` | Type-hierarchy / call-hierarchy / typeDefinition and a re-scoped documentLink landed, each with gold rows; pull diagnostics and codeLens are the forward verbs, unscheduled. The brief's own non-goals stand; `linkedEditingRange` stays OFF |
 | `prompt-wasm-web-extension.md` | **Backburner** (ROADMAP). The crate split it assumes was executed and REJECTED; `workspace-split` is the playbook if wasm ever forces it |
+| Indirect-object calls only another file can decide (`TODO(indirect-held-reading)`, `build/builder/visit_method.rs`) | **Deferred past 0.11** to the whole-program engine's held readings: the builder takes the function reading for `throw Error::Simple(..)` under `use Error`, or for a class no `use` in the file names. The file-local cases are decided today |
 | `parser-shortcomings.md` | Upstream tree-sitter-perl bugs, handed off to the parser team. Not schedulable here; `adr/error-recovery.md` is what we do about them meanwhile |
 
 ### Language packs
@@ -141,6 +142,7 @@ residuals, or (d) explicitly out of scope. Nothing is unaccounted for.
 |---|---|
 | `prompt-multi-language.md` §"What pack languages still don't get" | **Epic 13** — diagnostics, framework tier (capture-event hooks), completion context, the calibration substrate |
 | `prompt-multi-language.md` §"Shipping shape" (the `lsp-engine` crate cut) | **Parked** by its own text: does not start before a second pack language's ceiling work forces the split to pay for itself — i.e. after Epic 13 |
+| "Calling a class constructs it" as a query-document predicate (`TODO(names-class-predicate)`, `NameSpellings::class_call`) | **Deferred past 0.11**, unscheduled: the behavior is on main (python's cross-file `User()` constructs), read from a per-language switch by `class_named_by_call`. The cleanup states it as `#names-class?` in the query document and deletes `ClassCall` |
 | PHP, the next serve-in-anger pack language | **On main at Alpha** (`build/packs/php.rs`); 0.10.0's headline. Its arc is driven outside the epics; it rides **Epic 1** (its identity model is the same single-winner residual) and its calibration substrate is **Epic 13** Phase A |
 | `cpp-status.md` §"The scaling limit: measured" | **Epic 14** — the per-file stall is the beta→GA gate |
 | `prompt-macro-salvage-scaling.md` | **Epic 14** (its ranked fixes are the epic's Phase B) |
