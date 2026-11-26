@@ -782,6 +782,9 @@ impl<'a> Builder<'a> {
                     drop(c);
                     let actions =
                         crate::util::ghost_stats::timed("pd.on_match", || p.on_match(&spec.name, &mctx));
+                    if !actions.is_empty() {
+                        self.framework_read.extend(caps.iter().map(|(_, n)| n.id()));
+                    }
                     if defer {
                         self.record_gated_pattern_emission(
                             p.id(),
@@ -866,7 +869,15 @@ impl<'a> Builder<'a> {
                                 continue;
                             }
                         }
+                        let handler_args = match &a {
+                            plugin::EmitAction::DispatchCall { args: Some(region), .. } => Some(region.clone()),
+                            _ => None,
+                        };
+                        let before = self.refs.len();
                         self.apply_emit_action(p.id().to_string(), a);
+                        if let (Some(region), true) = (handler_args, self.refs.len() > before) {
+                            self.emit_handler_arg_keys(&region, caps, before);
+                        }
                     }
                     self.scope_stack.pop();
                     drop(e);
@@ -1016,6 +1027,9 @@ impl<'a> Builder<'a> {
                 p.id(),
             );
             let actions = p.on_match(&spec.name, &mctx);
+            if !actions.is_empty() {
+                self.framework_read.extend(caps.iter().map(|(_, n)| n.id()));
+            }
             if defer {
                 self.record_gated_pattern_emission(
                     p.id(),
@@ -1174,7 +1188,7 @@ impl<'a> Builder<'a> {
                 }
                 EmitAction::Handler {
                     name, owner, dispatchers, params, span, selection_span,
-                    display, hide_in_outline, outline_label,
+                    display, hide_in_outline, outline_label, callable: _,
                 } => {
                     symbols.push(GatedSymbol {
                         name,
@@ -1183,8 +1197,9 @@ impl<'a> Builder<'a> {
                         selection_span,
                         detail: SymbolDetail::Handler {
                             owner,
-                            dispatchers,
+                            dispatchers: dispatchers.into(),
                             params: params.into_iter().map(Into::into).collect(),
+                            runs: None,
                         },
                         presentation: crate::model::file_analysis::Presentation {
                             hide_in_outline,
@@ -1220,7 +1235,7 @@ impl<'a> Builder<'a> {
                 }
                 EmitAction::DispatchCall { name, dispatcher, owner, span, .. } => {
                     refs.push(GatedRef {
-                        kind: RefKind::DispatchCall { dispatcher },
+                        kind: RefKind::DispatchCall { dispatcher, args: None },
                         span,
                         target_name: name,
                         access: crate::model::file_analysis::AccessKind::Read,

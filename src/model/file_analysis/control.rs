@@ -1775,11 +1775,15 @@ impl super::FileAnalysis {
         let ctor_span = self.scopes[ctor_body.0 as usize].span;
         if seeded.insert(held.clone()) || m == ctor {
             // A promoted parameter is the member, set as the call begins.
-            let promoted = self.symbols.iter().find_map(|s| {
-                let twin = s.declared_with?;
-                (s.kind == SymKind::Field && s.name == *name && s.package.as_deref() == Some(class) && self.symbols[twin.0 as usize].scope == ctor_body)
-                    .then_some(twin)
-            });
+            let promoted = self
+                .symbols
+                .iter()
+                .filter(|s| s.kind == SymKind::Field && s.name == *name && s.package.as_deref() == Some(class))
+                .find_map(|s| {
+                    self.declared_together(s)
+                        .find(|t| t.scope == ctor_body && t.kind != SymKind::HashKeyDef)
+                        .map(|t| t.id)
+                });
             let payload = match promoted {
                 Some(twin) => WitnessPayload::Edge(WitnessAttachment::Place(Box::new(Place::variable(Binding::Lexical(twin))))),
                 None => WitnessPayload::InferredType(InferredType::Undef),

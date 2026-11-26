@@ -1600,7 +1600,7 @@ fn plugin_app_surface_minion_enqueue_resolves_when_app_typed() {
     // DispatchCall directly; `applicable_dispatches` de-dups the gated
     // candidate against it. Either path surfaces the handler — exactly once.
     let has_materialized = fa.refs().iter().any(|r|
-        matches!(&r.kind, RefKind::DispatchCall { dispatcher } if dispatcher == "enqueue")
+        matches!(&r.kind, RefKind::DispatchCall { dispatcher, .. } if dispatcher == "enqueue")
             && matches!(r.handler_owner(), Some(HandlerOwner::Class(c)) if c == "Minion")
             && r.target_name == "send_email");
     let has_gated = fa.applicable_dispatches(Some(&idx)).iter().any(|a|
@@ -1984,6 +1984,7 @@ $minion->add_task(send_email => sub {
         ref owner,
         ref dispatchers,
         ref params,
+        ..
     } = handler.detail
     else {
         panic!("handler detail should be Handler")

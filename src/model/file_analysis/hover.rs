@@ -252,7 +252,7 @@ impl FileAnalysis {
                         }
                     }
                 }
-                RefKind::DispatchCall { dispatcher } => {
+                RefKind::DispatchCall { dispatcher, .. } => {
                     if let Some(owner) = r.handler_owner() {
                         return Some(self.format_handler_hover(
                             &r.target_name,

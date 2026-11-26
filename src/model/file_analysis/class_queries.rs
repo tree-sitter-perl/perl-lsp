@@ -834,11 +834,7 @@ impl FileAnalysis {
                     }
                     _ => match self.deferred_hash_key_owner(r, module_index)? {
                         HashKeyOwner::Class(c) | HashKeyOwner::Bridged { class: c } => c,
-                        HashKeyOwner::Sub { package: Some(c), name }
-                            if crate::model::conventions::is_constructor_name(&name) =>
-                        {
-                            c
-                        }
+                        o @ HashKeyOwner::Input { .. } => o.constructor_class()?.to_string(),
                         _ => return None,
                     },
                 };

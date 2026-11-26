@@ -59,6 +59,10 @@ spelled! {
         /// a receiver creates (python's `self.x = …`). A class-owned
         /// `HashKeyDef`, Perl's `$self->{x}` slot.
         Slot = "slot",
+        /// A key a call may pass a parameter by: the parameter's name, a
+        /// key of its callable's named input (`HashKeyOwner::Input`),
+        /// declared with the parameter's local from one token (`@def.pair`).
+        Input = "input",
         Constant = "constant",
         Enumerator = "enumerator",
         Label = "label",
@@ -556,6 +560,14 @@ spelled! {
         /// return, by identity: the language's own class, never a
         /// spelling the file's imports resolve.
         ReturnClass = "return.class",
+        /// What follows a call argument's label as written (`: `, `=`), set
+        /// on the `@arity.label` pattern: what label completion writes.
+        LabelWritten = "label.written",
+        /// The name of the def a pattern's `@def.<kind>.anchor` declares,
+        /// where the language writes the def for the code (python's
+        /// `@dataclass` writes an `__init__`); without it the pack's
+        /// `default_name` names an anchored def.
+        DefName = "def.name",
     }
 }
 
@@ -650,11 +662,28 @@ spelled! {
         Arg = "arg",
         Sig = "sig",
         Spread = "spread",
+        /// A call argument passed by name (`f(a: 1)`, `f(a=1)`): its name
+        /// token, a key of the callee's named input.
+        Label = "label",
         /// A declared parameter of the `@arity.sig` it sits in: a required
         /// one, one with a default, or one that takes any number of values.
         Required = "required",
         Optional = "optional",
         Variadic = "variadic",
+        /// How a call reaches the parameter (`ParamPass`), stated on it: by
+        /// place or by name (the default a language's parameters take), by
+        /// name only, by place only. A separator that narrows the default
+        /// (python's bare `*` and `/`) states the narrower mode on the
+        /// parameters it governs, and the narrower one wins.
+        Either = "either",
+        ByName = "by_name",
+        ByPlace = "by_place",
+        /// A variadic that collects only the places left (`*args`) or only
+        /// the names left (`**kw`); a bare `@arity.variadic` collects both.
+        RestPlaces = "rest_places",
+        RestNames = "rest_names",
+        /// An optional parameter's default value, as written.
+        Default = "default",
     }
 }
 
@@ -1179,7 +1208,7 @@ impl DefCap {
             // `reexport` marker makes resolution see through it.
             DefCap::Method | DefCap::Reexport => SymKind::Method,
             DefCap::Field => SymKind::Field,
-            DefCap::Slot => SymKind::HashKeyDef,
+            DefCap::Slot | DefCap::Input => SymKind::HashKeyDef,
             DefCap::Enumerator => SymKind::Enumerator,
             DefCap::Var | DefCap::Local | DefCap::Assigned | DefCap::Label | DefCap::UnionField => {
                 SymKind::Variable

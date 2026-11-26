@@ -8,8 +8,40 @@
 /// left it unindexed and killed the CLI. Every fallback is counted
 /// (`source.latin1`).
 pub fn read_source(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
+    if let Some(text) = held_buffer(path.as_ref()) {
+        return Ok(text);
+    }
     let bytes = std::fs::read(path)?;
     Ok(decode_source(bytes))
+}
+
+thread_local! {
+    static HELD: std::cell::RefCell<Option<(std::path::PathBuf, String)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with `path` reading as `text` on this thread, the way an editor
+/// holds a buffer the disk has not seen: `--batch` asks about a half-typed
+/// buffer through it. Only `read_source` on the calling thread sees it.
+pub fn with_held_buffer<T>(path: &std::path::Path, text: String, f: impl FnOnce() -> T) -> T {
+    struct Release;
+    impl Drop for Release {
+        fn drop(&mut self) {
+            HELD.with(|h| *h.borrow_mut() = None);
+        }
+    }
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    HELD.with(|h| *h.borrow_mut() = Some((key, text)));
+    let _release = Release;
+    f()
+}
+
+fn held_buffer(path: &std::path::Path) -> Option<String> {
+    HELD.with(|h| {
+        let held = h.borrow();
+        let (key, text) = held.as_ref()?;
+        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        (canon == *key).then(|| text.clone())
+    })
 }
 
 /// `read_source`'s decoding, for bytes already in hand (stdin).
@@ -52,6 +84,28 @@ mod tests {
         let latin1 = decode_source(vec![b'c', b'a', b'f', 0xE9, b'\n', 0xFF]);
         assert_eq!(latin1, "caf\u{e9}\n\u{ff}");
         assert_eq!(latin1.chars().count(), 6, "one char per byte");
+    }
+
+    #[test]
+    fn a_held_buffer_reads_in_place_of_the_disk_on_its_thread_only() {
+        let dir = std::env::temp_dir().join(format!("held-buffer-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.py");
+        std::fs::write(&file, "on disk\n").unwrap();
+        let seen = with_held_buffer(&file, "f(a, ".to_string(), || {
+            let other = std::thread::spawn({
+                let file = file.clone();
+                move || read_source(&file).unwrap()
+            })
+            .join()
+            .unwrap();
+            // The same file through another spelling of its path.
+            let spelled = read_source(dir.join(".").join("a.py")).unwrap();
+            (read_source(&file).unwrap(), spelled, other)
+        });
+        assert_eq!(seen, ("f(a, ".to_string(), "f(a, ".to_string(), "on disk\n".to_string()));
+        assert_eq!(read_source(&file).unwrap(), "on disk\n", "released when the call returns");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

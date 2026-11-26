@@ -99,15 +99,25 @@ fn moose_keywords() {
     moo_keywords() + ["override", "super", "inner", "augment", "confess", "blessed"]
 }
 
+// What `new` is called with reaches `BUILDARGS` as its named arguments and
+// `BUILD` as the hashref after the object, so a key either reads is a key a
+// constructor call passes.
+fn constructor_inputs() {
+    [
+        #{ from: "BUILDARGS", slot: "Named", to: "new" },
+        #{ from: "BUILD", slot: #{ At: 1 }, to: "new" },
+    ]
+}
+
 fn framework_mode_makers() {
     [
-        #{ "module": "Moo", flavor: "Moo", imports: moo_keywords(), base: "Moo::Object" },
+        #{ "module": "Moo", flavor: "Moo", imports: moo_keywords(), base: "Moo::Object", inputs: constructor_inputs(), ctor_key_option: "init_arg" },
         // `requires` is role-only sugar; a plain class never calls it.
-        #{ "module": "Moo::Role", flavor: "Moo", imports: moo_keywords() + ["requires"] },
+        #{ "module": "Moo::Role", flavor: "Moo", imports: moo_keywords() + ["requires"], ctor_key_option: "init_arg" },
         // Dancer2::Plugin re-exports Moo's `has`/`with`/... into the consuming
         // plugin package, so `has my_setting => (...)` there wants the same
         // accessor synthesis.
-        #{ "module": "Dancer2::Plugin", flavor: "Moo", imports: moo_keywords() },
+        #{ "module": "Dancer2::Plugin", flavor: "Moo", imports: moo_keywords(), ctor_key_option: "init_arg" },
         // Role::Tiny / Role::Tiny::With behave like Moo::Role for our
         // purposes: they export `with` (and `requires`, via the role sugar)
         // into the consuming package.
@@ -116,12 +126,12 @@ fn framework_mode_makers() {
         // MooX::Options' `option` is a `has` with extra option-parsing keys;
         // it routes through the shared `has` path at the call site, gated on
         // the `option` keyword being in this import surface.
-        #{ "module": "MooX::Options", flavor: "Moo", imports: moo_keywords() + ["option"] },
-        #{ "module": "Moose", flavor: "Moose", imports: moose_keywords(), base: "Moose::Object" },
-        #{ "module": "Moose::Role", flavor: "Moose", imports: moose_keywords() + ["requires"] },
+        #{ "module": "MooX::Options", flavor: "Moo", imports: moo_keywords() + ["option"], ctor_key_option: "init_arg" },
+        #{ "module": "Moose", flavor: "Moose", imports: moose_keywords(), base: "Moose::Object", inputs: constructor_inputs(), ctor_key_option: "init_arg" },
+        #{ "module": "Moose::Role", flavor: "Moose", imports: moose_keywords() + ["requires"], ctor_key_option: "init_arg" },
         // Mouse mimics Moose's keyword and `has` surface.
-        #{ "module": "Mouse", flavor: "Moose", imports: moose_keywords(), base: "Mouse::Object" },
-        #{ "module": "Mouse::Role", flavor: "Moose", imports: moose_keywords() + ["requires"] },
+        #{ "module": "Mouse", flavor: "Moose", imports: moose_keywords(), base: "Mouse::Object", inputs: constructor_inputs(), ctor_key_option: "init_arg" },
+        #{ "module": "Mouse::Role", flavor: "Moose", imports: moose_keywords() + ["requires"], ctor_key_option: "init_arg" },
     ]
 }
 
