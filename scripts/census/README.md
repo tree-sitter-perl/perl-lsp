@@ -22,6 +22,10 @@ Per corpus, for each binary (`run.sh`, fresh cache each):
   seeded, and per line the first `$var` and the first `->method`, at most 40
   positions a file, each asked `hover` and `definition` (`CENSUS_VERBS` adds
   `references`, `completion`, ...). Same root, same seed, same probes.
+  `CENSUS_UNCLOSED=1` asks about calls still being typed instead: each probe
+  sends the buffer as an editor holds it (`--batch`'s `text`), the file cut
+  just after a call's first k arguments, or with that call's `)` deleted so
+  code follows it (`probes.py --unclosed`).
 
 `ledger.py` diffs the two: diagnostics as a multiset keyed by
 (code, file, position, severity, message) and grouped by code; answers by

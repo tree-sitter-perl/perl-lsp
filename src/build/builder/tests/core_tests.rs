@@ -428,10 +428,34 @@ fn test_sub_symbol_with_params() {
         assert_eq!(params.len(), 2);
         assert_eq!(params[0].name, "$self");
         assert_eq!(params[1].name, "%opts");
-        assert!(params[1].is_slurpy);
+        assert_eq!(params[1].pass, ParamPass::RestNamed);
     } else {
         panic!("expected Sub detail");
     }
+}
+
+/// Each signature parameter says how a call reaches it: `$x` by place,
+/// `:$name` by name (its default kept), `@rest` the leftover places and
+/// `%opts` the leftover pairs.
+#[test]
+fn signature_params_carry_how_a_call_passes_them() {
+    let fa = build_fa("use v5.42;\nsub f($x, :$name, :$age = 3, @rest) {}\nsub g(:$k, %opts) {}\n");
+    let params_of = |name: &str| match &fa.symbols().iter().find(|s| s.name == name).unwrap().detail {
+        SymbolDetail::Sub { params, .. } => params.iter().map(|p| (p.name.clone(), p.default.clone(), p.pass)).collect::<Vec<_>>(),
+        other => panic!("expected Sub detail, got {other:?}"),
+    };
+    assert_eq!(params_of("f"), vec![
+        ("$x".to_string(), None, ParamPass::Positional),
+        ("$name".to_string(), None, ParamPass::Named),
+        ("$age".to_string(), Some("3".to_string()), ParamPass::Named),
+        ("@rest".to_string(), None, ParamPass::RestPositional),
+    ]);
+    assert_eq!(params_of("g"), vec![
+        ("$k".to_string(), None, ParamPass::Named),
+        ("%opts".to_string(), None, ParamPass::RestNamed),
+    ]);
+    let arity = fa.symbols().iter().find(|s| s.name == "f").unwrap().param_arity().unwrap();
+    assert_eq!((arity.total, arity.required, arity.variadic), (1, 1, true));
 }
 
 #[test]
@@ -447,7 +471,7 @@ fn test_legacy_sub_params() {
         assert_eq!(params.len(), 2);
         assert_eq!(params[0].name, "$class");
         assert_eq!(params[1].name, "%args");
-        assert!(params[1].is_slurpy);
+        assert_eq!(params[1].pass, ParamPass::RestNamed);
     } else {
         panic!("expected Sub detail");
     }

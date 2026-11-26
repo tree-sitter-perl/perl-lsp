@@ -27,6 +27,15 @@ names, its magic methods, the names a framework runner invokes: sets that
 grow, differ per framework, and that a plugin dir must be able to extend.
 They are documents the pack registers, read by an engine-side reader.
 
+**A token fact is a directive on the document.** Which brackets the
+cursor reparse may close when the user has not typed the closer is a fact
+about the language's tokens, not about a construct, so a document states it
+once on its `(ERROR)` pattern: `((ERROR) (#recover-pair! "(" ")"))`. The
+compile resolves each token to its kind id (`query_extract::Recovery`): a
+token the grammar lacks, or a second closer for one open, fails the compile.
+A block brace is never declared: an unclosed `{` is the normal state of a
+body being written.
+
 **A Rust `fn` on the pack is right only for text→structure.** Parsing a
 type spelling, a docblock, a module path; shaping a captured name. It
 takes text in and gives structure out, never a node and never a kind.

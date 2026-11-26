@@ -1117,3 +1117,10 @@
 ; two `case:` labels still shares the switch-body scope).
 (if_statement consequence: (compound_statement) @scope)
 (if_statement alternative: (else_clause (compound_statement) @scope))
+
+; ---- half-typed code: the expression brackets the cursor reparse may close
+; when the user has not typed the closer yet (`f(a, |`). A token fact, stated
+; once for the document. Never a block brace: an unclosed `{` is the normal
+; state while writing a body, and closing it would buy a retry per request
+; for nothing a cursor arm reads. ----
+((ERROR) (#recover-pair! "(" ")") (#recover-pair! "[" "]"))

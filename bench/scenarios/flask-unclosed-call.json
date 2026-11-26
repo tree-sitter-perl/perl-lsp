@@ -1,0 +1,86 @@
+{
+  "project": {
+    "repo": "https://github.com/pallets/flask",
+    "pin": "49943b5a94413a530761350f04e896f76e8d620e",
+    "root_subdir": "",
+    "note": "Completion inside a call still being typed, in src/flask/app.py (68 KB), inside url_for's body: the unclosed call, then a word in it, then the same word in the closed call as the control."
+  },
+  "readiness": {
+    "file": "src/flask/app.py",
+    "line": 915,
+    "character": 36
+  },
+  "steps": [
+    {
+      "action": "open",
+      "file": "src/flask/app.py"
+    },
+    {
+      "action": "insert_line",
+      "file": "src/flask/app.py",
+      "line": 1202,
+      "text": "        self.url_for(endpoint=\"x\", ",
+      "name": "type-unclosed-call",
+      "await_diagnostics": true
+    },
+    {
+      "action": "completion",
+      "file": "src/flask/app.py",
+      "line": 1202,
+      "character": 35,
+      "name": "completion-unclosed-call"
+    },
+    {
+      "action": "revert",
+      "file": "src/flask/app.py",
+      "name": "revert-1",
+      "await_diagnostics": true
+    },
+    {
+      "action": "insert_line",
+      "file": "src/flask/app.py",
+      "line": 1202,
+      "text": "        self.url_for(endpoint=\"x\", _a",
+      "name": "type-unclosed-call-word",
+      "await_diagnostics": true
+    },
+    {
+      "action": "completion",
+      "file": "src/flask/app.py",
+      "line": 1202,
+      "character": 37,
+      "name": "completion-unclosed-call-word"
+    },
+    {
+      "action": "revert",
+      "file": "src/flask/app.py",
+      "name": "revert-2",
+      "await_diagnostics": true
+    },
+    {
+      "action": "insert_line",
+      "file": "src/flask/app.py",
+      "line": 1202,
+      "text": "        self.url_for(endpoint=\"x\", _a)",
+      "name": "type-closed-call",
+      "await_diagnostics": true
+    },
+    {
+      "action": "completion",
+      "file": "src/flask/app.py",
+      "line": 1202,
+      "character": 37,
+      "name": "completion-closed-call-word"
+    },
+    {
+      "action": "revert",
+      "file": "src/flask/app.py",
+      "name": "revert-3",
+      "await_diagnostics": true
+    },
+    {
+      "action": "rss",
+      "name": "post-completion"
+    }
+  ]
+}

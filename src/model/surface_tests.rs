@@ -465,3 +465,10 @@ fn an_effect_edit_dirties_its_consumers_and_no_other_edit_does() {
     assert_eq!(idx.record(&util, provider("warn 'a'")), SurfaceVerdict::Changed, "now comes back");
     assert!(idx.dirty_consumers(&util).contains(&app));
 }
+
+/// A new key a callable takes is cross-file-visible: callers complete it.
+#[test]
+fn a_new_named_argument_changes_the_surface() {
+    let base = "package Acme::W;\nsub cfg { my ($self, %o) = @_; return $o{verbose} }\n1;\n";
+    assert_ne!(surface(base), surface(&base.replace("return $o{verbose}", "return $o{verbose} + $o{debug}")));
+}
