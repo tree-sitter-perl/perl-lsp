@@ -160,6 +160,9 @@ monaco.editor.registerEditorOpener({
 let lsp;
 try {
   lsp = startServer({ wasm: 'perl-lsp.wasm', shim: 'shim/index.js', files: project });
+  // The server's stderr, for whoever is debugging the page (and the page
+  // test, which prints it when a scene fails).
+  window.serverLog = lsp.logs;
 } catch (e) {
   setStatus(e.message + '. If this page just loaded, it reloads itself once to turn isolation on.', 'bad');
   throw e;

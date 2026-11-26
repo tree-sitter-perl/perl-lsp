@@ -220,4 +220,11 @@ jobs:
         working-directory: web
         run: |
           node build-site.mjs ../target/wasm32-wasip1-threads/debug/perl-lsp.wasm "$RUNNER_TEMP/site"
-          node test/demo.mjs "$RUNNER_TEMP/site"
+          node test/demo.mjs "$RUNNER_TEMP/site" "$RUNNER_TEMP/demo-shots/page.png"
+
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-page-failures
+          path: ${{ runner.temp }}/demo-shots
+          if-no-files-found: ignore
