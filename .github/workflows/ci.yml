@@ -201,9 +201,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1-threads
+      - name: Install the pinned toolchain
+        run: |
+          toolchain="$(cat scripts/wasm/toolchain)"
+          rustup toolchain install "$toolchain" --profile minimal -t wasm32-wasip1-threads
+          echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
 
       - uses: Swatinem/rust-cache@v2
 

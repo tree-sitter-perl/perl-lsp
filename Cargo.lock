@@ -831,6 +831,7 @@ dependencies = [
  "ignore",
  "libc",
  "log",
+ "parking_lot_core",
  "rayon",
  "rhai",
  "rusqlite",

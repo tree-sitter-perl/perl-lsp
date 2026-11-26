@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build perl-lsp for WebAssembly: `scripts/wasm/build.sh [cargo build args]`.
 #
-# Needs, beyond the Rust target (`rustup target add wasm32-wasip1-threads`):
+# Needs, beyond the pinned toolchain with the Rust target
+# (`rustup toolchain install "$(cat scripts/wasm/toolchain)" -t wasm32-wasip1-threads`):
 #   - clang with the wasm32 backend (stock distro clang has it)
 #   - WASI_SYSROOT pointing at a wasi-sdk sysroot, for the C dependencies'
 #     libc headers (tree-sitter, the grammars, zstd, SQLite)
@@ -31,5 +32,9 @@ key="${target//-/_}"
 cflags="--sysroot=$WASI_SYSROOT"
 case "$target" in *-threads) cflags="$cflags -pthread" ;; esac
 export "CC_$key=${WASM_CC:-clang}" "AR_$key=$ar" "CFLAGS_$key=$cflags"
+
+# One pin for CI and local builds; see the parking_lot_core note in Cargo.toml.
+here="$(cd "$(dirname "$0")" && pwd)"
+export RUSTUP_TOOLCHAIN="${WASM_TOOLCHAIN:-$(cat "$here/toolchain")}"
 
 exec cargo build --target "$target" "$@"

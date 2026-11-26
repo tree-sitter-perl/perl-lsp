@@ -106,6 +106,11 @@ tokio = { version = "1", features = ["full"] }
 
 [target.'cfg(target_os = "wasi")'.dependencies]
 tokio = { version = "1", features = ["sync", "macros", "io-util", "rt", "time"] }
+# DashMap's shard locks wait through parking_lot_core, whose only wasm thread
+# parker sits behind this feature (wasm atomic wait is unstable,
+# rust-lang/rust#77839). Without it a contended lock panics, so the wasm
+# build runs on the nightly `scripts/wasm/toolchain` names.
+parking_lot_core = { version = "0.9", features = ["nightly"] }
 
 # The grammar vocabulary (`cst::perl::{Field, Kind}`) is generated from the
 # linked grammar's own tables, so a name the grammar lacks fails the build.
