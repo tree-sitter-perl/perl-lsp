@@ -39,6 +39,12 @@ pins them, the build ships their `.pm` files as `deps.json`, and the page
 places them at `local/lib/perl5` in the server's file system, where the
 server looks for a project's dependencies without running `perl`.
 
+The project carries a plugin of its own, `demo/project/.perl-lsp/flags.rhai`,
+in the directory the server loads project plugins from. It is an editable
+file on the page. The server reads plugins once, as it starts, so the page
+starts a new server on the project as it stands after each edit, and shows
+what the server says about a plugin that does not compile.
+
 `site/` is self-contained and can be served by any static host. On a host
 that cannot send the isolation headers (GitHub Pages), `coi.js` registers a
 service worker that adds them and reloads the page once.

@@ -37,7 +37,7 @@ fs.cpSync(path.join(web, 'runtime'), path.join(out, 'runtime'), { recursive: tru
 fs.cpSync(path.join(web, 'node_modules/@bjorn3/browser_wasi_shim/dist'), path.join(out, 'shim'), { recursive: true });
 fs.cpSync(path.join(web, 'node_modules/monaco-editor/min/vs'), path.join(out, 'vs'), { recursive: true });
 fs.copyFileSync(wasm, path.join(out, 'perl-lsp.wasm'));
-fs.writeFileSync(path.join(out, 'project.json'), JSON.stringify(sources(path.join(web, 'demo/project'), /\.(pm|pl|t)$|^cpanfile$/)));
+fs.writeFileSync(path.join(out, 'project.json'), JSON.stringify(sources(path.join(web, 'demo/project'), /\.(pm|pl|t|rhai)$|^cpanfile$/)));
 // Dependencies are a second file: the page gives them to the server whole
 // but opens one in the editor only when a jump lands in it.
 const deps = sources(perl5, /\.pm$/);

@@ -98,6 +98,14 @@ const SCENES = [
     { id: 'subtypes', title: 'Subclasses', note: 'Every class that inherits from Shop::Discount.', file: 'lib/Shop/Discount.pm', on: 'package Shop::Discount', offset: 8, list: 'subtypes' },
     { id: 'class', title: 'Perl 5.38 class syntax', note: 'cart => is the field of the same name, declared with :param.', file: 'app.pl', on: 'cart => $cart', action: DEFINITION },
   ]],
+  ['Teach it your own DSL', [
+    { id: 'plugin-def', title: 'A flag name is a link', note: "To perl 'new_checkout' is a string. The project's plugin says it names a flag, so it jumps to the declaration.", file: 'flags.pl', on: "'new_checkout'", offset: 2, action: DEFINITION },
+    { id: 'plugin-refs', title: 'Every use of a flag', note: 'The declaration and each lookup, across files.', file: 'lib/Shop/Flags.pm', on: 'gift_wrap ', action: 'editor.action.goToReferences' },
+    { id: 'plugin-rename', title: 'Rename a flag', note: 'Renames it where it is declared and where it is looked up.', file: 'flags.pl', on: "'gift_wrap'", offset: 2, action: 'editor.action.rename' },
+    { id: 'plugin-source', title: 'The plugin itself', note: 'Under 90 lines: a tree-sitter query for the two call shapes and a function that says what a match means. Edit it and the server restarts with your version.', file: '.perl-lsp/flags.rhai', on: 'fn patterns', offset: 0 },
+    { id: 'plugin-edit', title: 'Teach it another verb', note: "Adds \"disabled\" to the plugin's verb list for you. The server restarts in a few seconds.", file: '.perl-lsp/flags.rhai', on: '"feature_flag" "enabled"', offset: 0, replace: '"feature_flag" "enabled" "disabled"' },
+    { id: 'plugin-after', title: '…and disabled() follows', note: "After the edit above, 'beta_search' jumps to its declaration too. Before it, nothing happens.", file: 'flags.pl', on: "'beta_search'", offset: 2, action: DEFINITION },
+  ]],
 ];
 
 const monaco = await new Promise(resolve => {
@@ -146,9 +154,24 @@ function* flatten(tree, prefix = '') {
     else yield* flatten(value, prefix + name + '/');
   }
 }
+// The project's own plugins are files like any other, in the directory the
+// server loads them from. Monaco has no Rhai grammar; Rust's is close.
+const isPlugin = path => path.endsWith('.rhai');
 const models = new Map();
 for (const [path, text] of flatten(project)) {
-  if (/\.(pm|pl|t)$/.test(path)) models.set(path, monaco.editor.createModel(text, LANGUAGE, monaco.Uri.parse(`${ROOT}/${path}`)));
+  const language = isPlugin(path) ? 'rust' : /\.(pm|pl|t)$/.test(path) ? LANGUAGE : null;
+  if (language) models.set(path, monaco.editor.createModel(text, language, monaco.Uri.parse(`${ROOT}/${path}`)));
+}
+// The project as it stands in the editor, with its dependencies: what a
+// server or a command starts on.
+function workspace() {
+  const files = structuredClone(project);
+  for (const [path, model] of models) {
+    if (path.startsWith(DEPS)) continue;
+    const parts = path.split('/'), name = parts.pop();
+    parts.reduce((tree, part) => tree[part] ??= {}, files)[name] = model.getValue();
+  }
+  return { ...files, local: { lib: { perl5: deps } } };
 }
 // A dependency gets a model the first time an answer points into it: Monaco
 // can only show or peek a location whose model exists.
@@ -228,55 +251,10 @@ monaco.editor.registerEditorOpener({
   },
 });
 
-let lsp;
-try {
-  lsp = startServer({ wasm: 'perl-lsp.wasm', shim: 'shim/index.js', files: { ...project, local: { lib: { perl5: deps } } } });
-  // The server's stderr, for whoever is debugging the page (and the page
-  // test, which prints it when a scene fails).
-  window.serverLog = lsp.logs;
-} catch (e) {
-  setStatus(e.message + '. If this page just loaded, it reloads itself once to turn isolation on.', 'bad');
-  throw e;
-}
-lsp.exited.then(why => setStatus(why, 'bad'));
-
-setStatus('Downloading and compiling the server…');
-const started = performance.now();
-const { capabilities } = await lsp.request('initialize', {
-  processId: null,
-  rootUri: ROOT,
-  workspaceFolders: [{ uri: ROOT, name: 'work' }],
-  // The opt-in lints are on so the page can show them.
-  initializationOptions: {
-    diagnostics: { optionalDeref: true, redundantGuard: true, derefShape: true, unresolvedMethodCrossFile: true },
-  },
-  capabilities: {
-    textDocument: {
-      hover: { contentFormat: ['markdown', 'plaintext'] },
-      completion: { completionItem: { documentationFormat: ['markdown', 'plaintext'] } },
-      signatureHelp: { signatureInformation: { documentationFormat: ['markdown', 'plaintext'] } },
-      rename: { prepareSupport: true },
-      codeAction: { codeActionLiteralSupport: { codeActionKind: { valueSet: ['quickfix'] } } },
-    },
-  },
-});
-lsp.notify('initialized', {});
-setStatus(`Server ready in ${((performance.now() - started) / 1000).toFixed(1)} s.`, 'ok');
-
-// Every project file is an open document: a rename can edit any of them, and the
-// server must then be told, or its copy of that file goes stale.
-for (const model of models.values()) {
-  lsp.notify('textDocument/didOpen', { textDocument: { uri: model.uri.toString(), languageId: LANGUAGE, version: model.getVersionId(), text: model.getValue() } });
-  model.onDidChangeContent(() => lsp.notify('textDocument/didChange', {
-    textDocument: { uri: model.uri.toString(), version: model.getVersionId() },
-    contentChanges: [{ text: model.getValue() }],
-  }));
-}
-
 // The server's own diagnostics are kept beside the markers: a code action
 // request must send them back as the server wrote them.
 const diagnostics = new Map();
-lsp.onNotification((method, params) => {
+function onNotification(method, params) {
   if (method !== 'textDocument/publishDiagnostics') return;
   const model = monaco.editor.getModel(monaco.Uri.parse(params.uri));
   if (!model) return;
@@ -288,7 +266,96 @@ lsp.onNotification((method, params) => {
     code: d.code === undefined ? undefined : String(d.code),
     source: d.source,
   })));
-});
+}
+
+// Starts a server on the project as it stands and opens every project file
+// in it: a rename can edit any of them, and the server must then be told,
+// or its copy of that file goes stale.
+let lsp;
+async function connect() {
+  // Warnings are on because that is where the server says a plugin did not
+  // compile.
+  const server = startServer({ wasm: 'perl-lsp.wasm', shim: 'shim/index.js', files: workspace(), env: ['RUST_LOG=warn'] });
+  lsp = server;
+  server.onLog(text => {
+    const complaint = /(?:WARN|ERROR)[^\n]*?\] (plugin [^\n]*)/.exec(text);
+    if (complaint && lsp === server) setStatus(complaint[1].replace('/work/', ''), 'bad');
+  });
+  // The server's stderr, for whoever is debugging the page (and the page
+  // test, which prints it when a scene fails).
+  window.serverLog = server.logs;
+  server.exited.then(why => { if (lsp === server) setStatus(why, 'bad'); });
+  server.onNotification(onNotification);
+  const { capabilities } = await server.request('initialize', {
+    processId: null,
+    rootUri: ROOT,
+    workspaceFolders: [{ uri: ROOT, name: 'work' }],
+    // The opt-in lints are on so the page can show them.
+    initializationOptions: {
+      diagnostics: { optionalDeref: true, redundantGuard: true, derefShape: true, unresolvedMethodCrossFile: true },
+    },
+    capabilities: {
+      textDocument: {
+        hover: { contentFormat: ['markdown', 'plaintext'] },
+        completion: { completionItem: { documentationFormat: ['markdown', 'plaintext'] } },
+        signatureHelp: { signatureInformation: { documentationFormat: ['markdown', 'plaintext'] } },
+        rename: { prepareSupport: true },
+        codeAction: { codeActionLiteralSupport: { codeActionKind: { valueSet: ['quickfix'] } } },
+      },
+    },
+  });
+  server.notify('initialized', {});
+  for (const [path, model] of models) {
+    if (model.getLanguageId() !== LANGUAGE || path.startsWith(DEPS)) continue;
+    server.notify('textDocument/didOpen', { textDocument: { uri: model.uri.toString(), languageId: LANGUAGE, version: model.getVersionId(), text: model.getValue() } });
+  }
+  return capabilities;
+}
+
+setStatus('Downloading and compiling the server…');
+const started = performance.now();
+let capabilities;
+try {
+  capabilities = await connect();
+} catch (e) {
+  setStatus(e.message + '. If this page just loaded, it reloads itself once to turn isolation on.', 'bad');
+  throw e;
+}
+setStatus(`Server ready in ${((performance.now() - started) / 1000).toFixed(1)} s.`, 'ok');
+
+// The server reads its plugins once, as it starts, so an edited plugin
+// takes a new server. Only the newest edit's server is kept.
+let reload = 0, reloadTimer;
+async function reloadPlugins() {
+  const mine = ++reload;
+  setStatus('Restarting the server with the edited plugin…');
+  const began = performance.now();
+  lsp.terminate();
+  for (const model of models.values()) monaco.editor.setModelMarkers(model, 'perl-lsp', []);
+  diagnostics.clear();
+  try {
+    await connect();
+  } catch (e) {
+    if (mine === reload) setStatus('The server did not restart: ' + e.message, 'bad');
+    return;
+  }
+  // A complaint about the plugin may already be showing; it stays.
+  if (mine === reload && status.className !== 'bad') setStatus(`Plugin reloaded in ${((performance.now() - began) / 1000).toFixed(1)} s.`, 'ok');
+}
+
+for (const [path, model] of models) {
+  if (isPlugin(path)) {
+    model.onDidChangeContent(() => {
+      clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(reloadPlugins, 700);
+    });
+  } else {
+    model.onDidChangeContent(() => lsp.notify('textDocument/didChange', {
+      textDocument: { uri: model.uri.toString(), version: model.getVersionId() },
+      contentChanges: [{ text: model.getValue() }],
+    }));
+  }
+}
 
 // ---- providers: one per server capability ----------------------------------
 
@@ -521,16 +588,10 @@ let reporting = false;
 async function runReport(scene) {
   if (reporting) return;
   reporting = true;
-  const files = structuredClone(project);
-  for (const [path, model] of models) {
-    if (path.startsWith(DEPS)) continue;
-    const parts = path.split('/'), name = parts.pop();
-    parts.reduce((tree, part) => tree[part] ??= {}, files)[name] = model.getValue();
-  }
   results.textContent = `Running perl-lsp ${scene.report.join(' ')} …`;
   try {
     const started = performance.now();
-    const run = await runCommand({ wasm: 'perl-lsp.wasm', shim: 'shim/index.js', files: { ...files, local: { lib: { perl5: deps } } }, args: scene.report });
+    const run = await runCommand({ wasm: 'perl-lsp.wasm', shim: 'shim/index.js', files: workspace(), args: scene.report });
     if (run.code !== 0) throw new Error(run.stderr.trim().split('\n').pop() || `exit code ${run.code}`);
     results.textContent = `perl-lsp ${scene.report.join(' ')} finished in ${((performance.now() - started) / 1000).toFixed(1)} s.`;
     report.querySelector('h2').textContent = scene.title;
@@ -555,7 +616,9 @@ function runScene(scene) {
   show(scene.file, monaco.Range.fromPositions(position));
   editor.revealLineInCenter(position.lineNumber);
   results.textContent = '';
-  if (scene.list) listHierarchy(scene.list, model, position, scene.title);
+  if (scene.replace) {
+    if (!model.getValue().includes(scene.replace)) editor.executeEdits('demo', [{ range: match.range, text: scene.replace }]);
+  } else if (scene.list) listHierarchy(scene.list, model, position, scene.title);
   else if (scene.action) editor.trigger('demo', scene.action, null);
 }
 

@@ -47,7 +47,7 @@ export function startServer({ wasm, shim, files, env = [] }) {
   if (!crossOriginIsolated) throw new Error('perl-lsp needs a cross-origin isolated page for its threads');
   const kernel = new Worker(new URL('./kernel.js', import.meta.url), { type: 'module', name: 'perl-lsp-kernel' });
   const encoder = new TextEncoder(), decoder = new TextDecoder();
-  const pending = new Map(), listeners = [], logs = [];
+  const pending = new Map(), listeners = [], logs = [], logListeners = [];
   let nextId = 0, buffered = new Uint8Array(0);
   let stop;
   const exited = new Promise(resolve => { stop = resolve; });
@@ -86,6 +86,10 @@ export function startServer({ wasm, shim, files, env = [] }) {
     frame.set(head); frame.set(body, head.length);
     kernel.postMessage({ stdin: frame });
   }
+  function log(text) {
+    logs.push(text);
+    for (const l of logListeners) l(text);
+  }
   function fail(reason) {
     for (const p of pending.values()) p.reject(new Error(reason));
     pending.clear();
@@ -95,8 +99,8 @@ export function startServer({ wasm, shim, files, env = [] }) {
   kernel.onmessage = ev => {
     const d = ev.data;
     if (d.out === 1) feed(d.data);
-    else if (d.out === 2) logs.push(decoder.decode(d.data));
-    else if (d.log) logs.push(d.log);
+    else if (d.out === 2) log(decoder.decode(d.data));
+    else if (d.log) log(d.log);
     else if (d.trap) { logs.push(d.trap); fail('the server trapped: ' + d.trap.split('\n')[0]); }
     else if (d.fatal) fail('the server could not start: ' + d.fatal);
     else if (d.exit !== undefined) fail('the server exited with code ' + d.exit);
@@ -115,6 +119,7 @@ export function startServer({ wasm, shim, files, env = [] }) {
     notify(method, params) { send({ jsonrpc: '2.0', method, params }); },
     onNotification(listener) { listeners.push(listener); },
     logs,
+    onLog(listener) { logListeners.push(listener); },
     exited,
     terminate() { kernel.terminate(); fail('terminated'); },
   };

@@ -84,6 +84,14 @@ const EXPECT = {
   callees: results('round_cents'),
   subtypes: results('Shop::Discount::Fixed'),
   class: lands('lib/Shop/Order.pm', 'field $cart'),
+  'plugin-def': lands('lib/Shop/Flags.pm', 'feature_flag new_checkout'),
+  'plugin-refs': peek('flags.pl'),
+  'plugin-rename': ['.rename-box', ''],
+  'plugin-source': lands('.perl-lsp/flags.rhai', 'fn patterns'),
+  // The edit restarts the server; the scene after it only answers on the
+  // restarted one.
+  'plugin-edit': ['#status', 'Plugin reloaded'],
+  'plugin-after': lands('lib/Shop/Flags.pm', 'feature_flag beta_search'),
 };
 
 const site = path.resolve(process.argv[2] ?? 'site');
@@ -141,6 +149,7 @@ try {
     } catch (e) {
       failures.push(id);
       console.log(`  ✗ ${id}: ${String(e.message).split('\n')[0]}`);
+      if (expected.report) console.log('    the page says: ' + await page.textContent('#results'));
       if (process.argv[3]) await page.screenshot({ path: process.argv[3].replace(/\.png$/, `-${id}.png`) });
     }
   }
