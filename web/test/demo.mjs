@@ -38,6 +38,16 @@ const EXPECT = {
   docs: hover('Adds $quantity of an item'),
   typo: ['.marker-widget', 'is not defined in Shop::Cart'],
   import: ['.action-widget', "Import 'round_cents' from Shop::Util"],
+  'mojo-helper': hover('returns: Shop::Cart'),
+  'mojo-helper-def': lands('lib/Shop/Web.pm', 'helper( current_cart'),
+  'mojo-route': lands('lib/Shop/Web/Controller/Cart.pm', 'sub show'),
+  'mojo-docs': hover('my $route = $r->get'),
+  'mojo-source': lands('local/lib/perl5/Mojolicious/Controller.pm', 'sub render'),
+  'dbic-rs': hover('type: DBIx::Class::ResultSet'),
+  'dbic-row': hover('type: Row'),
+  'dbic-column': lands('lib/Shop/Schema/Result/Product.pm', 'price =>'),
+  'dbic-rel': lands('lib/Shop/Schema/Result/Product.pm', 'has_many( reviews'),
+  'moo-source': lands('local/lib/perl5/Moo.pm', 'package Moo'),
   callers: results('add_shipping'),
   callees: results('round_cents'),
   subtypes: results('Shop::Discount::Fixed'),
@@ -74,7 +84,7 @@ try {
               await page.locator(expected[0]).filter({ hasText: expected[1].replaceAll(' ', ' ') }).or(page.locator(expected[0]).filter({ hasText: expected[1] })).first().waitFor({ state: 'visible', timeout: 3000 });
             } else {
               await page.waitForFunction(({ file, line }) => {
-                const current = document.querySelector('#files button[aria-current="true"]')?.dataset.path;
+                const current = document.querySelector('nav [aria-current="true"]')?.dataset.path;
                 const editor = window.monaco.editor.getEditors()[0];
                 return current === file && editor.getModel().getLineContent(editor.getPosition().lineNumber).includes(line);
               }, expected, { timeout: 3000 });

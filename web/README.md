@@ -26,8 +26,14 @@ checks hover, definition, completion and references across files.
 ```
 scripts/wasm/build.sh --release
 cd web && npm ci
-node build-site.mjs ../target/wasm32-wasip1-threads/release/perl-lsp.wasm site
+cpm install -L deps --cpanfile demo/project/cpanfile
+node build-site.mjs ../target/wasm32-wasip1-threads/release/perl-lsp.wasm site deps/lib/perl5
 ```
+
+The frameworks the project uses are not in the repo. `demo/project/cpanfile`
+pins them, the build ships their `.pm` files as `deps.json`, and the page
+places them at `local/lib/perl5` in the server's file system, where the
+server looks for a project's dependencies without running `perl`.
 
 `site/` is self-contained and can be served by any static host. On a host
 that cannot send the isolation headers (GitHub Pages), `coi.js` registers a

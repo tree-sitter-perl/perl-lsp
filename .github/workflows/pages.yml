@@ -31,11 +31,17 @@ jobs:
       - name: Build the server
         run: scripts/wasm/build.sh --release
 
+      - uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: "5.38"
+          install-modules-with: cpm
+
       - name: Assemble the site
         working-directory: web
         run: |
           npm ci --omit=dev
-          node build-site.mjs ../target/wasm32-wasip1-threads/release/perl-lsp.wasm "$RUNNER_TEMP/site"
+          cpm install -L "$RUNNER_TEMP/demo-perl" --cpanfile demo/project/cpanfile
+          node build-site.mjs ../target/wasm32-wasip1-threads/release/perl-lsp.wasm "$RUNNER_TEMP/site" "$RUNNER_TEMP/demo-perl/lib/perl5"
 
       - uses: actions/upload-pages-artifact@v4
         with:

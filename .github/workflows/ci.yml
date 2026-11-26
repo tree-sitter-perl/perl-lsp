@@ -216,8 +216,14 @@ jobs:
 
       # Served as GitHub Pages serves it, without isolation headers: the
       # page's service worker has to supply them before the server starts.
+      - uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: "5.38"
+          install-modules-with: cpm
+
       - name: Demo page test
         working-directory: web
         run: |
-          node build-site.mjs ../target/wasm32-wasip1-threads/debug/perl-lsp.wasm "$RUNNER_TEMP/site"
+          cpm install -L "$RUNNER_TEMP/demo-perl" --cpanfile demo/project/cpanfile
+          node build-site.mjs ../target/wasm32-wasip1-threads/debug/perl-lsp.wasm "$RUNNER_TEMP/site" "$RUNNER_TEMP/demo-perl/lib/perl5"
           node test/demo.mjs "$RUNNER_TEMP/site"

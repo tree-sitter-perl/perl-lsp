@@ -45,6 +45,18 @@ const SCENES = [
     { id: 'typo', title: 'A misspelled method', note: 'totls is not a Shop::Cart method.', file: 'app.pl', on: '# A typo', action: 'editor.action.marker.next' },
     { id: 'import', title: 'A missing import, with its fix', note: 'round_cents exists in Shop::Util; the quick fix adds it to the use line.', file: 'app.pl', on: 'round_cents(3', action: 'editor.action.quickFix' },
   ]],
+  ['Frameworks, from their real source', [
+    { id: 'mojo-helper', title: 'A Mojolicious helper', note: 'current_cart is declared in startup(); here it is a method, and it returns a Shop::Cart.', file: 'lib/Shop/Web/Controller/Cart.pm', on: '$self->current_cart', offset: 8, action: HOVER },
+    { id: 'mojo-helper-def', title: 'Where the helper is declared', note: 'Jumps to the helper(...) call in the application class.', file: 'lib/Shop/Web/Controller/Cart.pm', on: '$self->current_cart', offset: 8, action: DEFINITION },
+    { id: 'mojo-route', title: 'A route to its action', note: "'cart#show' jumps to show() in the Cart controller.", file: 'lib/Shop/Web.pm', on: "'cart#show'", offset: 7, action: DEFINITION },
+    { id: 'mojo-docs', title: 'Framework documentation', note: "Mojolicious's own POD for get(), read from its source.", file: 'lib/Shop/Web.pm', on: '$r->get', offset: 5, action: HOVER },
+    { id: 'mojo-source', title: 'Into the framework', note: 'render() opens Mojolicious::Controller, read-only.', file: 'lib/Shop/Web/Controller/Cart.pm', on: '$self->render( json', offset: 8, action: DEFINITION },
+    { id: 'dbic-rs', title: 'A DBIx::Class resultset', note: "resultset('Product') is a ResultSet of Product rows.", file: 'catalog.pl', on: '$products = ', action: HOVER },
+    { id: 'dbic-row', title: 'A row from it', note: 'next() gives a Product row, so display_name resolves.', file: 'catalog.pl', on: '$product = ', action: HOVER },
+    { id: 'dbic-column', title: 'A column accessor', note: 'price is a column declared in add_columns.', file: 'catalog.pl', on: '$product->price', offset: 10, action: DEFINITION },
+    { id: 'dbic-rel', title: 'A relationship', note: 'reviews comes from has_many.', file: 'catalog.pl', on: '$product->reviews', offset: 10, action: DEFINITION },
+    { id: 'moo-source', title: 'Into Moo', note: 'use Moo opens the installed module.', file: 'lib/Shop/Item.pm', on: 'use Moo', offset: 5, action: DEFINITION },
+  ]],
   ['Whole program', [
     { id: 'callers', title: 'Who calls this?', note: 'Incoming calls to subtotal.', file: 'lib/Shop/Cart.pm', on: 'sub subtotal', offset: 4, list: 'incomingCalls' },
     { id: 'callees', title: 'What does this call?', note: 'Outgoing calls from totals, across files.', file: 'lib/Shop/Cart.pm', on: 'sub totals', offset: 4, list: 'outgoingCalls' },
@@ -62,7 +74,11 @@ const monaco = await new Promise(resolve => {
 
 const toPosition = p => ({ line: p.lineNumber - 1, character: p.column - 1 });
 const toRange = r => r && new monaco.Range(r.start.line + 1, r.start.character + 1, r.end.line + 1, r.end.character + 1);
-const toLocation = l => ({ uri: monaco.Uri.parse(l.uri ?? l.targetUri), range: toRange(l.range ?? l.targetSelectionRange) });
+const toLocation = l => {
+  const uri = monaco.Uri.parse(l.uri ?? l.targetUri);
+  modelFor(uri);
+  return { uri, range: toRange(l.range ?? l.targetSelectionRange) };
+};
 const toMarkdown = c => [c].flat().map(part => ({ value: typeof part === 'string' ? part : part.kind === 'plaintext' || !part.kind && !part.language ? part.value : part.language ? '```' + part.language + '\n' + part.value + '\n```' : part.value }));
 const at = (model, position) => ({ textDocument: { uri: model.uri.toString() }, position: toPosition(position) });
 
@@ -86,7 +102,9 @@ function toWorkspaceEdit(edit) {
 
 // ---- project and server ----------------------------------------------------
 
-const project = await (await fetch('project.json')).json();
+const [project, deps] = await Promise.all(['project.json', 'deps.json'].map(async f => (await fetch(f)).json()));
+// Installed modules sit where the server looks for them without being told.
+const DEPS = 'local/lib/perl5/';
 function* flatten(tree, prefix = '') {
   for (const [name, value] of Object.entries(tree)) {
     if (typeof value === 'string') yield [prefix + name, value];
@@ -95,7 +113,18 @@ function* flatten(tree, prefix = '') {
 }
 const models = new Map();
 for (const [path, text] of flatten(project)) {
-  models.set(path, monaco.editor.createModel(text, LANGUAGE, monaco.Uri.parse(`${ROOT}/${path}`)));
+  if (/\.(pm|pl|t)$/.test(path)) models.set(path, monaco.editor.createModel(text, LANGUAGE, monaco.Uri.parse(`${ROOT}/${path}`)));
+}
+// A dependency gets a model the first time an answer points into it: Monaco
+// can only show or peek a location whose model exists.
+function modelFor(uri) {
+  const path = uri.toString().slice(ROOT.length + 1);
+  if (models.has(path) || !path.startsWith(DEPS)) return models.get(path);
+  const text = path.slice(DEPS.length).split('/').reduce((tree, part) => tree?.[part], deps);
+  if (typeof text !== 'string') return undefined;
+  const model = monaco.editor.createModel(text, LANGUAGE, uri);
+  models.set(path, model);
+  return model;
 }
 
 // The server's semantic tokens, coloured: sigils by container kind, hash
@@ -127,39 +156,46 @@ const editor = monaco.editor.create(document.getElementById('editor'), {
 });
 darkMode.addEventListener('change', () => monaco.editor.setTheme('perl-lsp-' + (darkMode.matches ? 'dark' : 'light')));
 
-const fileList = document.getElementById('files');
+const fileList = document.getElementById('files'), depList = document.getElementById('deps');
+function listFile(list, path, label) {
+  const li = document.createElement('li'), b = document.createElement('button');
+  b.textContent = label;
+  b.dataset.path = path;
+  b.onclick = () => show(path);
+  li.append(b);
+  list.append(li);
+}
 function show(path, selection) {
-  const model = models.get(path);
+  const model = modelFor(monaco.Uri.parse(`${ROOT}/${path}`));
+  if (!model) return false;
+  const dependency = path.startsWith(DEPS);
+  if (dependency && !depList.querySelector(`[data-path="${CSS.escape(path)}"]`)) {
+    depList.parentElement.hidden = false;
+    listFile(depList, path, path.slice(DEPS.length));
+  }
   editor.setModel(model);
-  for (const b of fileList.querySelectorAll('button')) b.setAttribute('aria-current', String(b.dataset.path === path));
+  editor.updateOptions({ readOnly: dependency });
+  for (const b of document.querySelectorAll('nav [data-path]')) b.setAttribute('aria-current', String(b.dataset.path === path));
   if (selection) {
     editor.setSelection(selection);
     editor.revealRangeInCenterIfOutsideViewport(selection);
   }
   editor.focus();
+  return true;
 }
-for (const path of models.keys()) {
-  const li = document.createElement('li'), b = document.createElement('button');
-  b.textContent = path;
-  b.dataset.path = path;
-  b.onclick = () => show(path);
-  li.append(b);
-  fileList.append(li);
-}
+for (const path of models.keys()) listFile(fileList, path, path);
 // Monaco alone has no notion of opening another file; goto-def and the
 // references peek ask this opener.
 monaco.editor.registerEditorOpener({
   openCodeEditor(_source, resource, where) {
     const path = resource.toString().slice(ROOT.length + 1);
-    if (!models.has(path)) return false;
-    show(path, where && (where.startLineNumber ? where : new monaco.Range(where.lineNumber, where.column, where.lineNumber, where.column)));
-    return true;
+    return show(path, where && (where.startLineNumber ? where : new monaco.Range(where.lineNumber, where.column, where.lineNumber, where.column)));
   },
 });
 
 let lsp;
 try {
-  lsp = startServer({ wasm: 'perl-lsp.wasm', shim: 'shim/index.js', files: project });
+  lsp = startServer({ wasm: 'perl-lsp.wasm', shim: 'shim/index.js', files: { ...project, local: { lib: { perl5: deps } } } });
 } catch (e) {
   setStatus(e.message + '. If this page just loaded, it reloads itself once to turn isolation on.', 'bad');
   throw e;
@@ -189,7 +225,7 @@ const { capabilities } = await lsp.request('initialize', {
 lsp.notify('initialized', {});
 setStatus(`Server ready in ${((performance.now() - started) / 1000).toFixed(1)} s.`, 'ok');
 
-// Every model is an open document: a rename can edit any of them, and the
+// Every project file is an open document: a rename can edit any of them, and the
 // server must then be told, or its copy of that file goes stale.
 for (const model of models.values()) {
   lsp.notify('textDocument/didOpen', { textDocument: { uri: model.uri.toString(), languageId: LANGUAGE, version: model.getVersionId(), text: model.getValue() } });

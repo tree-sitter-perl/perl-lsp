@@ -20,3 +20,4 @@ gold-corpus/local
 __pycache__/
 bench/runs/
 bench/measurements.duckdb
+web/deps/

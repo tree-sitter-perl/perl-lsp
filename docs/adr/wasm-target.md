@@ -43,6 +43,13 @@ stable.
 interfaces mapped onto LSP requests, one provider per advertised
 capability. It carries no analysis and no Perl knowledge.
 
+**The demo's dependencies are installed, not committed.** The site build
+installs `web/demo/project/cpanfile` and ships the `.pm` files beside the
+page; the page places them at `local/lib/perl5`, the one dependency root the
+server finds without running `perl`. Framework answers therefore come from
+the frameworks' real source, read by the same resolver a desktop session
+uses.
+
 ## Hosts
 
 | Host | Cross-origin isolated | Runs the threaded build |
