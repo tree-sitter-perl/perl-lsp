@@ -1016,6 +1016,7 @@ fn inject_member_blocks(
                 deref_stack: m.deref_stack.clone(),
                 attributes: Vec::new(),
                 arity: None,
+                params: None,
                 owner_stated: false,
                 flags: Default::default(),
                 member_space: None,
@@ -1214,6 +1215,7 @@ fn remap_spans(
             deref_stack: _,
             attributes: _,
             arity: _,
+            params,
             owner_stated: _,
             flags: _,
             member_space: _,
@@ -1222,6 +1224,9 @@ fn remap_spans(
             enum_of: _,
             body: _,
         } = s;
+        for p in params.iter_mut().flatten() {
+            p.binding_site = p.binding_site.map(r);
+        }
         *start = r(*start);
         *end = r(*end);
         *name_start = r(*name_start);
@@ -1242,8 +1247,12 @@ fn remap_spans(
             qualifier: _,
             spelled,
             access: _,
+            arg_keys,
         } = rf;
         (*start, *end) = remap_span(*start, *end);
+        for (_, sp) in arg_keys.iter_mut() {
+            *sp = rspan(*sp);
+        }
         // The invocant span is consumed via `expr_type_at_span` (member
         // resolution); the member-op span rides the MethodCall ref. Both
         // die on the spliced line if left in transformed coords.
@@ -1258,9 +1267,12 @@ fn remap_spans(
         }
     }
     for read in var_reads.iter_mut() {
-        let crate::build::query_extract::VarRead { name: _, scope: _, span, token, expr: _, written: _ } = read;
+        let crate::build::query_extract::VarRead { name: _, scope: _, span, token, expr: _, written: _, arg_keys } = read;
         *span = rspan(*span);
         *token = rspan(*token);
+        for (_, key) in arg_keys.iter_mut() {
+            *key = rspan(*key);
+        }
     }
     for (_, _, span) in var_writes.iter_mut() {
         *span = rspan(*span);
@@ -1274,8 +1286,8 @@ fn remap_spans(
         if let Some(recv) = site.receiver.as_mut() {
             *recv = rspan(*recv);
         }
-        for (arg, _) in site.args.iter_mut().flatten() {
-            *arg = rspan(*arg);
+        for arg in site.args.iter_mut().flatten() {
+            arg.span = rspan(arg.span);
         }
     }
     for site in receiver_sites.iter_mut() {

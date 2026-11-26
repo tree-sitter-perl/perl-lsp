@@ -50,7 +50,11 @@ pub fn python_pack() -> LangPack {
         lattice: PYTHON_LATTICE,
         type_display: |tag| (tag == "Undef").then_some("None"),
         shape_name: |raw| raw.to_string(),
-        default_name: |_, _| None,
+        // A lambda is named by what Python calls it.
+        default_name: |kind, _| match kind {
+            DefCap::Anon => Some("<lambda>".to_string()),
+            _ => None,
+        },
         annot_type: annotation_type,
         annot_enforcement: crate::model::witnesses::Enforcement::Advisory,
         doc_text: |_| None,

@@ -214,6 +214,7 @@ impl<'a> Builder<'a> {
                 outline_label,
                 attr,
                 return_via_edge,
+                callable,
             } => {
                 let return_type_for_bag = return_type.clone();
                 let detail = SymbolDetail::Sub {
@@ -256,6 +257,8 @@ impl<'a> Builder<'a> {
                 } else {
                     self.add_symbol_ns(name, SymKind::Method, span, selection_span, detail, ns)
                 };
+                let input = HashKeyOwner::named_input(target_pkg.clone(), self.symbols[sid.0 as usize].name.clone());
+                self.register_callable(callable.as_ref(), input);
                 // The ctor/column key the same plugin token minted first,
                 // if any — the pair is a fact of the token, recorded here.
                 let twin = self.symbols.iter().find(|s| {
@@ -359,7 +362,7 @@ impl<'a> Builder<'a> {
             }
             plugin::EmitAction::Handler {
                 name, owner, dispatchers, params, span, selection_span, display,
-                hide_in_outline, outline_label,
+                hide_in_outline, outline_label, callable,
             } => {
                 // Dedup: the partial-route re-dispatch re-runs `->to`
                 // plugins post-fold, so the same Handler (same name +
@@ -373,10 +376,13 @@ impl<'a> Builder<'a> {
                 if already {
                     return;
                 }
+                self.register_callable(callable.as_ref(), HashKeyOwner::Handler { owner: Box::new(owner.clone()), name: name.as_str().into(), slot: Default::default() });
+                let runs = self.named_callable_input(callable.as_ref());
                 let detail = SymbolDetail::Handler {
                     owner,
-                    dispatchers,
+                    dispatchers: dispatchers.into(),
                     params: params.into_iter().map(Into::into).collect(),
+                    runs: runs.map(Box::new),
                 };
                 let sid = self.add_symbol_ns(name, SymKind::Handler, span, selection_span, detail, ns);
                 *self.presentation_mut(sid) = crate::model::file_analysis::Presentation {
@@ -453,7 +459,9 @@ impl<'a> Builder<'a> {
                     self.method_call_invocant.insert(ref_idx, c);
                 }
             }
-            plugin::EmitAction::DispatchCall { name, dispatcher, owner, span, var_text } => {
+            // The arguments a dispatch call passes its handler are read
+            // where the match's captures are in hand (`dispatch_pattern_plugins`).
+            plugin::EmitAction::DispatchCall { name, dispatcher, owner, span, var_text, args } => {
                 // Same pattern as HashKeyAccess: record the owner so
                 // `build_indices` can link the ref to its Handler def in
                 // O(1) and `resolve::refs_to` matches cross-file by
@@ -467,7 +475,7 @@ impl<'a> Builder<'a> {
                     name.clone(),
                 )) {
                     self.refs.push(Ref {
-                        kind: RefKind::DispatchCall { dispatcher },
+                        kind: RefKind::DispatchCall { dispatcher, args: args.map(plugin::HandlerArgs::region) },
                         span,
                         scope: self.current_scope(),
                         target_name: name,
@@ -781,9 +789,105 @@ impl<'a> Builder<'a> {
             .map(|p| plugin::EmittedParam {
                 name: p.name,
                 default: p.default,
-                is_slurpy: p.is_slurpy,
+                is_slurpy: false,
+                pass: p.pass,
                 is_invocant: false,
             })
             .collect()
+    }
+}
+
+impl<'a> Builder<'a> {
+    /// A plugin registered `callable` as a helper or handler whose input is
+    /// `input`: an anonymous callable has no name of its own for a call to
+    /// reach, so it answers to its registration's. A named sub keeps its
+    /// own (`\&mail` is still called as `mail`).
+    /// The owner a key of `owner` answers to once registrations are
+    /// adopted: a registered anonymous callable's input is the one it was
+    /// registered as. Gates that run before adoption compare through it.
+    pub(super) fn as_registered(&self, owner: &HashKeyOwner) -> HashKeyOwner {
+        match owner {
+            HashKeyOwner::AnonInput { callable, slot } => self
+                .registered_inputs
+                .iter()
+                .find(|(s, _)| s == callable)
+                .map_or_else(|| owner.clone(), |(_, o)| o.clone().with_slot(*slot)),
+            HashKeyOwner::Input { .. } => self
+                .input_aliases
+                .iter()
+                .find(|(from, _)| from == owner)
+                .map_or_else(|| owner.clone(), |(_, to)| to.clone()),
+            _ => owner.clone(),
+        }
+    }
+
+    /// The input of a NAMED callable a registration runs (`\&mail`, or a
+    /// declared sub's symbol). An anonymous one is adopted instead.
+    fn named_callable_input(&self, callable: Option<&crate::model::witnesses::WitnessAttachment>) -> Option<HashKeyOwner> {
+        use crate::model::witnesses::WitnessAttachment;
+        match callable? {
+            WitnessAttachment::Member { owner, name, .. } => Some(HashKeyOwner::named_input(Some(owner.clone()), name.clone())),
+            WitnessAttachment::Symbol(sid) => {
+                let sym = self.symbols.get(sid.0 as usize)?;
+                (!sym.flags.contains(crate::model::file_analysis::SymbolFlags::ANONYMOUS))
+                    .then(|| HashKeyOwner::input_of(sym, &self.namespace_ranges))
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn register_callable(
+        &mut self,
+        callable: Option<&crate::model::witnesses::WitnessAttachment>,
+        input: HashKeyOwner,
+    ) {
+        let Some(crate::model::witnesses::WitnessAttachment::Symbol(sid)) = callable else { return };
+        let anonymous = self
+            .symbols
+            .get(sid.0 as usize)
+            .is_some_and(|s| s.flags.contains(crate::model::file_analysis::SymbolFlags::ANONYMOUS));
+        if anonymous && !self.registered_inputs.iter().any(|(s, _)| s == sid) {
+            self.registered_inputs.push((*sid, input));
+        }
+    }
+
+    /// Every key of a registered anonymous callable — its parameters' and
+    /// the reads that declare them, and the calls through a value holding
+    /// it — moves to the input it was registered as. One registration per
+    /// callable: the first names it.
+    pub(super) fn adopt_registered_inputs(&mut self) {
+        if self.registered_inputs.is_empty() && self.input_aliases.is_empty() {
+            return;
+        }
+        let adopted = |owner: &HashKeyOwner| -> Option<HashKeyOwner> {
+            let to = self.as_registered(owner);
+            (to != *owner).then_some(to)
+        };
+        let mut sym_moves = Vec::new();
+        for s in &self.symbols {
+            if let SymbolDetail::HashKeyDef { owner, .. } = &s.detail {
+                if let Some(to) = adopted(owner) {
+                    sym_moves.push((s.id, to));
+                }
+            }
+        }
+        let mut ref_moves = Vec::new();
+        for (i, r) in self.refs.iter().enumerate() {
+            if let Some(crate::model::file_analysis::RefBinding::HashKey { owner, .. }) = &r.binding {
+                if let Some(to) = adopted(owner) {
+                    ref_moves.push((i, to));
+                }
+            }
+        }
+        for (sid, to) in sym_moves {
+            if let SymbolDetail::HashKeyDef { owner, .. } = &mut self.symbols[sid.0 as usize].detail {
+                *owner = to;
+            }
+        }
+        for (i, to) in ref_moves {
+            if let Some(crate::model::file_analysis::RefBinding::HashKey { owner, .. }) = &mut self.refs[i].binding {
+                *owner = to;
+            }
+        }
     }
 }

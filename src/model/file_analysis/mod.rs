@@ -54,6 +54,8 @@ mod hover;
 pub(crate) use hover::callable_hover_tail;
 mod sym_index;
 mod completion;
+mod callee;
+pub use callee::*;
 pub use completion::*;
 mod equiv_dump;
 
@@ -805,7 +807,14 @@ impl AttrProjection {
 pub struct FieldProjections {
     pub class: String,
     pub bare: String,
-    pub has_param: bool,
+    /// The named input that takes this name: the constructor's for a
+    /// constructor attr, the callable's for a by-name parameter.
+    pub input: Option<HashKeyOwner>,
+    /// The group is an attribute of `class`, so the class's projections of
+    /// the name (accessors, slots, columns) join it and an ancestor's
+    /// same-named attr may be its root. A parameter's group is its
+    /// callable's alone.
+    pub attr: bool,
     pub has_reader: bool,
     /// The family the reader spelling is asked as: an accessor is called,
     /// whatever backs it; a member that IS the field (python's class-body
@@ -854,7 +863,8 @@ struct FieldGroup {
     decl_span: Option<Span>,
     class: String,
     bare: String,
-    has_param: bool,
+    input: Option<HashKeyOwner>,
+    attr: bool,
     has_reader: bool,
     reader_kind: MemberKind,
 }

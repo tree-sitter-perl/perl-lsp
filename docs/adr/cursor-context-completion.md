@@ -66,6 +66,25 @@ pub struct MemberCompletionCtx { receiver_type: Option<InferredType>, op_fix: Op
 arm that reads the finished buffer (member, identity, domain comparison),
 so a completion pays one reparse whichever arm answers.
 
+**Half-typed brackets.** A call the user is still writing has no closer
+(`f(a, ti|`), so the plain splice can leave the sentinel in an ERROR with no
+call around it, or in a list that swallowed the code after it. When the plain
+parse has an error, `sentinel_parse` finds the innermost declared open bracket
+before the cursor that nothing closes (one descent from the root to the
+sentinel, reading each node's children before the cursor right to left and
+descending only into subtrees that hold an error) and reparses once with
+`__CURSOR__ <closer>`. The retry is kept only when that open and the spliced
+closer are children of one non-ERROR node and the closer is not MISSING;
+anything else keeps the plain parse. No terminator vocabulary, no arm-specific
+accept, and at most two parses per request at any depth: the outer brackets
+belong to the code after the cursor. Which tokens pair is the document's
+`#recover-pair!` declaration (`pack-vocabulary.md`). Counters:
+`cursor.recovery.retry`, `cursor.recovery.rejected`. Known hole: cpp
+`g(a, |` with no `;` before the `}` retries into a tree whose call is right
+but whose enclosing `void f() {…}` reads as a declaration with an initializer
+list. No cpp arm reads that tree today; pack signature help must, with it as
+its first test.
+
 Two properties make it cheap and exact:
 
 - **Free anchor.** The splice lands *at* the cursor, strictly after the
@@ -136,6 +155,31 @@ finished buffer would type it no differently; an untyped `$u` in `$u->go()`
 stays untyped without the second analysis. Ungated, that analysis ran for
 every untyped receiver and took the composer completion census from 899 s
 to 1,209 s.
+
+The finished buffer's analysis is made once per request
+(`SentinelParse::finished`, counter `cursor.finished_analysis`) and every
+arm that needs it reads that one. The label arm is the other reader: a call
+the user has not closed (`connect(host: 'h', |`) usually leaves no call ref
+in the written analysis, so `cursor_sentinel::call_labels` reads the callee
+(`FileAnalysis::callee_at`) on the written analysis first and, only where
+that has none and the written tree read the callee through the cursor as an
+error, on the finished one. The labels resolve at detection against the
+analysis that named the callee, since the callee's symbol lives there, and
+`Slot::Label` carries them resolved.
+
+That finished analysis is a whole-file analysis (230 ms on laravel's
+152 KB `Builder.php`), and before the index lands it is the only thing that
+can name an unclosed call's callee. So an open document holds the callee it
+resolved there, as it holds its stable outline (`HeldCallee`, on
+`Document`, counter `cursor.held_callee.hit`): the answer is reused while
+the text up to the callee's end and the text from the cursor on are
+unchanged, which is exactly typing the call's arguments. Only the callee
+and its labels are held; the labels already used and the one being written
+are read afresh each keystroke. A written-buffer answer is never held, and
+is always tried first, so an answer the index can give replaces the held
+one. The index landing adds files and takes no declaration away, so a held
+answer stays right until the call head or the text after the cursor changes,
+though not always the richest the index could now give.
 
 ### Receiver → members: tree-free, reusing the bag
 

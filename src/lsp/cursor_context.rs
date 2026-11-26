@@ -67,6 +67,90 @@ pub struct CallContext {
     /// looks this up against HashKeyDefs to surface handler params). `None`
     /// when the first arg is a variable/expression.
     pub first_arg_string: Option<String>,
+    /// Where the callee's name token starts, when the tree states one:
+    /// what names the call's ref (`FileAnalysis::callee_at`).
+    pub name_start: Option<Point>,
+    /// Where the cursor sits among the call's written arguments.
+    pub site: ArgSite,
+}
+
+/// Where the cursor sits among a call's written arguments, read off the
+/// tree so a consumer can place it against the callee's parameters.
+#[derive(Debug, Clone, Default)]
+pub struct ArgSite {
+    /// The written argument the cursor is in, or the one it starts.
+    pub place: usize,
+    /// When that argument is a hash literal the cursor is inside: whether
+    /// the cursor is at one of its keys, and the keys it already writes.
+    pub hash: Option<(bool, HashSet<String>)>,
+    /// Each written argument's key text, where it is one.
+    pub keys: Vec<Option<String>>,
+    /// Each written argument's span.
+    pub spans: Vec<(Point, Point)>,
+}
+
+impl ArgSite {
+    /// The site among the arguments after the one holding `at`
+    /// (`emit(ready => |)` → the handler's own arguments); `None` when the
+    /// cursor is not past it.
+    pub fn after(&self, at: Point) -> Option<ArgSite> {
+        let k = self.spans.iter().position(|&(s, e)| s <= at && at < e)?;
+        if self.place <= k {
+            return None;
+        }
+        Some(ArgSite {
+            place: self.place - (k + 1),
+            hash: self.hash.clone(),
+            keys: self.keys[k + 1..].to_vec(),
+            spans: self.spans[k + 1..].to_vec(),
+        })
+    }
+
+    /// Whether the cursor is at a key of the names a callee collects after
+    /// `offset` places, and the names already written there.
+    pub fn named_key_after(&self, offset: usize) -> (bool, HashSet<String>) {
+        let at_key = self.place >= offset && (self.place - offset) % 2 == 0;
+        let used = self.keys.iter().skip(offset).step_by(2).flatten().cloned().collect();
+        (at_key, used)
+    }
+}
+
+/// The site among `elements`, the written arguments of a call or region.
+fn arg_site(elements: &[Node], source: &[u8], point: Point) -> ArgSite {
+    let place = elements.iter().take_while(|e| e.end_position() <= point).count();
+    let hash = elements
+        .get(place)
+        .filter(|h| h.is(Kind::AnonymousHashExpression) && h.start_position() < point)
+        .map(|h| {
+            let body = crate::cst::literal_body(*h);
+            let at_key = body.id() == h.id() || count_separators_before(body, point) % 2 == 0;
+            (at_key, used_keys_in_pairs(*h, source))
+        });
+    ArgSite {
+        place,
+        hash,
+        keys: elements.iter().map(|e| extract_key_text(*e, source)).collect(),
+        spans: elements.iter().map(|e| (e.start_position(), e.end_position())).collect(),
+    }
+}
+
+/// The site inside the array literal at `span` (a dispatch's handler
+/// arguments, `enqueue(mail => [|])`); `None` when the cursor is outside it.
+pub fn arg_site_in_array(tree: &Tree, source: &[u8], span: (Point, Point), point: Point) -> Option<ArgSite> {
+    if !(span.0 < point && point < span.1) {
+        return None;
+    }
+    let array = tree.root_node().descendant_for_point_range(span.0, span.1)?;
+    if !array.is(Kind::AnonymousArrayExpression) || array.start_position() != span.0 || array.end_position() != span.1 {
+        return None;
+    }
+    let body = crate::cst::literal_body(array);
+    let elements: Vec<Node> = if body.id() == array.id() {
+        array.named().filter(|n| !n.is_extra()).collect()
+    } else {
+        crate::cst::list_elements(body)
+    };
+    Some(arg_site(&elements, source, point))
 }
 
 // ---- Cursor context detection (text-only, no tree) ----
@@ -687,7 +771,7 @@ fn detect_from_error_node(
 /// Find the enclosing function/method call at the cursor, if any.
 /// Returns a CallContext with everything pre-computed from the tree.
 pub fn find_call_context(tree: &Tree, source: &[u8], point: Point) -> Option<CallContext> {
-    let (name, is_method, invocant, args_node) = find_call_at_cursor(tree, source, point)?;
+    let (name, is_method, invocant, args_node, name_start) = find_call_at_cursor(tree, source, point)?;
 
     let active_param = match args_node {
         Some(args) => active_slot_in_node(args, point),
@@ -706,6 +790,11 @@ pub fn find_call_context(tree: &Tree, source: &[u8], point: Point) -> Option<Cal
 
     let first_arg_string = args_node.and_then(|args| first_arg_as_string(args, source));
 
+    let site = match args_node {
+        Some(args) => arg_site(&crate::cst::list_elements_or_self(args), source, point),
+        None => ArgSite::default(),
+    };
+
     Some(CallContext {
         name,
         is_method,
@@ -714,6 +803,8 @@ pub fn find_call_context(tree: &Tree, source: &[u8], point: Point) -> Option<Cal
         at_key_position,
         used_keys,
         first_arg_string,
+        name_start,
+        site,
     })
 }
 
@@ -742,7 +833,7 @@ fn find_call_at_cursor<'a>(
     tree: &'a Tree,
     source: &'a [u8],
     point: Point,
-) -> Option<(String, bool, Option<String>, Option<Node<'a>>)> {
+) -> Option<(String, bool, Option<String>, Option<Node<'a>>, Option<Point>)> {
     // Try at cursor, then one column back (cursor may be right after `(` or `,`)
     let try_points = if point.column > 0 {
         vec![point, Point::new(point.row, point.column - 1)]
@@ -781,7 +872,7 @@ fn find_call_at_cursor_from<'a>(
     source: &'a [u8],
     start_point: Point,
     cursor: Point,
-) -> Option<(String, bool, Option<String>, Option<Node<'a>>)> {
+) -> Option<(String, bool, Option<String>, Option<Node<'a>>, Option<Point>)> {
     let mut node = tree
         .root_node()
         .descendant_for_point_range(start_point, start_point)?;
@@ -789,23 +880,29 @@ fn find_call_at_cursor_from<'a>(
     for _ in 0..30 {
         match node.kind_of() {
             Kind::FunctionCallExpression | Kind::AmbiguousFunctionCallExpression => {
-                let name = node
-                    .field(Field::Function)
-                    .and_then(|n| n.utf8_text(source).ok())?;
+                let fname = node.field(Field::Function)?;
+                let name = fname.utf8_text(source).ok()?;
                 let args = node.field(Field::Arguments);
-                return Some((name.to_string(), false, None, args));
+                return Some((name.to_string(), false, None, args, Some(fname.start_position())));
+            }
+            // `$f->(…)`: the operand holds the callable.
+            Kind::CoderefCallExpression => {
+                let operand = crate::cst::NodeExt::elements(&node).next()?;
+                let name = operand.utf8_text(source).ok()?;
+                let args = node.field(Field::Arguments);
+                return Some((name.to_string(), false, None, args, Some(operand.start_position())));
             }
             Kind::MethodCallExpression => {
-                let name = node
-                    .field(Field::Method)
-                    .and_then(|n| n.utf8_text(source).ok())?;
+                let mname = node.field(Field::Method)?;
+                let name = mname.utf8_text(source).ok()?;
+                let name_start = Some(mname.start_position());
                 let invocant = node
                     .field(Field::Invocant)
                     .and_then(|n| n.utf8_text(source).ok())
                     .map(|s| s.to_string());
                 let args = node.field(Field::Arguments);
                 if args.is_some() {
-                    return Some((name.to_string(), true, invocant, args));
+                    return Some((name.to_string(), true, invocant, args, name_start));
                 }
                 // No arguments field — check if next sibling is an ERROR with `(`
                 let args_from_error = node
@@ -822,7 +919,7 @@ fn find_call_at_cursor_from<'a>(
                         }
                         None
                     });
-                return Some((name.to_string(), true, invocant, args_from_error));
+                return Some((name.to_string(), true, invocant, args_from_error, name_start));
             }
             Kind::Error => {
                 if let Some(result) = parse_call_from_error(node, source, cursor) {
@@ -845,7 +942,7 @@ fn find_call_from_error_sibling<'a>(
     error: Node<'a>,
     source: &'a [u8],
     _point: Point,
-) -> Option<(String, bool, Option<String>, Option<Node<'a>>)> {
+) -> Option<(String, bool, Option<String>, Option<Node<'a>>, Option<Point>)> {
     let mut args_node: Option<Node<'a>> = None;
     for i in 0..error.child_count() {
         if let Some(child) = error.child(i) {
@@ -864,26 +961,24 @@ fn find_call_from_error_sibling<'a>(
 
     match call_node.kind_of() {
         Kind::MethodCallExpression => {
-            let name = call_node
-                .field(Field::Method)
-                .and_then(|n| n.utf8_text(source).ok())?;
+            let mname = call_node.field(Field::Method)?;
+            let name = mname.utf8_text(source).ok()?;
             let invocant = call_node
                 .field(Field::Invocant)
                 .and_then(|n| n.utf8_text(source).ok())
                 .map(|s| s.to_string());
             let args = call_node.field(Field::Arguments).or(args_node);
-            Some((name.to_string(), true, invocant, args))
+            Some((name.to_string(), true, invocant, args, Some(mname.start_position())))
         }
         Kind::FunctionCallExpression | Kind::AmbiguousFunctionCallExpression => {
-            let name = call_node
-                .field(Field::Function)
-                .and_then(|n| n.utf8_text(source).ok())?;
+            let fname = call_node.field(Field::Function)?;
+            let name = fname.utf8_text(source).ok()?;
             let args = call_node.field(Field::Arguments).or(args_node);
-            Some((name.to_string(), false, None, args))
+            Some((name.to_string(), false, None, args, Some(fname.start_position())))
         }
         Kind::Bareword => {
             let name = call_node.utf8_text(source).ok()?;
-            Some((name.to_string(), false, None, args_node))
+            Some((name.to_string(), false, None, args_node, Some(call_node.start_position())))
         }
         _ => None,
     }
@@ -894,7 +989,7 @@ fn parse_call_from_error<'a>(
     error: Node<'a>,
     source: &'a [u8],
     _cursor: Point,
-) -> Option<(String, bool, Option<String>, Option<Node<'a>>)> {
+) -> Option<(String, bool, Option<String>, Option<Node<'a>>, Option<Point>)> {
     let mut func_name: Option<String> = None;
     let mut method_name: Option<String> = None;
     let mut invocant: Option<String> = None;
@@ -928,9 +1023,9 @@ fn parse_call_from_error<'a>(
     }
 
     if let Some(name) = method_name {
-        Some((name, true, invocant, args_node))
+        Some((name, true, invocant, args_node, None))
     } else if let Some(name) = func_name {
-        Some((name, false, None, args_node))
+        Some((name, false, None, args_node, None))
     } else {
         // Recover function name from source text before `(`
         let paren_byte = (0..error.child_count())
@@ -946,7 +1041,7 @@ fn parse_call_from_error<'a>(
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b == b'_')
                 {
-                    return Some((text.to_string(), false, None, args_node));
+                    return Some((text.to_string(), false, None, args_node, None));
                 }
             }
         }

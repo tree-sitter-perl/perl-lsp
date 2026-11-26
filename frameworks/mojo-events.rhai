@@ -67,7 +67,7 @@ fn patterns() {
             projections: #{
                 recv: ["ty"],
                 event: ["str", "content_span"],
-                callback: ["sub_params"],
+                callback: ["sub_params", "callable_edge"],
             },
             expect: [
                 #{ src: "$e->on('ready', sub { my ($s) = @_; });", matches: 1 },
@@ -133,6 +133,8 @@ fn on_match(pattern, m) {
             owner: ev.owner,
             span: ev.name_span,
             var_text: m.captures.recv.text,
+            // An emit passes its handlers the arguments after the event.
+            args: if verb == "emit" { #{ After: m.captures.event.span } } else { () },
         }
     };
 
@@ -156,6 +158,7 @@ fn on_match(pattern, m) {
                 owner: ev.owner,
                 dispatchers: ["emit"],
                 params: params,
+                callable: if cb == () { () } else { cb.callable_edge },
                 // Extent covers the whole `on(name => sub {…})` so the outline
                 // node encloses the handler body — editor sticky-scroll /
                 // breadcrumb pin the event while the cursor is inside it.

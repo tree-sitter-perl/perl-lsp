@@ -263,11 +263,12 @@ def main():
     def lang_of(rel):
         e = rel.rsplit(".", 1)[-1].lower()
         return {"c": "c", "h": "c", "cc": "cpp", "cpp": "cpp", "cxx": "cpp",
-                "hpp": "cpp", "hh": "cpp"}.get(e, "perl")
+                "hpp": "cpp", "hh": "cpp", "php": "php", "py": "python"}.get(e, "perl")
 
     metrics = {"label": args.label, "root": root, "steps": [], "rss": []}
     t_spawn = now_ms()
-    served_lang = "perl" if lang_of(scen["readiness"]["file"]) == "perl" else "cpp"
+    # One server per language; C and C++ share the cpp server.
+    served_lang = {"c": "cpp"}.get(lang_of(scen["readiness"]["file"]), lang_of(scen["readiness"]["file"]))
     lsp = Lsp(os.path.abspath(args.bin), root, args.out + f".{args.label}.stderr", served_lang)
 
     _, init_ms = lsp.request("initialize", {

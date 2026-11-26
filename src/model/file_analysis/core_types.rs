@@ -477,6 +477,23 @@ pub struct NameSpellings {
     /// Whether a member access reaches an instance's slots
     /// (`FileAnalysis::slot_class_of`).
     pub instance_slots: InstanceSlots,
+    /// Which of a callable's parameters a member call's receiver binds.
+    #[serde(default)]
+    pub receiver: ReceiverParam,
+}
+
+/// Which parameter a member call's receiver fills. The written arguments
+/// fill the rest in order, so a call's place names a parameter only once
+/// the receiver's is set aside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ReceiverParam {
+    /// The one the signature declares as the receiver (python's `self`),
+    /// or none (php's `$this` is no parameter).
+    #[default]
+    Declared,
+    /// The first, whatever its name: Perl's receiver is `$_[0]`, so
+    /// `my $c = shift` takes it as surely as `my $self = shift`.
+    First,
 }
 
 /// Whether a language's member access (`obj.x`) reaches the slots an
@@ -611,6 +628,7 @@ impl NameSpellings {
         class_call: ClassCall::FunctionCall,
         enclosing_class: EnclosingClass::ScopeChain,
         instance_slots: InstanceSlots::Apart,
+        receiver: ReceiverParam::Declared,
     };
 
     /// A language with a namespace separator, no sigils, and spellings
@@ -626,6 +644,7 @@ impl NameSpellings {
             class_call: ClassCall::FunctionCall,
             enclosing_class: EnclosingClass::ScopeChain,
             instance_slots: InstanceSlots::Apart,
+            receiver: ReceiverParam::Declared,
         }
     }
 
@@ -973,11 +992,12 @@ pub struct Symbol {
     /// (`MemberSpaces::of_decl`).
     #[serde(default)]
     pub member_space: Option<NamespaceId>,
-    /// The OTHER symbol the same declaration token minted: a `has` accessor
-    /// and its constructor key, a promoted constructor parameter and its
-    /// field. Minted where the pair is synthesized, so no consumer
-    /// re-derives the pairing from span equality or column arithmetic
-    /// (rule #11).
+    /// The next symbol the same declaration token minted, in a ring
+    /// through every one of them: a `has` accessor and its constructor key,
+    /// a promoted constructor parameter's field, local and key. Minted
+    /// where the declaration is synthesized, so no consumer re-derives the
+    /// grouping from span equality or column arithmetic (rule #11). Read it
+    /// through [`declared_together`], never as one twin.
     #[serde(default)]
     pub declared_with: Option<SymbolId>,
     /// The pointer/reference declarator stack a typed variable carries,
@@ -1328,6 +1348,20 @@ pub fn cut_region(region: Span, cuts: impl IntoIterator<Item = Option<Point>>) -
     (key(&region.start) < key(&end)).then_some(Span { start: region.start, end })
 }
 
+/// The other symbols `sym`'s declaration token minted: the ring
+/// `Symbol::declared_with` links, `sym` left out.
+pub fn declared_together<'s>(symbols: &'s [Symbol], sym: &'s Symbol) -> impl Iterator<Item = &'s Symbol> + 's {
+    let mut at = sym.declared_with;
+    let mut left = symbols.len();
+    std::iter::from_fn(move || {
+        let id = at.filter(|id| *id != sym.id && left > 0)?;
+        left -= 1;
+        let next = symbols.get(id.0 as usize)?;
+        at = next.declared_with;
+        Some(next)
+    })
+}
+
 impl Symbol {
     /// What the symbol declares for a variable use of its name to bind
     /// (`variable_use`): a variable, or a field declared as one (Corinna's
@@ -1440,7 +1474,8 @@ impl Symbol {
 
     /// This callable's declared parameter arity, from whichever source carries
     /// it: the pack-minted `arity` field, else the Perl `SymbolDetail::Sub`
-    /// param list (`is_slurpy` → variadic, a `default` → optional). One
+    /// param list (a rest or a by-name parameter → variadic, a `default` →
+    /// optional; only a parameter a position reaches counts). One
     /// question, both answers — overload ranking asks the symbol, never the
     /// shape (rule #10). `None` for non-callables.
     pub fn param_arity(&self) -> Option<ParamArity> {
@@ -1448,12 +1483,12 @@ impl Symbol {
             return Some(a);
         }
         if let SymbolDetail::Sub { params, .. } = &self.detail {
-            let total = params.iter().filter(|p| !p.is_slurpy && !p.is_invocant).count();
-            let required = params
-                .iter()
-                .filter(|p| !p.is_slurpy && !p.is_invocant && p.default.is_none())
-                .count();
-            let variadic = params.iter().any(|p| p.is_slurpy);
+            // A by-name parameter is not a place in the argument list: its
+            // key and value ride in whatever count the call passes.
+            let placed = |p: &&ParamInfo| p.pass.takes_position() && !p.pass.is_rest() && !p.is_invocant;
+            let total = params.iter().filter(placed).count();
+            let required = params.iter().filter(placed).filter(|p| p.default.is_none()).count();
+            let variadic = params.iter().any(|p| p.pass.is_rest() || p.pass == ParamPass::Named);
             return Some(ParamArity { total, required, variadic });
         }
         None
@@ -1854,8 +1889,13 @@ pub enum SymbolDetail {
     /// events are, but routes are methods, config keys are fields, etc.
     Handler {
         owner: HandlerOwner,
-        dispatchers: Vec<String>,
+        dispatchers: Box<[String]>,
         params: Vec<ParamInfo>,
+        /// The input of the named callable it runs (`add_task(mail =>
+        /// \&mail)`): a dispatch's keys are that callable's. An anonymous
+        /// callback has none; its keys are the handler's own.
+        #[serde(default)]
+        runs: Option<Box<HashKeyOwner>>,
     },
     /// Package, Module, or other kinds needing no extra data.
     None,
@@ -1914,7 +1954,15 @@ impl DeclKind {
 pub struct ParamInfo {
     pub name: String,
     pub default: Option<String>,
-    pub is_slurpy: bool,
+    /// How a call's arguments reach this parameter. Minted by the
+    /// extractor from the signature's own syntax (rule #11): a consumer asks
+    /// the mode, never the name's sigil.
+    pub pass: ParamPass,
+    /// The name a call passes it by (`f(name => …)`, `f(name: …)`), minted
+    /// where the signature says it can be named; `None` for a parameter
+    /// only a place reaches.
+    #[serde(default)]
+    pub key: Option<String>,
     /// True when this param is the implicit receiver of the call,
     /// supplied by the caller via `$obj->method(...)` rather than
     /// written in the argument list. Sig help, hover, and outline
@@ -1931,6 +1979,101 @@ pub struct ParamInfo {
     /// value, a plugin-declared signature) — nothing in the source binds it.
     #[serde(default, with = "point_opt_serde")]
     pub binding_site: Option<Point>,
+}
+
+impl ParamInfo {
+    /// The name a call may write this parameter's argument under
+    /// (`f(name: …)`): its key, where it takes one argument by name. A
+    /// collecting parameter (`**kw`) takes the names no parameter does,
+    /// so it has no label of its own, and the invocant is never written.
+    pub fn label(&self) -> Option<&str> {
+        if self.pass.takes_name() && !self.pass.is_rest() && !self.is_invocant {
+            self.key.as_deref()
+        } else {
+            None
+        }
+    }
+}
+
+/// Where a dispatch call writes the arguments its handler receives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HandlerRegion {
+    /// The elements of the array literal at this span
+    /// (`enqueue(mail => [to => 'x'])`).
+    Elements(Span),
+    /// The call's arguments after the one at this span
+    /// (`emit(ready => to => 'x')`).
+    After(Span),
+}
+
+/// Where the keys of the hash literal a call writes as its `place`-th
+/// argument sit in the callee: in the parameter that argument binds, where
+/// it takes one value by place, else among the callee's names (a
+/// constructor taking a hashref of them).
+pub fn slot_at_place(params: &[ParamInfo], receiver: Option<ReceiverParam>, place: u32) -> InputSlot {
+    match written_params(params, receiver).nth(place as usize) {
+        Some((j, p)) if matches!(p.pass, ParamPass::Positional | ParamPass::Either) => InputSlot::At(j as u16),
+        _ => InputSlot::Named,
+    }
+}
+
+/// How many written arguments a callable takes by place before its
+/// collected names (`my ($x, %o) = @_` → 1); none when it collects none.
+pub fn named_offset(params: &[ParamInfo], receiver: Option<ReceiverParam>) -> usize {
+    let written: Vec<&ParamInfo> = written_params(params, receiver).map(|(_, p)| p).collect();
+    match written.iter().position(|p| p.pass == ParamPass::RestNamed) {
+        Some(k) if written[..k].iter().all(|p| p.pass == ParamPass::Positional) => k,
+        _ => 0,
+    }
+}
+
+/// The parameters a call's written arguments fill, with their index in
+/// the whole list: every one but the receiver's. `receiver` is the
+/// language's rule when the call has a receiver (a member call), `None`
+/// when it has none — a declared receiver is set aside either way, since
+/// whoever calls it supplies it.
+fn written_params(params: &[ParamInfo], receiver: Option<ReceiverParam>) -> impl Iterator<Item = (usize, &ParamInfo)> {
+    let first_is_receiver =
+        receiver == Some(ReceiverParam::First) && !params.iter().any(|p| p.is_invocant);
+    params.iter().enumerate().filter(move |(j, p)| !p.is_invocant && !(first_is_receiver && *j == 0))
+}
+
+/// How a call's arguments bind to a parameter: by place, by name, or as
+/// the rest of one kind or both. A parameter list is a positional sequence
+/// plus a keyed carrier, and the mode says which of the two a parameter sits
+/// in (`Either` sits in both). See `docs/adr/named-arguments.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum ParamPass {
+    /// Bound by place only: Perl's `$x` in a signature or an `@_` unpack.
+    #[default]
+    Positional,
+    /// Bound by place or by name: a PHP parameter, a plain Python one.
+    Either,
+    /// Bound by name only: Perl's `:$name`, Python's after a bare `*`.
+    Named,
+    /// Collects the positional arguments left over: `@rest`, `*args`.
+    RestPositional,
+    /// Collects the named arguments left over: `%opts`, `**kwargs`.
+    RestNamed,
+    /// Collects every argument left over, both kinds: PHP's `...$args`.
+    Rest,
+}
+
+impl ParamPass {
+    /// Whether the parameter collects what the other parameters leave.
+    pub fn is_rest(self) -> bool {
+        matches!(self, ParamPass::RestPositional | ParamPass::RestNamed | ParamPass::Rest)
+    }
+
+    /// Whether a positional argument can land here.
+    pub fn takes_position(self) -> bool {
+        matches!(self, ParamPass::Positional | ParamPass::Either | ParamPass::RestPositional | ParamPass::Rest)
+    }
+
+    /// Whether a named argument can land here.
+    pub fn takes_name(self) -> bool {
+        matches!(self, ParamPass::Either | ParamPass::Named | ParamPass::RestNamed | ParamPass::Rest)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2089,7 +2232,10 @@ impl Ref {
         match self.binding.as_ref()? {
             RefBinding::Symbol(sym) => Some(*sym),
             RefBinding::HashKey { sym, .. } | RefBinding::Handler { sym, .. } => *sym,
-            RefBinding::Function { .. } | RefBinding::Method(_) | RefBinding::Receiver(_) => None,
+            RefBinding::Function { .. }
+            | RefBinding::Method(_)
+            | RefBinding::Receiver(_)
+            | RefBinding::CallArgKey { .. } => None,
         }
     }
 
@@ -2097,6 +2243,23 @@ impl Ref {
     pub fn receiver_method(&self) -> Option<SymbolId> {
         match self.binding.as_ref()? {
             RefBinding::Receiver(method) => Some(*method),
+            _ => None,
+        }
+    }
+
+    /// The call whose arguments a deferred-owner `HashKeyAccess` sits in.
+    pub fn arg_key_call(&self) -> Option<crate::model::witnesses::RefIdx> {
+        match self.binding.as_ref()? {
+            RefBinding::CallArgKey { call, .. } => Some(*call),
+            _ => None,
+        }
+    }
+
+    /// The written argument whose hash literal a call's key sits in;
+    /// `None` for a key passed by name.
+    pub fn arg_key_place(&self) -> Option<u32> {
+        match self.binding.as_ref()? {
+            RefBinding::CallArgKey { place, .. } => *place,
             _ => None,
         }
     }
@@ -2269,10 +2432,11 @@ impl Ref {
                 2,
                 self.method_target().map(|t| t.invocant_class().to_string()),
             ),
-            RefKind::DispatchCall { dispatcher } => (3, Some(dispatcher.clone())),
+            RefKind::DispatchCall { dispatcher, .. } => (3, Some(dispatcher.clone())),
             RefKind::HashKeyAccess { .. } => match self.hash_key_owner() {
                 Some(HashKeyOwner::Class(c)) => (4, Some(c.clone())),
                 Some(HashKeyOwner::Sub { name, .. }) => (5, Some(name.clone())),
+                Some(HashKeyOwner::Input { name, .. }) => (6, Some(name.to_string())),
                 _ => (0, None),
             },
             _ => (0, None),
@@ -2665,6 +2829,20 @@ pub enum RefBinding {
     /// `resolved_symbol`. Kept at the END for bincode variant-index
     /// stability.
     Receiver(SymbolId),
+    /// `HashKeyAccess` among the arguments of the `MethodCall` at `call`,
+    /// whose owner needs other files (the receiver's class lives elsewhere,
+    /// or didn't type at build). The owner is decided from that call at
+    /// query time (`FileAnalysis::deferred_hash_key_owner`); the projection
+    /// accessors read it as unowned. Kept at the END for bincode
+    /// variant-index stability.
+    CallArgKey {
+        call: crate::model::witnesses::RefIdx,
+        /// The written argument the key's hash literal is
+        /// (`f($x, {key => 1})` → 1); `None` for a key the call passes
+        /// by name.
+        #[serde(default)]
+        place: Option<u32>,
+    },
 }
 
 /// What kind of entity is being renamed — determines single-file vs cross-file scope.
@@ -2766,6 +2944,10 @@ pub enum RefKind {
     /// enrichment later.
     DispatchCall {
         dispatcher: String,
+        /// Where the call writes the arguments its handler receives, when
+        /// the dispatcher's plugin says.
+        #[serde(default)]
+        args: Option<HandlerRegion>,
     },
     /// A member VALUE on a receiver — `$this->prop`, `obj->field`, a
     /// `$this->prop = …` write. The syntax told the extractor the token

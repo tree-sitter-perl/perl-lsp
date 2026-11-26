@@ -28,6 +28,9 @@ pub const PERL_ROOT_PACKAGE: &str = "main";
 /// The sub `use Module LIST` calls, found up `Module`'s MRO.
 pub const IMPORT_SUB: &str = "import";
 
+/// How a call writes a named argument after its key: Perl's fat comma.
+pub const NAMED_ARG_WRITTEN: &str = " => ";
+
 /// Perl's name spellings: `::` qualifies, `$` / `@` / `%` lead variables.
 pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     namespace_sep: Some(std::borrow::Cow::Borrowed(PERL_SEP)),
@@ -41,6 +44,8 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     enclosing_class: crate::model::file_analysis::EnclosingClass::NamespaceInForce,
     // `$obj->{key}` reaches a slot; `$obj->key` never does.
     instance_slots: crate::model::file_analysis::InstanceSlots::Apart,
+    // A method's receiver is `$_[0]`, whatever the sub names it.
+    receiver: crate::model::file_analysis::ReceiverParam::First,
 };
 
 /// Perl's language id: the native builder's, and `FileAnalysis::language`'s
@@ -482,6 +487,17 @@ impl Sigil {
     }
 }
 
+/// How an `@_` unpack's variable takes its arguments: an array collects the
+/// rest by place, a hash the rest as pairs, a scalar its one place.
+pub fn unpacked_param_pass(name: &str) -> crate::model::file_analysis::ParamPass {
+    use crate::model::file_analysis::ParamPass;
+    match name.chars().next() {
+        Some(c) if c == Sigil::Array.char() => ParamPass::RestPositional,
+        Some(c) if c == Sigil::Hash.char() => ParamPass::RestNamed,
+        _ => ParamPass::Positional,
+    }
+}
+
 /// `__PACKAGE__` — the compile-time token for the enclosing package. Perl's
 /// own word: a pack mints the class its receiver names, never this token
 /// (`layering_tests::packs_do_not_borrow_perls_current_package_token`).
@@ -825,6 +841,7 @@ mod tests {
             class_call: NameSpellings::NONE.class_call,
             enclosing_class: NameSpellings::NONE.enclosing_class,
             instance_slots: NameSpellings::NONE.instance_slots,
+            receiver: NameSpellings::NONE.receiver,
         };
         assert_eq!(super::split_qualified("App\\Models\\User", &php), (Some("App\\Models"), "User"));
         assert_eq!(super::name_match_key("App\\Models\\User", &php), "User");
