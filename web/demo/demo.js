@@ -278,12 +278,14 @@ async function connect() {
   const server = startServer({ wasm: 'perl-lsp.wasm', shim: 'shim/index.js', files: workspace(), env: ['RUST_LOG=warn'] });
   lsp = server;
   server.onLog(text => {
+    window.serverLog.push(text);
     const complaint = /(?:WARN|ERROR)[^\n]*?\] (plugin [^\n]*)/.exec(text);
     if (complaint && lsp === server) setStatus(complaint[1].replace('/work/', ''), 'bad');
   });
-  // The server's stderr, for whoever is debugging the page (and the page
-  // test, which prints it when a scene fails).
-  window.serverLog = server.logs;
+  // Every server's stderr, for whoever is debugging the page (and the page
+  // test, which prints it when a scene fails). One list across restarts:
+  // what killed an earlier server is still worth reading.
+  window.serverLog ??= [];
   server.exited.then(why => { if (lsp === server) setStatus(why, 'bad'); });
   server.onNotification(onNotification);
   const { capabilities } = await server.request('initialize', {

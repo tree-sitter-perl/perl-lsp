@@ -160,6 +160,12 @@ try {
       }
     }
   }
+  // A thread that died may have taken no scene with it; the run still
+  // failed.
+  if (!dead && (await page.evaluate(() => (window.serverLog ?? []).join(''))).includes('RuntimeError')) {
+    dead = true;
+    failures.push('a server thread trapped');
+  }
   // A trap is printed whole: the frames that say what the thread was doing
   // are at the far end of its backtrace.
   if (failures.length) console.log('server log:\n' + (await page.evaluate(() => (window.serverLog ?? []).join(''))).slice(dead ? -60000 : -6000));

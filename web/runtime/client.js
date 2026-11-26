@@ -101,7 +101,7 @@ export function startServer({ wasm, shim, files, env = [] }) {
     if (d.out === 1) feed(d.data);
     else if (d.out === 2) log(decoder.decode(d.data));
     else if (d.log) log(d.log);
-    else if (d.trap) { logs.push(d.trap); fail('the server trapped: ' + d.trap.split('\n')[0]); }
+    else if (d.trap) { log(d.trap); fail('the server trapped: ' + d.trap.split('\n')[0]); }
     else if (d.fatal) fail('the server could not start: ' + d.fatal);
     else if (d.exit !== undefined) fail('the server exited with code ' + d.exit);
   };
