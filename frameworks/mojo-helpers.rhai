@@ -216,6 +216,9 @@ fn helper_emissions(m, name, params, name_span, ret_edge) {
                 is_method: true,
                 return_type: (),
                 return_via_edge: ret_edge,
+                // The helper IS its callback: a call of the helper passes
+                // the callback's keys.
+                callable: ret_edge,
                 doc: (),
                 on_class: app_surface,
                 display: "Helper",
@@ -329,6 +332,7 @@ fn helper_emissions(m, name, params, name_span, ret_edge) {
             display: "Helper",
             hide_in_outline: false,
             outline_label: name,
+            callable: ret_edge,
         }
     };
 

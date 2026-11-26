@@ -92,7 +92,8 @@ pub enum ResolvedSub<'a> {
         /// Inferred type per param (parallel to `params`); `None` if unknown.
         param_types: Vec<Option<InferredType>>,
         is_method: bool,
-        hash_keys: Vec<String>,
+        /// The names the callable takes as named arguments.
+        input_keys: Vec<String>,
     },
 }
 
@@ -302,6 +303,9 @@ impl FileAnalysis {
             HashKeyOwner::Bridged { class } => format!("{}->{}", class, key),
             HashKeyOwner::Variable { name, .. } => format!("{}{{{}}}", name, key),
             HashKeyOwner::Sub { name, .. } => format!("{}()->{{{}}}", name, key),
+            HashKeyOwner::Input { name, .. } => format!("{}({} => …)", name, key),
+            HashKeyOwner::AnonInput { callable, .. } => format!("{}({} => …)", self.symbol(*callable).name, key),
+            HashKeyOwner::Handler { name, .. } => format!("{}({} => …)", name, key),
         };
         let mut seen = HashSet::new();
         let mut candidates = Vec::new();
@@ -508,7 +512,7 @@ impl FileAnalysis {
             };
             let hashish = params
                 .iter()
-                .find(|p| p.is_slurpy && p.name.starts_with('%'))
+                .find(|p| p.pass == ParamPass::RestNamed)
                 .or_else(|| params
                     .last()
                     .filter(|p| !p.is_invocant && p.name.starts_with('$')));
@@ -670,6 +674,30 @@ impl FileAnalysis {
         candidates
     }
 
+    /// The `labels` a call to `callee` may still pass, less the `used`
+    /// ones, each followed by `sep` as the language writes it.
+    pub fn complete_call_labels(callee: &Callee, labels: &[String], used: &[String], sep: &str) -> Vec<CompletionCandidate> {
+        let name = match &callee.input {
+            HashKeyOwner::Input { name, .. } => &**name,
+            _ => "",
+        };
+        labels
+            .iter()
+            .filter(|k| !used.iter().any(|u| u == *k))
+            .map(|k| CompletionCandidate {
+                label: format!("{}{}", k, sep.trim_end()),
+                kind: SymKind::Variable,
+                is_static: false,
+                detail: Some(format!("{}({}{}…)", name, k, sep)),
+                insert_text: Some(format!("{}{}", k, sep)),
+                sort_priority: PRIORITY_LOCAL,
+                additional_edits: vec![],
+                import_fact: None,
+                display_override: None,
+            })
+            .collect()
+    }
+
     /// Complete keyval args at a call site.
     /// Returns `key =>` completions for unused keys.
     pub fn complete_keyval_args(
@@ -719,7 +747,7 @@ impl FileAnalysis {
                 //     worked; every "options-hashref" sub missed out.
                 let hashish = params
                     .iter()
-                    .find(|p| p.is_slurpy && p.name.starts_with('%'))
+                    .find(|p| p.pass == ParamPass::RestNamed)
                     .or_else(|| params
                         .last()
                         .filter(|p| !p.is_invocant && p.name.starts_with('$')));
@@ -760,14 +788,8 @@ impl FileAnalysis {
                     })
                     .collect()
             }
-            ResolvedSub::CrossFile { hash_keys, params, .. } => {
-                // Check if any param is slurpy %hash
-                let has_slurpy = params.iter().any(|p| p.is_slurpy && p.name.starts_with('%'));
-                if !has_slurpy || hash_keys.is_empty() {
-                    return Vec::new();
-                }
-
-                hash_keys.into_iter()
+            ResolvedSub::CrossFile { input_keys, .. } => {
+                input_keys.into_iter()
                     .filter(|k| !used_keys.contains(k))
                     .map(|k| CompletionCandidate {
                         label: format!("{} =>", k),
@@ -937,26 +959,14 @@ impl FileAnalysis {
         // members; `-as` binds local→origin; `use M ();` binds nothing.
         if !is_method {
             if let Some(idx) = module_index {
-                for import in self.imports.in_scope(self.import_scope_at(point)) {
-                    // A split exporter's surface lives across its candidates.
-                    let bound_remote = idx
-                        .visible_def_candidates(&import.module_name)
-                        .iter()
-                        .find_map(|cached| {
-                            let surface = cached.analysis.export_surface_with_index(&import.module_name, idx);
-                            imported_names(import, &surface)
-                                .iter()
-                                .find(|(local, _)| local == name)
-                                .map(|(_local, remote)| remote.clone())
-                        });
-                    let Some(remote) = bound_remote else { continue };
+                if let Some((module, remote)) = self.imported_callable(name, point, idx) {
                     // The name may be defined in the directly-`use`d module
                     // or in a module it re-exports. `defining_module_cached`
                     // chases the same re-export edges (seen-set bounded);
                     // the candidate pick covers a split module's own subs.
                     if let Some(cached) = idx
-                        .defining_module_cached(&import.module_name, &remote)
-                        .or_else(|| idx.candidate_defining_sub(&import.module_name, &remote))
+                        .defining_module_cached(&module, &remote)
+                        .or_else(|| idx.candidate_defining_sub(&module, &remote))
                     {
                         let whole = idx.bag_present(&cached);
                         if let Some(sub_info) = whole.sub_info_view(&remote) {
@@ -1064,7 +1074,10 @@ impl FileAnalysis {
                     }
                     HashKeyOwner::Class(_)
                     | HashKeyOwner::Bridged { .. }
-                    | HashKeyOwner::Sub { .. } => {}
+                    | HashKeyOwner::Sub { .. }
+                    | HashKeyOwner::Input { .. }
+                    | HashKeyOwner::AnonInput { .. }
+                    | HashKeyOwner::Handler { .. } => {}
                 }
             }
         }
@@ -1350,7 +1363,7 @@ fn cross_file_resolved(sub_info: &SubInfo<'_>) -> ResolvedSub<'static> {
         params,
         param_types,
         is_method: sub_info.is_method(),
-        hash_keys: sub_info.hash_keys().to_vec(),
+        input_keys: sub_info.input_keys().to_vec(),
     }
 }
 

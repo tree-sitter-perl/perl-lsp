@@ -1115,7 +1115,7 @@ impl LanguageServer for Backend {
         // pack and Perl paths gather cross-file candidates through `resolve()`,
         // which re-locks the open shards via `for_each_open`); see
         // `Document::analysis`. `tree` clones O(1) (tree-sitter refcount).
-        let (analysis, text, tree, language, path, package_lines) =
+        let (analysis, text, tree, language, path, package_lines, held_callee) =
             match self.open_docs.get_open(uri) {
                 Some(doc) => (
                     Arc::clone(&doc.analysis),
@@ -1124,6 +1124,7 @@ impl LanguageServer for Backend {
                     doc.language,
                     doc.path.as_ref().map(|_| doc.canonical_path.clone()),
                     doc.stable_outline.package_lines().to_vec(),
+                    Arc::clone(&doc.held_callee),
                 ),
                 None => return self.not_ready_or_null(uri),
             };
@@ -1144,6 +1145,7 @@ impl LanguageServer for Backend {
                         language,
                         path.as_ref(),
                         cx.index(),
+                        Some(&held_callee),
                     )
                 })
                 .await?;

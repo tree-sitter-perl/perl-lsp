@@ -17,9 +17,18 @@ pub(super) fn class_of_match<'s>(st: &'s ExtractState, match_id: usize) -> Optio
 /// pack's `default_name` at the anchor token — which its context names.
 pub(super) fn anchored_name(st: &ExtractState, match_id: usize) -> Option<String> {
     st.adorned.of_match(match_id).find_map(|t| match t.cap {
-        Capture::Def { kind, part: DefPart::Anchor } => (st.pack.default_name)(kind, t.start),
+        Capture::Def { kind, part: DefPart::Anchor } => anchor_name(st.pack, kind, t),
         _ => None,
     })
+}
+
+/// The name an anchor gives its def: the one its pattern sets, else the
+/// pack's default at the anchor token.
+fn anchor_name(pack: &LangPack, kind: DefCap, anchor: &Event) -> Option<String> {
+    match anchor.payload.as_deref() {
+        Some(Payload::Named(n)) => Some(n.clone()),
+        _ => (pack.default_name)(kind, anchor.start),
+    }
 }
 
 /// `@ool.def`: a function definition whose declared name may be qualified
@@ -94,17 +103,27 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     let pack = st.pack;
     let ad = st.adorned;
     let mine = |cap: Capture| ad.in_match(e.match_id, cap);
+    // The receiver is the object a method runs on, never an argument a
+    // call passes by name.
+    if kind == DefCap::Input {
+        let token = mine(Capture::Def { kind, part: DefPart::Name }).unwrap_or(e);
+        if ad.on(token).any(|t| t.cap == Capture::Receiver) {
+            return;
+        }
+    }
     // The name token; for a def named from its anchor, the language's
     // default name at the anchor token; for a nameless def the language's
     // default name (a zero-width token) or the def's own text.
     let name_ix = ad.in_match_ix(e.match_id, Capture::Def { kind, part: DefPart::Name });
     let anchor = ad.in_match_ix(e.match_id, Capture::Def { kind, part: DefPart::Anchor }).and_then(|a| {
-        let named = (pack.default_name)(kind, ad.events()[a].start)?;
+        let named = anchor_name(pack, kind, &ad.events()[a])?;
         Some((named, a))
     });
+    // A name the pattern sets is the def's own: `A.__init__` names it.
+    let set_name = |a: usize| matches!(ad.events()[a].payload.as_deref(), Some(Payload::Named(_)));
     let (name, name_ix, defaulted) = match (name_ix, anchor, (pack.default_name)(kind, e.start)) {
         (Some(n), ..) => (ad.events()[n].text.clone(), Some(n), false),
-        (None, Some((named, a)), _) => (named, Some(a), true),
+        (None, Some((named, a)), _) => (named, Some(a), !set_name(a)),
         (None, None, Some(default)) => (default, None, true),
         (None, None, None) => (e.text.clone(), Some(ix), false),
     };
@@ -183,7 +202,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             .filter(|t| t.cap == Capture::DocOf)
             .find_map(|t| ad.in_match(t.match_id, Capture::Doc))
             .and_then(|d| (pack.doc_text)(&d.text)),
-        pair: mine(Capture::DefPair).map(|_| e.match_id),
+        pair: mine(Capture::DefPair).map(|_| name_tok.map_or(e.site, |n| n.site).index()),
         return_type,
         deref_stack: ad
             .of_match(e.match_id)
@@ -210,6 +229,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         // Filled by span association in `into_file_analysis` — the
         // `@arity.sig` match fires separately from this def name.
         arity: None,
+        params: None,
         owner_stated,
         flags,
         member_space: on_name.iter().find_map(|t| match t.cap {
@@ -358,10 +378,17 @@ pub(super) fn dedup(st: &mut ExtractState) {
     let symbols = &st.out.symbols;
     // Each row with the node its def is named at (a nameless def's own
     // node), so the rows of one name token are one run, in row order.
+    // A def its pattern names (python's generated `__init__`, at the class
+    // name that writes it) is a declaration of its own, never another
+    // match's copy of the token's def.
     let mut named_at: Vec<(crate::cst::NodeId, usize)> = (0..st.minted.len())
         .filter_map(|ix| {
             let row = st.minted[ix].def_row?;
-            Some((ad.events()[st.minted[ix].def_name.unwrap_or(ix)].site, row))
+            let name = &ad.events()[st.minted[ix].def_name.unwrap_or(ix)];
+            if matches!(name.payload.as_deref(), Some(Payload::Named(_))) {
+                return None;
+            }
+            Some((name.site, row))
         })
         .collect();
     named_at.sort_by_key(|&(site, row)| (site.index(), row));

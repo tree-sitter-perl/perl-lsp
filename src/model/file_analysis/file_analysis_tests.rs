@@ -3572,3 +3572,161 @@ fn used_identities_are_what_a_file_names_across_files() {
     stripped.evict_witness_bag();
     assert_eq!(stripped.used_identities(), used);
 }
+
+// ---- Call-bound hash-key owners ----
+
+#[test]
+fn call_arg_key_owner_comes_from_its_call_and_a_nested_deref_stays_out() {
+    let fa = build_fa_from_source("use Foo;\nmy $h = { name => 1 };\nmy $f = Foo->new(name => $h->{name});\n");
+    let keys: Vec<&Ref> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::HashKeyAccess { .. }) && r.target_name == "name" && r.span.start.row == 2)
+        .collect();
+    let (arg, deref): (Vec<&Ref>, Vec<&Ref>) = keys.into_iter().partition(|r| r.arg_key_call().is_some());
+    assert_eq!((arg.len(), deref.len()), (1, 1), "one call-bound arg key, one deref");
+    assert_eq!(
+        fa.deferred_hash_key_owner(arg[0], None),
+        Some(HashKeyOwner::named_input(Some("Foo".into()), "new")),
+    );
+    // The deref only sits inside the call's arguments; it is `$h`'s key.
+    assert_eq!(fa.deferred_hash_key_owner(deref[0], None), None);
+}
+
+// ---- Named arguments: a call's keys are what the callee takes ----
+
+/// `Foo->new(name => …)` reaches where `new` takes `name`, the read of its
+/// collecting `%args`, not the slot `new` returns; a key `new` never reads
+/// reaches nothing (`docs/adr/named-arguments.md`).
+#[test]
+fn call_keys_reach_the_collecting_read_not_the_returned_slot() {
+    let src = "package Foo;\nsub new { my ($class, %args) = @_; return bless { name => $args{name}, age => 0 }, $class; }\npackage main;\nFoo->new(name => 'x', age => 3);\n";
+    let fa = build_fa_from_source(src);
+    let line1 = src.lines().nth(1).unwrap();
+    let read_col = line1.find("$args{name}").unwrap() + "$args{".len();
+    let call = src.lines().nth(3).unwrap();
+    let def = fa.find_definition(Point::new(3, call.find("name").unwrap()), None).expect("name at the call has a def");
+    assert_eq!((def.start.row, def.start.column), (1, read_col), "name goes to the $args{{name}} read");
+
+    let slot_col = line1.find("age").unwrap();
+    let age = fa.find_definition(Point::new(3, call.find("age").unwrap()), None);
+    assert!(
+        age.is_none_or(|d| (d.start.row, d.start.column) != (1, slot_col)),
+        "age never reaches the slot `new` returns: {age:?}"
+    );
+}
+
+/// A plain call above its `sub` links like one below it, and reaches the
+/// key the sub takes, never the identically named key it returns.
+#[test]
+fn a_plain_call_reaches_what_its_sub_takes_not_what_it_returns() {
+    let src = "connect(timeout => 30);\nsub connect { my %o = @_; return { timeout => $o{timeout} } }\n";
+    let fa = build_fa_from_source(src);
+    let line1 = src.lines().nth(1).unwrap();
+    let read_col = line1.find("$o{timeout}").unwrap() + "$o{".len();
+    let def = fa.find_definition(Point::new(0, 8), None).expect("timeout at the call has a def");
+    assert_eq!((def.start.row, def.start.column), (1, read_col));
+}
+
+/// What a callable takes and what it returns are two key sets, and the
+/// cross-file view keeps them apart.
+#[test]
+fn a_callable_takes_one_key_set_and_returns_another() {
+    let fa = build_fa_from_source("sub cfg { my %o = @_; my $v = $o{verbose}; return { host => 1 } }\n");
+    let info = fa.sub_info_view("cfg").unwrap();
+    assert_eq!(info.input_keys(), ["verbose".to_string()]);
+    assert_eq!(info.hash_keys(), ["host".to_string()]);
+}
+
+/// A package-qualified call names the callee by its own name in its own
+/// package, so `Foo::new(name => …)` reaches what `Foo::new` takes.
+#[test]
+fn a_qualified_call_reaches_what_its_sub_takes() {
+    let src = "package Foo;\nsub new { my ($class, %a) = @_; $a{name} }\npackage main;\nFoo::new(name => 1);\n";
+    let fa = build_fa_from_source(src);
+    let call = src.lines().nth(3).unwrap();
+    let def = fa.find_definition(Point::new(3, call.find("name").unwrap()), None).expect("def");
+    assert_eq!(def.start.row, 1);
+}
+
+/// `sub f(:$name)` declares `name` twice over, the variable the body reads
+/// and the key a call passes: a call key goes to the parameter, and a
+/// rename from either side rewrites both, never a same-named attr of the
+/// package.
+#[test]
+fn a_named_parameter_is_its_call_keys() {
+    let src = "package Foo;\nuse v5.40;\nuse Moo;\nhas name => (is => 'ro');\nsub greet($self, :$name) { return $name }\nFoo->new(name => 1)->greet(name => 2);\n";
+    let fa = build_fa_from_source(src);
+    let sig = src.lines().nth(4).unwrap();
+    let call = src.lines().nth(5).unwrap();
+    let key_col = call.rfind("name").unwrap();
+    let def = fa.find_definition(Point::new(5, key_col), None).expect("call key has a def");
+    assert_eq!((def.start.row, def.start.column), (4, sig.find(":$name").unwrap() + 2));
+
+    let edits = fa.rename_at(Point::new(4, sig.rfind("$name").unwrap() + 1), "who").expect("renames");
+    let mut at: Vec<(usize, usize)> = edits.iter().map(|(s, _)| (s.start.row, s.start.column)).collect();
+    at.sort();
+    assert_eq!(
+        at,
+        [(4, sig.find(":$name").unwrap() + 2), (4, sig.rfind("$name").unwrap() + 1), (5, key_col)],
+        "the parameter, its read and the greet key; not the attr or the constructor key"
+    );
+    assert!(edits.iter().all(|(_, t)| t == "who"));
+    let from_key = fa.rename_at(Point::new(5, key_col), "who").expect("renames from the key");
+    let mut at2: Vec<(usize, usize)> = from_key.iter().map(|(s, _)| (s.start.row, s.start.column)).collect();
+    at2.sort();
+    assert_eq!(at, at2);
+}
+
+/// A blessed hash's keys are slots of the class it is blessed INTO: a
+/// method of `Foo` that makes a `Meta` gives `Meta` its `name` slot, and
+/// `Foo` none, so `Foo`'s subclasses never inherit a `name` attr from it.
+#[test]
+fn a_bless_into_another_class_slots_that_class() {
+    use crate::model::file_analysis::AttrProjectionKind;
+    let src = "package Foo;\nsub meta { my $c = shift; bless({ name => $c }, 'Meta') }\nsub new { my $c = shift; bless({ size => 1 }, $c) }\n1;\n";
+    let fa = build_fa_from_source(src);
+    let slots: Vec<(&str, &str)> = fa
+        .attr_projections
+        .iter()
+        .filter(|a| matches!(a.kind, AttrProjectionKind::InternalKey))
+        .map(|a| (a.class.as_str(), a.attr.as_str()))
+        .collect();
+    assert_eq!(slots, [("Meta", "name"), ("Foo", "size")]);
+    assert!(fa.field_projections_named("name", "Foo").is_none());
+}
+
+/// A call a framework's pattern reads (DBIC's `__PACKAGE__->has_many`) is
+/// no callable taking names: its keys never bind to the call, so the
+/// framework's own facts at those tokens keep the cursor.
+#[test]
+fn a_framework_read_call_binds_no_keys() {
+    let src = "package My::Row;\nuse base 'DBIx::Class::Core';\n__PACKAGE__->has_many( widgets => 'Widget', 'row_id' );\nMy::Other->frob( speed => 1 );\n1;\n";
+    let fa = build_fa_from_source(src);
+    let keys: Vec<&str> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::HashKeyAccess { .. }))
+        .map(|r| r.target_name.as_str())
+        .collect();
+    assert_eq!(keys, ["speed"], "an unread call elsewhere still binds its keys");
+}
+
+/// Every ref, symbol and witness holds these inline, and an analysis is
+/// mostly refs and witnesses: a wider variant in one of them is paid by
+/// every row of every file (16 bytes on `HashKeyOwner` is 9% of a whole
+/// analysis). A variant that needs more room boxes its payload; raising a
+/// bound here is a measured decision, not a fix for a red test.
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn row_types_keep_their_size() {
+    use crate::model::witnesses::{Witness, WitnessAttachment};
+    use std::mem::size_of;
+    assert!(size_of::<HashKeyOwner>() <= 48, "HashKeyOwner: {}", size_of::<HashKeyOwner>());
+    assert!(size_of::<WitnessAttachment>() <= 72, "WitnessAttachment: {}", size_of::<WitnessAttachment>());
+    assert!(size_of::<InferredType>() <= 160, "InferredType: {}", size_of::<InferredType>());
+    assert!(size_of::<Witness>() <= 336, "Witness: {}", size_of::<Witness>());
+    assert!(size_of::<Ref>() <= 376, "Ref: {}", size_of::<Ref>());
+    assert!(size_of::<SymbolDetail>() <= 80, "SymbolDetail: {}", size_of::<SymbolDetail>());
+    assert!(size_of::<Symbol>() <= 416, "Symbol: {}", size_of::<Symbol>());
+}

@@ -130,6 +130,10 @@ impl<'a> Builder<'a> {
 
             // Hash access
             Kind::HashElementExpression => self.visit_hash_element(node),
+            Kind::SliceExpression | Kind::KeyvalExpression => {
+                self.visit_hash_slice(node);
+                self.queue_children(node);
+            }
 
             // Dereference expressions → rep observations on the operand
             Kind::ArrayElementExpression => {
@@ -759,7 +763,7 @@ impl<'a> Builder<'a> {
         self.push_callable_scope(scope_kind, node_to_span(node), sub_id);
 
         // Record signature params as Variable symbols in the sub scope
-        self.record_signature_params(node, &params);
+        self.record_signature_params(node, &params, Some(HashKeyOwner::named_input(package.clone(), &name)));
 
         // Perl 5.38 methods: synthesize implicit $self with type → enclosing class
         if is_method {
@@ -844,7 +848,8 @@ impl<'a> Builder<'a> {
         let span = node_to_span(node);
         let sub_id = self.ensure_anon_sub_symbol(node, &params);
         self.push_callable_scope(ScopeKind::Sub { name: "(anon)".into() }, span, sub_id);
-        self.record_signature_params(node, &params);
+        let input = HashKeyOwner::AnonInput { callable: sub_id, slot: crate::model::file_analysis::InputSlot::Named };
+        self.record_signature_params(node, &params, Some(input));
         self.detect_first_param_type(&params, node, self.current_package.clone());
         self.queue_children_then(node, move |b| {
             b.record_sub_tail(node);
@@ -970,6 +975,7 @@ impl<'a> Builder<'a> {
         );
         // Not a nameable entity — resolvable, never listed.
         self.presentation_mut(sym_id).hide_in_outline = true;
+        self.symbols[sym_id.0 as usize].flags |= crate::model::file_analysis::SymbolFlags::ANONYMOUS;
         if let Some(key) = key {
             self.anon_sub_symbols.insert(key, sym_id);
         }
@@ -1023,23 +1029,38 @@ impl<'a> Builder<'a> {
                 };
 
                 if let Some(right) = assign.field(Field::Right) {
-                    // Pattern: my (...) = @_
-                    if right.is(Kind::Array) && crate::cst::names_arg_array(right, self.source) {
-                        if let Some(left) = assign.field(Field::Left) {
-                            let at_params: Vec<ParamInfo> = self.collect_vars_from_decl(left)
-                                .into_iter()
-                                .map(|(name, span)| {
-                                    let is_slurpy = name.starts_with('@') || name.starts_with('%');
-                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false, binding_site: Some(span.start) }
-                                })
-                                .collect();
-                            // Combine any preceding shift params with @_ params
-                            if !shift_params.is_empty() {
-                                shift_params.extend(at_params);
-                                return shift_params;
-                            }
-                            return at_params;
+                    // Pattern: my (...) = @_, and the values that collect the
+                    // rest into one binding (`my %a = (retries => 3, @_)`,
+                    // `my $a = {@_}`).
+                    let whole = right.is(Kind::Array) && crate::cst::names_arg_array(right, self.source);
+                    let rest = crate::cst::collects_arg_rest(right, self.source);
+                    let left = assign.field(Field::Left);
+                    let vars = left.map(|l| self.collect_vars_from_decl(l)).unwrap_or_default();
+                    // A scalar takes a list's last element, never the rest.
+                    let collects = match (rest, vars.as_slice()) {
+                        (Some(crate::cst::ArgRest::Hash), [_]) => true,
+                        (Some(crate::cst::ArgRest::List), [(name, _)]) => {
+                            crate::model::conventions::unpacked_param_pass(name) != ParamPass::Positional
                         }
+                        _ => false,
+                    };
+                    if whole || collects {
+                        let at_params: Vec<ParamInfo> = vars
+                            .into_iter()
+                            .map(|(name, span)| {
+                                let pass = match rest {
+                                    Some(crate::cst::ArgRest::Hash) => ParamPass::RestNamed,
+                                    _ => crate::model::conventions::unpacked_param_pass(&name),
+                                };
+                                ParamInfo { name, default: None, pass, key: None, is_invocant: false, binding_site: Some(span.start) }
+                            })
+                            .collect();
+                        // Combine any preceding shift params with @_ params
+                        if !shift_params.is_empty() {
+                            shift_params.extend(at_params);
+                            return shift_params;
+                        }
+                        return at_params;
                     }
 
                     // Pattern: my ($a, $b, ...) = (shift, shift, ...) — Mojo's
@@ -1057,8 +1078,8 @@ impl<'a> Builder<'a> {
                             let list_params: Vec<ParamInfo> = self.collect_vars_from_decl(left)
                                 .into_iter()
                                 .map(|(name, span)| {
-                                    let is_slurpy = name.starts_with('@') || name.starts_with('%');
-                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false, binding_site: Some(span.start) }
+                                    let pass = crate::model::conventions::unpacked_param_pass(&name);
+                                    ParamInfo { name, default: None, pass, key: None, is_invocant: false, binding_site: Some(span.start) }
                                 })
                                 .collect();
                             if !list_params.is_empty() {
@@ -1078,8 +1099,8 @@ impl<'a> Builder<'a> {
                         shift_params.push(ParamInfo {
                             name: var_name,
                             default,
-                            is_slurpy: false,
-                            is_invocant: false,
+                            pass: ParamPass::Positional,
+                            key: None, is_invocant: false,
                             binding_site,
                         });
                         continue;
@@ -1090,8 +1111,8 @@ impl<'a> Builder<'a> {
                         shift_params.push(ParamInfo {
                             name: var_name,
                             default: None,
-                            is_slurpy: false,
-                            is_invocant: false,
+                            pass: ParamPass::Positional,
+                            key: None, is_invocant: false,
                             binding_site,
                         });
                         continue;
@@ -1185,7 +1206,7 @@ impl<'a> Builder<'a> {
                 match param.kind_of() {
                     Kind::MandatoryParameter => {
                         if let Some(var) = self.first_var_child(param) {
-                            params.push(ParamInfo { name: var, default: None, is_slurpy: false, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { name: var, default: None, pass: ParamPass::Positional, key: None, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     Kind::OptionalParameter => {
@@ -1198,18 +1219,27 @@ impl<'a> Builder<'a> {
                             .and_then(|d| d.utf8_text(self.source).ok())
                             .map(|s| s.to_string());
                         if let Some(name) = var {
-                            params.push(ParamInfo { name, default, is_slurpy: false, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { name, default, pass: ParamPass::Positional, key: None, is_invocant: false, binding_site: Some(param.start_position()) });
+                        }
+                    }
+                    Kind::NamedParameter => {
+                        if let Some(name) = self.first_var_child(param) {
+                            let default = param.field(Field::Default)
+                                .and_then(|d| d.utf8_text(self.source).ok())
+                                .map(|s| s.to_string());
+                            let key = Some(crate::model::conventions::PERL_SPELLINGS.strip_sigils(&name).to_string());
+                            params.push(ParamInfo { name, default, pass: ParamPass::Named, key, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     Kind::SlurpyParameter => {
                         if let Some(var) = self.first_var_child(param) {
-                            params.push(ParamInfo { name: var, default: None, is_slurpy: true, is_invocant: false, binding_site: Some(param.start_position()) });
+                            let pass = slurpy_pass(param);
+                            params.push(ParamInfo { name: var, default: None, pass, key: None, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     Kind::Scalar | Kind::Array | Kind::Hash => {
                         if let Ok(text) = param.utf8_text(self.source) {
-                            let is_slurpy = matches!(param.kind_of(), Kind::Array | Kind::Hash);
-                            params.push(ParamInfo { name: text.to_string(), default: None, is_slurpy, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { name: text.to_string(), default: None, pass: slurpy_pass(param), key: None, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     _ => {}
@@ -1219,7 +1249,10 @@ impl<'a> Builder<'a> {
         params
     }
 
-    pub(super) fn record_signature_params(&mut self, sub_node: Node<'a>, params: &[ParamInfo]) {
+    /// `input` is the owner of the keys the callable takes by name: a
+    /// `:$name` parameter is one declaration spelled two ways, the variable
+    /// the body reads and the key a call passes, paired at minting.
+    pub(super) fn record_signature_params(&mut self, sub_node: Node<'a>, params: &[ParamInfo], input: Option<HashKeyOwner>) {
         // For signature syntax, params come from the signature node
         for i in 0..sub_node.child_count() {
             if let Some(sig) = sub_node.child(i) {
@@ -1246,6 +1279,21 @@ impl<'a> Builder<'a> {
                                     SymbolDetail::Variable { sigil, decl_kind },
                                 );
                                 self.symbols[id.0 as usize].in_force = Some(param_node.end_position());
+                                if let (Some(bare), Some(owner)) = (p.key.clone(), &input) {
+                                    let var_span = node_to_span(var);
+                                    let key_span = Span {
+                                        start: Point::new(var_span.end.row, var_span.end.column.saturating_sub(bare.len())),
+                                        end: var_span.end,
+                                    };
+                                    let key = self.add_symbol(
+                                        bare,
+                                        SymKind::HashKeyDef,
+                                        node_to_span(param_node),
+                                        key_span,
+                                        SymbolDetail::HashKeyDef { owner: owner.clone(), is_dynamic: false },
+                                    );
+                                    self.pair_co_declared(id, key);
+                                }
                                 param_idx += 1;
                             }
                         }
@@ -1589,10 +1637,7 @@ impl<'a> Builder<'a> {
                         node_to_span(node),
                         bare_span,
                         SymbolDetail::HashKeyDef {
-                            owner: HashKeyOwner::Sub {
-                                package: self.current_package.clone(),
-                                name: "new".to_string(),
-                            },
+                            owner: HashKeyOwner::named_input(self.current_package.clone(), "new"),
                             is_dynamic: false,
                         },
                     );
@@ -1617,8 +1662,8 @@ impl<'a> Builder<'a> {
                             params: vec![ParamInfo {
                                 name: format!("${}", bare_name),
                                 default: None,
-                                is_slurpy: false,
-                                is_invocant: false,
+                                pass: ParamPass::Positional,
+                                key: None, is_invocant: false,
                                 binding_site: None,
                             }],
                             is_method: true,
@@ -1811,5 +1856,21 @@ impl<'a> Builder<'a> {
                 kind: FoldKind::Region,
             });
         }
+    }
+}
+
+/// The rest a signature's array or hash collects: an array the leftover
+/// places, a hash the leftover pairs. A scalar takes its one place.
+pub(super) fn slurpy_pass(param: Node<'_>) -> ParamPass {
+    let var = if param.is(Kind::SlurpyParameter) {
+        param.elements().find(|c| matches!(c.kind_of(), Kind::Array | Kind::Hash))
+    } else {
+        Some(param)
+    };
+    match var.map(|v| v.kind_of()) {
+        Some(Kind::Array) => ParamPass::RestPositional,
+        Some(Kind::Hash) => ParamPass::RestNamed,
+        _ if param.is(Kind::SlurpyParameter) => ParamPass::RestPositional,
+        _ => ParamPass::Positional,
     }
 }

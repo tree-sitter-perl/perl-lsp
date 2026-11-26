@@ -75,6 +75,37 @@ pub(super) fn attr_group_via_ancestors(
     })
 }
 
+/// The parameter group of the callable a call key's owner names, minted
+/// from the file that declares the callable the call dispatches to — an
+/// inherited method's keys are its declaring class's. `None` (no group)
+/// lets the key fall through to its plain owner target.
+fn input_group_of_callee(
+    owner: &crate::model::file_analysis::HashKeyOwner,
+    bare: &str,
+    origin: &FileAnalysis,
+    idx: &dyn CrossFileLookup,
+) -> Option<ResolvedTarget> {
+    use crate::model::file_analysis::HashKeyOwner;
+    let HashKeyOwner::Input { package, name, slot } = owner else {
+        return None;
+    };
+    let declaring = package.as_deref().map(|package| {
+        origin
+            .resolve_method_in_ancestors(package, name, Some(idx))
+            .map_or_else(|| package.to_string(), |m| m.class().to_string())
+    });
+    let declared = HashKeyOwner::Input { package: declaring.as_deref().map(Into::into), name: name.clone(), slot: *slot };
+    if let Some(p) = origin.input_projections_named(bare, &declared) {
+        return Some(group_from_projections(p, origin, None, Some(idx)));
+    }
+    let declaring = declaring?;
+    idx.visible_def_candidates(&declaring).iter().find_map(|cached| {
+        let whole = idx.whole_present(cached);
+        let p = whole.input_projections_named(bare, &declared)?;
+        Some(group_from_projections(p, &whole, Some(cached.path.clone()), Some(idx)))
+    })
+}
+
 /// Cursor → cross-file target with the default override scope. Production
 /// callers go through `resolve()`/`CandidateSet` (which forces identity via
 /// `resolve_symbol_scoped`); this wrapper serves tests probing identity
@@ -106,7 +137,7 @@ pub fn resolve_symbol_scoped(
         // A cursor on an OVERRIDING subclass's own decl should resolve to the
         // same family group as the base under Hierarchy — bridge to the
         // root-most declaring ancestor (no-op for a non-overridden attr).
-        if let Some(idx) = module_index {
+        if let (Some(idx), true) = (module_index, p.attr) {
             if let Some(g) =
                 attr_group_via_ancestors(&p.class, &p.bare, analysis, idx, false, false, scope)
             {
@@ -133,19 +164,22 @@ pub fn resolve_symbol_scoped(
                 // (DBIC column) isn't a hash slot, so a deref onto one resolves to
                 // nothing. A bridged condition-arg (`search({col})`) resolves to
                 // the column group with no slot requirement.
+                let owner = match owner {
+                    Some(o @ (HashKeyOwner::Bridged { .. } | HashKeyOwner::Class(_) | HashKeyOwner::Input { .. })) => {
+                        Some(o.clone())
+                    }
+                    _ => analysis.deferred_hash_key_owner(r, module_index),
+                };
                 let target: Option<(String, bool)> = match owner {
-                    Some(HashKeyOwner::Bridged { class: c }) => Some((c.clone(), false)),
-                    Some(HashKeyOwner::Class(c)) => Some((c.clone(), true)),
-                    _ => match analysis.deferred_hash_key_owner(r, module_index) {
-                        Some(HashKeyOwner::Sub { package: Some(c), name })
-                            if crate::model::conventions::is_constructor_name(&name) =>
-                        {
-                            Some((c, false))
+                    Some(o @ HashKeyOwner::Input { .. }) => {
+                        if let Some(g) = input_group_of_callee(&o, &r.target_name, analysis, idx) {
+                            return Some(g);
                         }
-                        Some(HashKeyOwner::Bridged { class: c }) => Some((c, false)),
-                        Some(HashKeyOwner::Class(c)) => Some((c, true)),
-                        _ => None,
-                    },
+                        o.constructor_class().map(|c| (c.to_string(), false))
+                    }
+                    Some(HashKeyOwner::Bridged { class: c }) => Some((c, false)),
+                    Some(HashKeyOwner::Class(c)) => Some((c, true)),
+                    _ => None,
                 };
                 if let Some((class, require_internal)) = target {
                     if let Some(g) = attr_group_via_ancestors(
@@ -364,6 +398,12 @@ pub fn resolve_symbol_scoped(
         RenameKind::HashKey(name) => match analysis.hash_key_owner_at(point) {
             Some(HashKeyOwner::Sub { package, name: sub_name }) => ResolvedTarget::Target(
                 TargetRef::new(name, TargetKind::HashKeyOfSub { package, name: sub_name }, analysis),
+            ),
+            Some(HashKeyOwner::Input { package, name: sub_name, slot }) => ResolvedTarget::Target(
+                TargetRef::new(name, TargetKind::HashKeyOfInput { package: package.map(String::from), name: sub_name.into(), slot }, analysis),
+            ),
+            Some(HashKeyOwner::Handler { owner, name: handler, slot }) => ResolvedTarget::Target(
+                TargetRef::new(name, TargetKind::HashKeyOfHandler { owner: *owner, name: handler.into(), slot }, analysis),
             ),
             // A bridged key (DBIC column condition-arg / accessor): the fallback
             // when no field-group path caught it (e.g. single-file, no index).

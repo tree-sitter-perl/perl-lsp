@@ -1,0 +1,85 @@
+{
+  "project": {
+    "repo": "https://github.com/laravel/framework",
+    "pin": "1449bf241017087fbd38c118ecaabef3f6797fdc",
+    "note": "corpus/php (laravel). Completion inside a call still being typed, in Query/Builder.php (152 KB): the unclosed call, then a word in it, then the same word in the closed call as the control."
+  },
+  "readiness": {
+    "file": "src/Illuminate/Database/Query/Builder.php",
+    "line": 1126,
+    "character": 22
+  },
+  "steps": [
+    {
+      "action": "open",
+      "file": "src/Illuminate/Database/Query/Builder.php"
+    },
+    {
+      "action": "insert_line",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "line": 932,
+      "text": "        $this->orderBy(column: 'id', ",
+      "name": "type-unclosed-call",
+      "await_diagnostics": true
+    },
+    {
+      "action": "completion",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "line": 932,
+      "character": 37,
+      "name": "completion-unclosed-call"
+    },
+    {
+      "action": "revert",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "name": "revert-1",
+      "await_diagnostics": true
+    },
+    {
+      "action": "insert_line",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "line": 932,
+      "text": "        $this->orderBy(column: 'id', d",
+      "name": "type-unclosed-call-word",
+      "await_diagnostics": true
+    },
+    {
+      "action": "completion",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "line": 932,
+      "character": 38,
+      "name": "completion-unclosed-call-word"
+    },
+    {
+      "action": "revert",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "name": "revert-2",
+      "await_diagnostics": true
+    },
+    {
+      "action": "insert_line",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "line": 932,
+      "text": "        $this->orderBy(column: 'id', d)",
+      "name": "type-closed-call",
+      "await_diagnostics": true
+    },
+    {
+      "action": "completion",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "line": 932,
+      "character": 38,
+      "name": "completion-closed-call-word"
+    },
+    {
+      "action": "revert",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "name": "revert-3",
+      "await_diagnostics": true
+    },
+    {
+      "action": "rss",
+      "name": "post-completion"
+    }
+  ]
+}

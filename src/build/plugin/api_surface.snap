@@ -47,7 +47,10 @@ pub span: Span,
 pub struct EmittedParam {
 pub name: String,
 pub default: Option<String>,
+#[serde(default)]
 pub is_slurpy: bool,
+#[serde(default)]
+pub pass: ParamPass,
 #[serde(default)]
 pub is_invocant: bool,
 }
@@ -56,6 +59,11 @@ pub struct TopicRouteDsl {
 pub module: String,
 pub verbs: Vec<String>,
 pub group_fn: String,
+}
+
+pub enum HandlerArgs {
+Elements(Span),
+After(Span),
 }
 
 pub enum EmitAction {
@@ -92,6 +100,8 @@ outline_label: Option<String>,
 return_via_edge: Option<crate::model::witnesses::WitnessAttachment>,
 #[serde(default)]
 attr: Option<String>,
+#[serde(default)]
+callable: Option<crate::model::witnesses::WitnessAttachment>,
 },
 HashKeyDef {
 name: String,
@@ -126,6 +136,8 @@ display: HandlerDisplay,
 hide_in_outline: bool,
 #[serde(default)]
 outline_label: Option<String>,
+#[serde(default)]
+callable: Option<crate::model::witnesses::WitnessAttachment>,
 },
 DispatchCall {
 name: String,
@@ -133,6 +145,8 @@ dispatcher: String,
 owner: HandlerOwner,
 span: Span,
 var_text: String,
+#[serde(default)]
+args: Option<HandlerArgs>,
 },
 PluginLoad {
 name: String,
@@ -287,6 +301,17 @@ pub flavor: String,
 pub imports: Vec<String>,
 #[serde(default)]
 pub base: Option<String>,
+#[serde(default)]
+pub inputs: Vec<InputAlias>,
+#[serde(default)]
+pub ctor_key_option: Option<String>,
+}
+
+pub struct InputAlias {
+pub from: String,
+#[serde(default)]
+pub slot: crate::model::file_analysis::InputSlot,
+pub to: String,
 }
 
 pub struct RefTagFunction {

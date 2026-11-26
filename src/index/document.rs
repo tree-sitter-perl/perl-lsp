@@ -48,6 +48,10 @@ pub struct Document {
     /// The file's canonical spelling, stamped by `OpenDocs` as the document
     /// enters the store, so a query reads it instead of resolving the URL.
     pub canonical_path: crate::util::canonical_path::CanonicalPath,
+    /// What the cursor tier holds across this document's keystrokes. `Arc`
+    /// for the same reason as `analysis`: a handler clones it out of the
+    /// store guard.
+    pub held_callee: Arc<crate::build::cursor_sentinel::HeldCallee>,
 }
 
 impl Document {
@@ -72,6 +76,7 @@ impl Document {
             baseline_surface: None,
             path,
             canonical_path: Default::default(),
+            held_callee: Default::default(),
         })
     }
 
@@ -104,6 +109,7 @@ impl Document {
             baseline_surface,
             path: None,
             canonical_path: Default::default(),
+            held_callee: Default::default(),
         })
     }
 

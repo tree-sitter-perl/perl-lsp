@@ -38,6 +38,7 @@ pub(super) fn finish(st: &mut ExtractState) {
             qualifier: None,
             spelled: None,
             access: crate::model::file_analysis::AccessKind::Read,
+            arg_keys: Vec::new(),
         });
     }
 }
