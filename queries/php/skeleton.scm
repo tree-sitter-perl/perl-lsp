@@ -34,6 +34,10 @@
 (trait_declaration
   "trait" @sym.attr
   name: (name) @def.class.name @context.class) @def.class @scope.direct
+; An enum is a class whose cases are its instances: its methods are
+; members like any class's.
+(enum_declaration
+  name: (name) @def.class.name @context.class) @def.class @scope.direct
 
 ; ---- written types ----
 ; `self` names the class it is written in, and `parent` the class it
@@ -97,6 +101,9 @@
 (method_declaration) @scope.sub.closed
 (anonymous_function) @scope.sub.closed
 (arrow_function) @scope.sub
+; A closure is a callable written as a value: the value is the callable.
+(anonymous_function) @def.anon
+(arrow_function) @def.anon
 
 ; ---- parameters ----
 ; A parameter is a local of its callable, named like every variable by
@@ -107,11 +114,26 @@
 ; declared type is its elements', so the local stays untyped.
 ; TODO(php-implicit-nullable): `string $m = null` declares `?string`; the
 ; bound is `string`, so a `null === $m` guard reads as both.
-(simple_parameter
-  type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot.entry
-  name: (variable_name (name) @def.local.name @flow.target) @def.local.spelled) @def.local
+; A parameter is also the key a call may pass it by (`f(a: 1)`): the one
+; token declares the local and the key. A closure's keys are its own, and
+; a call reaches them through the value that holds it (`$g(a: 1)`).
+(formal_parameters
+  (simple_parameter
+    type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot.entry
+    name: (variable_name (name) @def.local.name @def.input.name @flow.target) @def.local.spelled) @def.local @def.input @def.pair)
 (variadic_parameter
   name: (variable_name (name) @def.local.name) @def.local.spelled) @def.local
+
+; A parameter list, in order: a parameter is reached by place or by name,
+; required unless it has a default, and a variadic takes whatever is left
+; of both.
+(formal_parameters) @arity.sig
+(formal_parameters
+  [(simple_parameter !default_value) (property_promotion_parameter !default_value)] @arity.required @arity.either)
+(formal_parameters
+  [(simple_parameter default_value: (_) @arity.default)
+   (property_promotion_parameter default_value: (_) @arity.default)] @arity.optional @arity.either)
+(formal_parameters (variadic_parameter) @arity.variadic)
 
 ; ---- properties ----
 ; A property is a data member of its class, named without the `$` it is
@@ -172,6 +194,15 @@
     (by_ref
       (variable_name (name) @def.field.name @def.local.name @flow.target) @def.field.spelled @def.local.spelled)
   ]) @def.field @def.local @def.pair
+; It is also the key a call passes the constructor (`new P(x: 1)`), a
+; third declaration at the same token: a pattern of its own, since the
+; name already holds three captures, and `@def.pair` joins the defs one
+; token declares whichever match states them.
+(property_promotion_parameter
+  name: [
+    (variable_name (name) @def.input.name)
+    (by_ref (variable_name (name) @def.input.name))
+  ]) @def.input @def.pair
 
 ; ---- documentation ----
 ; A docblock (`/** … */`) written directly before a declaration documents
@@ -315,6 +346,9 @@
 ; parent's identity. The same name is a class reference — goto-def,
 ; references and rename reach it — and a qualified spelling references by
 ; the whole spelling while rewriting only its leaf.
+; TODO(trait-method-alias): `use T { m as go; }` names T's `m` as the
+; class's `go`; mint the member alias so `->go(...)` resolves to `T::m`,
+; and its named arguments reach m's parameters (owner: PHP 0.12 thread).
 (class_declaration
   name: (name) @def.class.name
   (base_clause
@@ -354,9 +388,10 @@
 
 ; ---- variables ----
 ; A variable read is the whole `$x`'s value and a reference to the name
-; `x`. A static property's `Foo::$x` is a member, not a variable.
+; `x`. A static property's `Foo::$x` is a member, not a variable; a
+; called variable is its call's (below).
 ((variable_name (name) @expr.read.var.name) @expr.read.var
- (#not-has-parent? @expr.read.var scoped_property_access_expression)
+ (#not-has-parent? @expr.read.var scoped_property_access_expression function_call_expression)
  (#not-eq? @expr.read.var "$this"))
 ; `$this` is no local: it is the object the enclosing method runs on, an
 ; instance of the class the call is made on, and its name token refers to
@@ -597,7 +632,7 @@
 ; A call's value is an Invoke of its callee on its arguments, and the
 ; argument list rides the callee's match. `...$xs` passes any number of
 ; values. A named argument (`f(a: 1)`) is one more argument in its written
-; place; nothing binds it by name yet.
+; place, and its name is a key the callee takes, written `a: `.
 (function_call_expression
   function: (name) @ref.call
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
@@ -606,7 +641,18 @@
 (function_call_expression
   function: (qualified_name (name) @ref.call) @ref.spelled
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
+; A variable called (`$g(a: 1)`) is a read of the value it holds, and the
+; call reaches the callable that value is: its named arguments are that
+; callable's keys.
+; TODO(callable-values): a first-class callable (`f(...)`, `$o->m(...)`),
+; an object with `__invoke`, and a string or array callable (`'f'`,
+; `[$o, 'm']`) are callables held as values too, and a call through them
+; reaches none yet: each value is a code ref to the callable it names.
+(function_call_expression
+  function: (variable_name (name) @expr.read.var.name) @expr.read.var
+  arguments: (arguments ((_) @arity.arg ","?)*) @arity.args)
 (arguments (argument (variadic_unpacking)) @arity.spread)
+((argument name: (name) @arity.label) (#set! label.written ": "))
 
 ; ---- constants ----
 ; A name, bare or qualified, where a value is read is a constant: it
@@ -823,6 +869,14 @@
 (object_creation_expression
   . (variable_name) @member.recv
   (arguments ((_) @arity.arg ","?)*)?) @expr.construct @arity.args
+; An attribute `#[Route(…)]` constructs its class on its arguments when
+; it is read, so its arguments are a constructor call's.
+(attribute
+  . (name) @member.recv @receiver.class @ref.type
+  parameters: (arguments ((_) @arity.arg ","?)*)?) @expr.construct @arity.args
+(attribute
+  . (qualified_name (name) @ref.type) @member.recv @receiver.class @ref.spelled
+  parameters: (arguments ((_) @arity.arg ","?)*)?) @expr.construct @arity.args
 ; `new class(…) {…}` declares a class with no name, one per place it is
 ; written, and constructs it there: its `class` keyword anchors both. Its
 ; parents and its body are a class's, its body's names in force only for
@@ -954,3 +1008,10 @@
       type: "const" @import.constant
       . (name) @import.name @ref.constant
       alias: (name)? @import.alias)))
+
+; ---- half-typed code: the expression brackets the cursor reparse may close
+; when the user has not typed the closer yet (`f(a, |`). A token fact, stated
+; once for the document. Never a block brace: an unclosed `{` is the normal
+; state while writing a body, and closing it would buy a retry per request
+; for nothing a cursor arm reads. ----
+((ERROR) (#recover-pair! "(" ")") (#recover-pair! "[" "]"))

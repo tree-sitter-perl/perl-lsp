@@ -779,7 +779,7 @@ fn parameters_are_locals_of_their_callable() {
     assert_eq!(locals, want);
     let at = fa.symbols().iter().find(|s| s.name == "at").unwrap();
     assert!(fa.scope_within_sub_body(at.scope));
-    let in_closure = fa.symbols().iter().filter(|s| s.name == "c").map(|s| s.scope).collect::<Vec<_>>();
+    let in_closure = fa.symbols().iter().filter(|s| s.name == "c" && s.kind == SymKind::Variable).map(|s| s.scope).collect::<Vec<_>>();
     assert_ne!(in_closure[0], in_closure[1], "the closure's parameter is its own");
     assert!(fa.document_symbols().iter().all(|o| o.name != "at" && o.name != "c"));
 }
@@ -862,8 +862,8 @@ fn a_promoted_parameter_is_the_property_and_the_local_as_one() {
     let fa = php(PROMOTED);
     let field = fa.symbols().iter().find(|s| s.kind == SymKind::Field).unwrap();
     let local = fa.symbols().iter().find(|s| s.kind == SymKind::Variable && s.name == "made").unwrap();
-    assert_eq!(field.declared_with, Some(local.id));
-    assert_eq!(local.declared_with, Some(field.id));
+    assert!(fa.declared_together(field).any(|t| t.id == local.id));
+    assert!(fa.declared_together(local).any(|t| t.id == field.id));
     assert_eq!(field.selection_span, local.selection_span);
     assert_ne!(field.scope, local.scope, "the property is the class's, the local the constructor's");
 }
@@ -4446,7 +4446,8 @@ class Kid extends Base {
 }
 
 /// A callable that declares no return returns what its body returns; a
-/// closure's `return` is the closure's, never the callable's around it.
+/// closure's `return` is the closure's, never the callable's around it,
+/// and a returned closure is the value.
 #[cfg(feature = "php")]
 #[test]
 fn an_undeclared_return_is_what_the_body_returns() {
@@ -4469,7 +4470,10 @@ function clock() { return new Clock(); }
     let ret = |m: &str| fa.find_method_return_type("Box", m, None, None);
     assert_eq!(ret("clock"), clock);
     assert_eq!(ret("sorted"), clock, "the closures' returns are their own");
-    assert_eq!(ret("maker"), None, "a closure is no `Clock`");
+    assert!(
+        matches!(ret("maker"), Some(T::CodeRef { return_edge: Some(_) })),
+        "a closure is no `Clock`: it is the closure"
+    );
     assert_eq!(ret("declared"), Some(T::ClassName("Box".into())), "a declared return is the value");
     assert_eq!(fa.sub_return_type_at_arity("clock", Some(0)), clock, "a function");
 }
@@ -4542,7 +4546,7 @@ fn completion_items_in(path: &str, lang: &str, src: &str) -> Vec<tower_lsp::lsp_
     let tree = driver.for_path(&path).unwrap().make_parser().parse(&src, None).unwrap();
     let store = crate::index::open_docs::OpenDocs::new();
     let canon = crate::util::canonical_path::CanonicalPath::fixture(path);
-    let (items, _) = crate::lsp::backend::pack_completion(&store, &fa, &src, &tree, point, lang, Some(&canon), &idx);
+    let (items, _) = crate::lsp::backend::pack_completion(&store, &fa, &src, &tree, point, lang, Some(&canon), &idx, None);
     items
 }
 
@@ -4987,7 +4991,8 @@ $top = 1;
         "p", "v", "a", "r", "c", "l1", "l2", "kv", "e", "br", "fk", "fv", "gk", "gv", "ex", "gl", "st", "fn", "hoisted", "promo", "top",
     ];
     for name in names {
-        let syms: Vec<_> = fa.symbols().iter().filter(|s| s.name == name).collect();
+        // A parameter's key is spelled bare, as a call names it (`f(p: 1)`).
+        let syms: Vec<_> = fa.symbols().iter().filter(|s| s.name == name && s.kind != SymKind::HashKeyDef).collect();
         assert!(!syms.is_empty(), "`${name}` is declared");
         for s in syms {
             assert_eq!(s.listed_name(), format!("${name}"), "{:?}", s.kind);
@@ -5572,7 +5577,7 @@ function load(string $p) { $p = realpath($p); return file($p); }
     let token = at(src, "$p)", 1);
     let decl = fa.symbols().iter().find(|s| s.kind == SymKind::Variable && s.selection_span.start == token);
     assert!(decl.is_some(), "the parameter's declaration sits at its token");
-    let param = ParamInfo { name: "p".into(), default: None, is_slurpy: false, is_invocant: false, binding_site: Some(token) };
+    let param = ParamInfo { name: "p".into(), default: None, pass: crate::model::file_analysis::ParamPass::Positional, key: None, is_invocant: false, binding_site: Some(token) };
     assert_eq!(fa.param_declared_type(&param, None), Some(T::String));
     assert_ne!(fa.inferred_type_via_bag("p", at(src, "return", 0)), Some(T::String), "the body holds the rebinding");
 }
@@ -5661,4 +5666,343 @@ fn a_stripped_copy_still_answers_its_classes_flavors() {
     fa.evict_to(Residency::Skeleton);
     assert!(fa.symbols_are_evicted());
     assert_eq!(flavors(&fa), [true, true, false, false, false]);
+}
+
+/// A named argument (`f(b: 2)`) is the key the callee's parameter `$b`
+/// declares: goto-def lands on the parameter, and renaming the parameter
+/// rewrites its reads and every label, a constructor's included.
+#[cfg(feature = "php")]
+#[test]
+fn a_named_argument_is_its_parameter() {
+    let src = "<?php
+namespace App;
+function f(int $a, int $b = 1) { return $b; }
+f(1, b: 2);
+class P {
+    public function __construct(string $name) {}
+    public function m(int $n) { return $n; }
+}
+(new P(name: 'x'))->m(n: 3);
+";
+    let fa = php(src);
+    let lines: Vec<&str> = src.lines().collect();
+    let at = |row: usize, needle: &str| tree_sitter::Point::new(row, lines[row].find(needle).unwrap());
+    let def = fa.find_definition(at(3, "b:"), None).expect("label goes to its parameter");
+    assert_eq!((def.start.row, def.start.column), (2, lines[2].find("$b").unwrap() + 1));
+    let def = fa.find_definition(at(8, "name:"), None).expect("constructor label");
+    assert_eq!(def.start.row, 5);
+    let def = fa.find_definition(at(8, "n:"), None).expect("method label");
+    assert_eq!(def.start.row, 6);
+
+    let mut edits: Vec<(usize, usize)> = fa
+        .rename_at(tree_sitter::Point::new(2, lines[2].find("$b").unwrap() + 1), "c")
+        .expect("renames")
+        .into_iter()
+        .map(|(s, _)| (s.start.row, s.start.column))
+        .collect();
+    edits.sort();
+    assert_eq!(
+        edits,
+        [(2, lines[2].find("$b").unwrap() + 1), (2, lines[2].rfind("$b").unwrap() + 1), (3, lines[3].find("b:").unwrap())]
+    );
+}
+
+/// An enum is a class, so its static method's labels are its parameters;
+/// an attribute constructs its class, so its labels are the constructor's.
+#[cfg(feature = "php")]
+#[test]
+fn enum_methods_and_attributes_take_their_labels() {
+    let src = "<?php
+enum E { case X; static function m(int $timeout) {} }
+E::m(timeout: 1);
+#[Attribute] class Route { function __construct(string $path) {} }
+#[Route(path: '/x')]
+function h() {}
+";
+    let fa = php(src);
+    let lines: Vec<&str> = src.lines().collect();
+    let at = |row: usize, needle: &str| tree_sitter::Point::new(row, lines[row].find(needle).unwrap());
+    let def = fa.find_definition(at(2, "timeout:"), None).expect("enum method label");
+    assert_eq!((def.start.row, def.start.column), (1, lines[1].find("$timeout").unwrap() + 1));
+    let def = fa.find_definition(at(4, "path:"), None).expect("attribute label");
+    assert_eq!((def.start.row, def.start.column), (3, lines[3].find("$path").unwrap() + 1));
+}
+
+/// A promoted constructor parameter (`private int $x`) declares three
+/// things at one token: the property, the constructor's local, and the key
+/// a call passes (`new P(x: 1)`). They are one name: a rename from any of
+/// them, a `$this->x` read or a label rewrites all of them.
+#[cfg(feature = "php")]
+#[test]
+fn a_promoted_parameter_is_its_property_and_its_label() {
+    let src = "<?php
+class P {
+    public function __construct(private int $x) { echo $x; }
+    public function get() { return $this->x; }
+}
+$p = new P(x: 1);
+";
+    let fa = php(src);
+    let lines: Vec<&str> = src.lines().collect();
+    let at = |row: usize, needle: &str| tree_sitter::Point::new(row, lines[row].find(needle).unwrap());
+    let xs: Vec<SymKind> = fa.symbols().iter().filter(|s| s.name == "x").map(|s| s.kind).collect();
+    assert_eq!(xs.len(), 3, "property, local and key: {xs:?}");
+    let def = fa.find_definition(at(5, "x:"), None).expect("label goes to the parameter");
+    assert_eq!(def.start.row, 2);
+    let want = [
+        (2, lines[2].find("$x").unwrap() + 1),
+        (2, lines[2].rfind("$x").unwrap() + 1),
+        (3, lines[3].find("x;").unwrap()),
+        (5, lines[5].find("x:").unwrap()),
+    ];
+    for from in [at(2, "x)"), at(3, "x;"), at(5, "x:"), tree_sitter::Point::new(2, lines[2].rfind("$x").unwrap() + 1)] {
+        let mut edits: Vec<(usize, usize)> =
+            fa.rename_at(from, "y").expect("renames").into_iter().map(|(s, _)| (s.start.row, s.start.column)).collect();
+        edits.sort();
+        edits.dedup();
+        assert_eq!(edits, want, "from {from:?}");
+    }
+}
+
+/// A PHP parameter is reached by place or by name, a variadic takes what is
+/// left of both, and a default is the value written.
+#[cfg(feature = "php")]
+#[test]
+fn a_php_callable_states_its_parameters() {
+    use crate::model::file_analysis::{ParamPass, SymbolDetail};
+    let fa = php("<?php\nclass P { function __construct(private int $x = 1, $y, ...$r) {} }\n");
+    let c = fa.symbols().iter().find(|s| s.name == "__construct").unwrap();
+    let SymbolDetail::Sub { params, .. } = &c.detail else { panic!("{:?}", c.detail) };
+    let got: Vec<(&str, ParamPass, Option<&str>, Option<&str>)> =
+        params.iter().map(|p| (p.name.as_str(), p.pass, p.key.as_deref(), p.default.as_deref())).collect();
+    assert_eq!(
+        got,
+        [
+            ("$x", ParamPass::Either, Some("x"), Some("1")),
+            ("$y", ParamPass::Either, Some("y"), None),
+            ("$r", ParamPass::Rest, None, None),
+        ]
+    );
+}
+
+/// A named argument fills no place: the call passes it under its name, and
+/// the places it counts are the unnamed ones.
+#[cfg(feature = "php")]
+#[test]
+fn a_named_argument_fills_no_place() {
+    use crate::model::witnesses::{CallArg, Callee, WitnessPayload};
+    let fa = php("<?php\nfunction f($a, $b = 1, $c = 2) { return $a; }\nf(1, c: 3);\n");
+    let args: Vec<Option<&str>> = fa
+        .witnesses
+        .all()
+        .iter()
+        .find_map(|w| match &w.payload {
+            WitnessPayload::Invoke { callee: Callee::Function { name, .. }, args: Some(args), .. } if name == "f" => Some(
+                args.iter()
+                    .map(|a| match a {
+                        CallArg::Named { key, .. } => Some(key.as_str()),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .expect("the call's invoke");
+    assert_eq!(args, [None, Some("c")]);
+    let call = fa.refs().iter().find(|r| r.target_name == "f" && r.span.start.row == 2).unwrap();
+    assert_eq!(call.arg_count, Some(1), "one place");
+}
+
+/// A bare word written as a call's argument may be a label: completion
+/// offers the callee's parameters as `name: ` (the ones not yet passed),
+/// alongside the names in scope. A value after a label is no label.
+#[cfg(feature = "php")]
+#[test]
+fn a_call_argument_completes_the_callees_labels() {
+    let labels = |src: &str| -> Vec<(String, Option<String>)> {
+        completion_items(src)
+            .into_iter()
+            .filter(|i| i.label.ends_with(':'))
+            .map(|i| (i.label, i.insert_text))
+            .collect()
+    };
+    let decl = "<?php\nfunction connect(string $host, int $timeout = 30, bool $retry = false) {}\n";
+    let at = |call: &str| format!("{}{}", decl, call);
+    assert_eq!(
+        labels(&at("connect(ti|);\n")),
+        vec![
+            ("host:".to_string(), Some("host: ".to_string())),
+            ("retry:".to_string(), Some("retry: ".to_string())),
+            ("timeout:".to_string(), Some("timeout: ".to_string())),
+        ],
+    );
+    let passed = labels(&at("connect(host: 'h', |);\n"));
+    assert_eq!(passed.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>(), ["retry:", "timeout:"]);
+    // The names in scope still answer the same word.
+    assert!(completion_items(&at("connect(|);\n")).iter().any(|i| i.label == "connect"));
+    assert!(labels(&at("connect(timeout: |);\n")).is_empty());
+    assert!(labels(&at("connect($x + |);\n")).is_empty());
+    // A method's labels, through the receiver's class.
+    let method = "<?php\nclass Db { function open(string $dsn, int $timeout = 0) {} }\n$db = new Db();\n$db->open(|);\n";
+    assert_eq!(labels(method).iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>(), ["dsn:", "timeout:"]);
+}
+
+/// A construction's labels are its constructor's parameters, promoted
+/// ones included, in this file or another.
+#[cfg(feature = "php")]
+#[test]
+fn a_construction_completes_its_constructors_labels() {
+    let labels = |src: &str| -> Vec<String> {
+        completion_items(src).into_iter().map(|i| i.label).filter(|l| l.ends_with(':')).collect()
+    };
+    let src = "<?php\nclass Point { function __construct(public int $x, private int $y = 0) {} }\n$p = new Point(y: 1, |);\n";
+    assert_eq!(labels(src), ["x:"]);
+}
+
+/// A closure is a callable written as a value: a call through the variable
+/// holding it (`$g(b: 2)`) passes keys of the closure's own parameters, so
+/// goto-def on a label lands on the parameter and the parameter's
+/// references reach the label, an arrow function's alike.
+#[cfg(feature = "php")]
+#[test]
+fn a_closure_called_through_its_variable_takes_its_keys() {
+    let src = "<?php
+$g = function (int $a, int $b = 1) { return $b; };
+$g(1, b: 2);
+$h = fn($limit) => $limit;
+$h(limit: 3);
+";
+    let fa = php(src);
+    let lines: Vec<&str> = src.lines().collect();
+    let at = |row: usize, needle: &str| tree_sitter::Point::new(row, lines[row].find(needle).unwrap());
+    let def = fa.find_definition(at(2, "b:"), None).expect("label goes to the closure's parameter");
+    assert_eq!((def.start.row, def.start.column), (1, lines[1].find("$b").unwrap() + 1));
+    let def = fa.find_definition(at(4, "limit:"), None).expect("arrow function label");
+    assert_eq!((def.start.row, def.start.column), (3, lines[3].find("$limit").unwrap() + 1));
+    let mut edits: Vec<(usize, usize)> = fa
+        .rename_at(tree_sitter::Point::new(1, lines[1].find("$b").unwrap() + 1), "c")
+        .expect("renames")
+        .into_iter()
+        .map(|(s, _)| (s.start.row, s.start.column))
+        .collect();
+    edits.sort();
+    assert_eq!(
+        edits,
+        [(1, lines[1].find("$b").unwrap() + 1), (1, lines[1].rfind("$b").unwrap() + 1), (2, lines[2].find("b:").unwrap())]
+    );
+}
+
+/// A call the user has not closed completes the labels it would have
+/// closed: the cursor reparse closes the innermost open bracket, and the
+/// callee is read on the finished buffer where the written one left none.
+#[cfg(feature = "php")]
+#[test]
+fn an_unclosed_call_completes_its_labels() {
+    let decl = "<?php\nfunction connect(string $host, int $timeout = 30, bool $retry = false) {}\nfunction pick(int $n) {}\n";
+    let labels = |body: &str| -> Vec<String> {
+        let mut l: Vec<String> =
+            completion_items(&format!("{decl}{body}")).into_iter().map(|i| i.label).filter(|l| l.ends_with(':')).collect();
+        l.sort();
+        l
+    };
+    let all = ["host:", "retry:", "timeout:"];
+    for (body, want) in [
+        ("connect(ti|", &all[..]),
+        ("connect(host: 'h', |", &["retry:", "timeout:"][..]),
+        ("connect(host: 'h', |\n$x = 2;\n", &["retry:", "timeout:"]),
+        ("function h() {\n    $y = connect(host: 'h', |\n    return $y;\n}\n", &["retry:", "timeout:"]),
+        ("connect(host: pick(|", &["n:"]),
+        ("connect(host: pick(|\n$x = 2;\n", &["n:"]),
+        ("connect([1, 2], |", &all),
+        ("$z = [connect(|", &all),
+        ("connect([1, |", &[]),
+        ("connect(host: (|", &[]),
+        ("connect(ho|, retry: true);\n", &["host:", "timeout:"]),
+        ("connect(pick(|, retry: true);\n", &["n:"]),
+        ("if (connect(|\n) {\n}\n", &all),
+    ] {
+        assert_eq!(labels(body), want, "{body:?}");
+    }
+}
+
+/// The finished buffer is analyzed for a label only where the written
+/// buffer's analysis has no call to read.
+#[cfg(feature = "php")]
+#[test]
+fn a_label_reads_the_finished_buffer_only_where_the_written_one_has_no_call() {
+    let driver = crate::build::language_driver::LanguageRegistry::compiled().for_path(std::path::Path::new("t.php")).unwrap();
+    let decl = "<?php\nfunction connect(string $host, int $timeout = 30) {}\n";
+    let ask = |body: &str| {
+        let marked = format!("{decl}{body}");
+        let cursor = marked.find('|').unwrap();
+        let src = marked.replacen('|', "", 1);
+        let fa = driver.analyze(&src);
+        let mut parser = driver.make_parser();
+        let tree = parser.parse(&src, None).unwrap();
+        let analyzed = std::cell::Cell::new(0);
+        let completed = |patched: &str| {
+            analyzed.set(analyzed.get() + 1);
+            driver.analyze(patched)
+        };
+        let sp = crate::build::cursor_sentinel::sentinel_parse(&mut parser, &php_pack(), &src, &tree, cursor).unwrap();
+        let labels = crate::build::cursor_sentinel::call_labels(&sp, &php_pack(), &fa, None, &completed, None).unwrap();
+        (labels.len(), analyzed.get())
+    };
+    assert_eq!(ask("connect(|"), (2, 1));
+    assert_eq!(ask("connect(ho|, timeout: 1);\n"), (1, 0));
+}
+
+/// An open document holds the callee its unclosed call resolved through
+/// the finished buffer: typing the call's arguments analyzes the finished
+/// buffer once and answers as a fresh analysis would, and an edit before the
+/// callee or after the cursor resolves it again.
+#[cfg(feature = "php")]
+#[test]
+fn an_unclosed_call_holds_its_callee_across_keystrokes() {
+    let driver = crate::build::language_driver::LanguageRegistry::compiled().for_path(std::path::Path::new("t.php")).unwrap();
+    let held = crate::build::cursor_sentinel::HeldCallee::default();
+    let decl = "<?php\nfunction connect(string $host, int $timeout = 30) {}\nfunction pick(int $n) {}\n";
+    let ask = |body: &str, held: Option<&crate::build::cursor_sentinel::HeldCallee>| {
+        let marked = format!("{decl}{body}");
+        let cursor = marked.find('|').unwrap();
+        let src = marked.replacen('|', "", 1);
+        let fa = driver.analyze(&src);
+        let mut parser = driver.make_parser();
+        let tree = parser.parse(&src, None).unwrap();
+        let analyzed = std::cell::Cell::new(0);
+        let completed = |patched: &str| {
+            analyzed.set(analyzed.get() + 1);
+            driver.analyze(patched)
+        };
+        let sp = crate::build::cursor_sentinel::sentinel_parse(&mut parser, &php_pack(), &src, &tree, cursor).unwrap();
+        let mut labels: Vec<String> = crate::build::cursor_sentinel::call_labels(&sp, &php_pack(), &fa, None, &completed, held)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
+        labels.sort();
+        (labels, analyzed.get())
+    };
+    let (mut fresh_analyses, mut held_analyses) = (0, 0);
+    for body in ["connect(|", "connect(h|", "connect(host: 'h', |", "connect(host: 'h', ti|"] {
+        let (fresh, analyzed) = ask(body, None);
+        let (labels, analyzed_held) = ask(body, Some(&held));
+        assert_eq!(labels, fresh, "{body:?}");
+        fresh_analyses += analyzed;
+        held_analyses += analyzed_held;
+    }
+    assert_eq!((fresh_analyses, held_analyses), (4, 1));
+    assert_eq!(ask("connect(host: 'h', |\n// edited\n", Some(&held)), (vec!["timeout:".to_string()], 1), "an edit after the cursor");
+    assert_eq!(ask("pick(|\n// edited\n", Some(&held)), (vec!["n:".to_string()], 1), "another callee");
+}
+
+/// The written buffer's unclosed call can swallow the rest of the file,
+/// the callee's declaration with it: a call by name alone is no answer,
+/// and the finished buffer's analysis names the declaration.
+#[cfg(feature = "php")]
+#[test]
+fn an_unclosed_call_before_its_callees_declaration_completes_its_labels() {
+    let src = "<?php\nclass B {\n  public function where($column) {\n    $this->orderBy(column: 'id', |\n    return $this;\n  }\n  public function orderBy($column, $direction = 'asc') { return $this; }\n}\n";
+    let labels: Vec<String> = completion_items(src).into_iter().map(|i| i.label).filter(|l| l.ends_with(':')).collect();
+    assert_eq!(labels, ["direction:"]);
 }

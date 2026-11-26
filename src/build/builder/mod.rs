@@ -10,7 +10,7 @@ use tree_sitter::{Node, Point, Tree};
 pub(super) use crate::cst::{Field, Kind, NodeExt};
 use crate::cst::{fq_tail_span, node_to_span};
 use crate::model::file_analysis::*;
-use crate::model::witnesses::TypeObservation;
+use crate::model::witnesses::{RefIdx, TypeObservation};
 
 /// A ready-to-parse tree-sitter Parser for the Perl grammar — the one
 /// constructor every parse site (resolver, document, CLI, the s///e
@@ -252,6 +252,8 @@ struct FrameworkModeGrant {
     mode: FrameworkMode,
     imports: Vec<String>,
     base: Option<String>,
+    inputs: Vec<crate::build::plugin::InputAlias>,
+    ctor_key_option: Option<String>,
 }
 
 /// One way a sub leaves by falling off its end.
@@ -314,6 +316,28 @@ struct Builder<'a> {
     /// types. Clear-and-emit on `source_tag = "array_push"`. Tuple
     /// shape only; cross-scope and conditional branches not handled.
     pending_array_pushes: Vec<(ScopeId, String, Vec<Span>)>,
+    /// A plain call's argument list, its call ref, the callee name and the
+    /// package the call is written in (where an unpinned name resolves): its
+    /// keys are emitted once every call is pinned to its package and the
+    /// callees' collecting parameters have minted their keys
+    /// (`bind_collected_keys`), so a call above its `sub` links the same as
+    /// one below it.
+    pending_call_arg_keys: Vec<(Node<'a>, usize, String, Option<String>)>,
+
+    /// A call of a value (`$f->(k => 1)`): its arguments and the ref of the
+    /// operand that holds the callable, whose value names the callee.
+    pending_value_call_keys: Vec<(Node<'a>, usize)>,
+    /// An anonymous callable a plugin registered as a helper or handler,
+    /// and the input of what it was registered as: its keys answer to that
+    /// name (`adopt_registered_inputs`).
+    registered_inputs: Vec<(crate::model::file_analysis::SymbolId, HashKeyOwner)>,
+    /// `(from, to)`: a framework says `from`'s input is `to`'s
+    /// (`FrameworkModeMaker::inputs`); adopted with the registrations.
+    input_aliases: Vec<(HashKeyOwner, HashKeyOwner)>,
+    /// The nodes a plugin pattern captured in a match it emitted for: a
+    /// call whose arguments a framework reads is no callable taking names,
+    /// so its keys are the framework's (`docs/adr/named-arguments.md`).
+    framework_read: std::collections::HashSet<usize>,
     /// For each Sub/Method scope, its fallthrough arms (see [`TailArm`]).
     /// The tail-arm pass mints them on the sub's return arms; types ride the
     /// bag, this only points at source spans.
@@ -620,6 +644,9 @@ struct Builder<'a> {
     /// `apply_framework_bases` unless the package is in
     /// `extended_packages`.
     framework_bases: std::collections::HashMap<String, String>,
+    /// Package → the `has` option spelling its constructor keys
+    /// (`FrameworkModeMaker::ctor_key_option`).
+    ctor_key_options: std::collections::HashMap<String, String>,
     /// Packages that called `extends`: their declared parent replaces the
     /// framework base, as Moo's and Moose's `extends` reset `@ISA`.
     extended_packages: std::collections::HashSet<String>,
@@ -756,24 +783,25 @@ struct Builder<'a> {
 ///     fills the owner once the enclosing call's receiver type
 ///     resolves (in-file via `RefTable::call_spanning` recursion, or
 ///     cross-file once `module_index` is available).
+#[derive(Clone)]
 enum Gate {
     Strict(HashKeyOwner),
     /// Strict, but the owner's class is not defined in this file, so a
     /// local def miss is NOT authoritative (the def may live with the
-    /// class, cross-file). Emits `owner: None` on miss; the query-time
-    /// class check in `refs_to`'s key arm decides — same discipline as
-    /// receiver-gated dispatch (the type is the gate, resolved with the
-    /// index in hand).
-    StrictOrDefer(HashKeyOwner),
+    /// class, cross-file). A miss binds the key to its call (`CallArgKey`),
+    /// whose owner is decided at query time with the index in hand.
+    StrictOrDefer(HashKeyOwner, RefIdx),
     Open(HashKeyOwner),
-    Deferred,
+    /// The call's receiver didn't type at build: every key binds to the
+    /// call (`CallArgKey`).
+    Deferred(RefIdx),
     /// A plugin-declared column-keyed verb (DBIC `search`/`create`/…): walk only
     /// the FIRST hashref arg (the `\%cond`/`\%cols`; the trailing `\%attrs` hash
     /// is not column-keyed). A key that is a `Class` column of the receiver gets
-    /// the column owner; otherwise it falls back to the supplied `Sub{class,verb}`
-    /// owner (so a generic-named verb like `new` still binds Moo/Corinna ctor
-    /// keys). Carries the `Sub{class,verb}` owner.
-    ColumnKeyed(HashKeyOwner),
+    /// the column owner; otherwise it falls back to the verb's named input
+    /// (so a generic-named verb like `new` still binds Moo/Corinna ctor
+    /// keys). Carries that input owner.
+    ColumnKeyed(HashKeyOwner, crate::model::witnesses::RefIdx),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

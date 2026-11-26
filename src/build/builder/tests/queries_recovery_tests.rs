@@ -456,14 +456,11 @@ has password => (is => 'rw');
         "should have HashKeyDef for password, got: {:?}",
         names
     );
-    // Verify owner is Sub { package: "MyApp", name: "new" }
+    // Verify owner is the constructor's named input
     if let SymbolDetail::HashKeyDef { ref owner, .. } = key_defs[0].detail {
         assert_eq!(
             owner,
-            &HashKeyOwner::Sub {
-                package: Some("MyApp".to_string()),
-                name: "new".to_string(),
-            }
+            &HashKeyOwner::named_input(Some("MyApp".to_string()), "new")
         );
     }
 }
@@ -748,8 +745,10 @@ fn test_imports_module_symbol_created() {
 
 #[test]
 fn test_goto_def_slurpy_hash_arg_at_call_site() {
-    // Calculator->new(verbose => 1): cursor on "verbose" should go to
-    // the bless hash key def, NOT to sub new.
+    // Calculator->new(verbose => 1): cursor on "verbose" goes to where
+    // `new` takes it, the `$args{verbose}` read of its collecting `%args`
+    // (`docs/adr/named-arguments.md`), NOT to sub new and not to the
+    // blessed slot, which is a key `new` returns.
     let src = r#"package Calculator;
 sub new {
     my ($class, %args) = @_;
@@ -776,11 +775,13 @@ my $calc = Calculator->new(verbose => 1);
         def.is_some(),
         "should find definition for verbose at call site"
     );
-    // Should go to line 4: "verbose => $args{verbose} // 0,"
+    // Line 4: "        verbose => $args{verbose} // 0,"
+    //                             ^25
+    let def = def.unwrap();
     assert_eq!(
-        def.unwrap().start.row,
-        4,
-        "verbose should resolve to bless hash key def on line 4, not sub new"
+        (def.start.row, def.start.column),
+        (4, 25),
+        "verbose should resolve to the $args{{verbose}} read on line 4"
     );
 }
 
@@ -910,7 +911,7 @@ fn test_shift_then_list_assign() {
     );
     assert_eq!(sig.params[0].name, "$file");
     assert_eq!(sig.params[1].name, "@opts");
-    assert!(sig.params[1].is_slurpy);
+    assert!(sig.params[1].pass.is_rest());
 
     // Check raw params
     let sub_sym = fa.symbols().iter().find(|s| s.name == "process").unwrap();

@@ -1,0 +1,155 @@
+# ADR: Named arguments — one shape for every language
+
+Perl's fat-comma call keys (`connect(timeout => 30)`), Perl's named
+signature parameters (`sub f(:$name)`), PHP's named arguments
+(`f(b: 2)`) and Python's keyword arguments (`f(b=2)`, `**kw`) are one
+thing: a call passes a value under a name, and the callee's parameter
+list says which names it takes. The engine models that once.
+
+## A parameter says how a call reaches it
+
+`ParamInfo::pass` is a closed `ParamPass`:
+
+| mode | reached by | Perl | PHP | Python |
+|---|---|---|---|---|
+| `Positional` | place | `$x`, an `@_` unpack's scalar | — | before a `/` |
+| `Either` | place or name | — | every parameter | a plain parameter |
+| `Named` | name | `:$name` | — | after a bare `*` |
+| `RestPositional` | the leftover places | `@rest` | — | `*args` |
+| `RestNamed` | the leftover names | `%opts` | — | `**kwargs` |
+| `Rest` | both leftovers | — | `...$args` | — |
+
+A pack states the mode on each parameter of an `@arity.sig` list:
+`@arity.either` for a language whose parameters a call may name (php,
+python), `@arity.by_name` / `@arity.by_place` where a separator narrows it
+(python's bare `*` and `/`, the narrower winning), and `@arity.variadic`
+with `@arity.rest_places` / `@arity.rest_names` for a collector; a
+parameter with nothing stated is reached by place (C/C++). The list lands
+as the callable's `SymbolDetail::Sub` parameters, as Perl's does.
+`ParamInfo::key` is the name a call passes a parameter by, minted where
+the signature says it can be named, so a binder matches a label to a key
+and never strips a sigil.
+
+A parameter list is therefore two carriers: a positional sequence
+(`takes_position`) and a keyed map (`takes_name`); `Either` sits in both.
+The extractor mints the mode from the signature's syntax. A consumer asks
+the mode and never the parameter's sigil or name: "which parameter takes
+the pairs" is `pass == RestNamed`.
+
+Arity counts only the places: a by-name parameter's key and value ride in
+whatever count the call passes, so a `Named` or rest parameter makes the
+callable variadic and adds nothing to `total` or `required`.
+
+A plugin may state a parameter's `pass`; its `is_slurpy` shorthand reads
+the rest's kind from the name's sigil (`@` places, `%` pairs).
+
+## A key argument binds to its call
+
+A key written in a call's argument list (`f(name => …)`) carries
+`RefBinding::CallArgKey { call }`: the call that receives it, minted where
+the key is extracted. Its owner is the callee's, read off that call; a
+key read inside the arguments (`f(x => $h->{name})`) belongs to its own
+hash, not to the call.
+
+## A callable's input keys are their own owner
+
+`HashKeyOwner::Input { package, name, slot }` owns the keys a callable
+takes; `Sub { package, name }` keeps the keys it returns. A call's key
+(`connect(timeout => 30)`, `Foo->new(size => 1)`) is an `Input` use, and
+what declares it is whatever says the callable takes that name:
+
+- a framework's constructor key (`has`, Class::Tiny, Corinna `:param`),
+  under `Input{C, new}`;
+- a `Named` parameter (`sub f(:$name)`): one token declares two symbols,
+  the variable the body reads and the `Input{pkg, f}` key a call passes,
+  paired as `Symbol::declared_with`;
+- a collecting parameter's read: inside a callable whose `RestNamed`
+  parameter is `%args`, each direct `$args{k}` is owned by that callable's
+  `Input`, and the first read of a key declares it (`bind_collected_keys`).
+
+So `Foo->new(name => 1)` reaches `$args{name}` in a hand-written `new`,
+and never the `bless { name => … }` slot `new` returns, nor a key of the
+hash a `cfg()` returns. The slot is reached from the read only by
+following the value, which waits for flow. A `bless` key of class `C`
+still anchors its slot group (`$self->{name}` reads) on its own.
+
+The surface carries both sets per callable (`MethodSurface::hash_keys`,
+`input_keys`), and call-argument completion offers only `input_keys`.
+
+A `Class(C)` lookup (`$obj->{k}`) still finds `Input{C, _}` keys, as it
+finds `Sub{C, _}` ones. Plain calls emit their argument keys after the walk,
+once each call is pinned to its package and the collecting reads have
+declared their keys, so a call above its `sub` links like one below it.
+
+## A named parameter is one name
+
+A `:$name` parameter's variable and key are one renameable entity: the
+field-group machinery carries it as a group whose `input` is the
+callable and whose `attr` is false, so the package's same-named attr
+(its accessors, slots, constructor key) never joins it. Rename or
+references from the parameter, a body read, or any call's key rewrites
+all of them, across files.
+
+A call key reaches the callable the call dispatches to: a call on a
+subclass reaches the inherited method's keys (`resolve_method_in_ancestors`
+at the matcher and at the consumer-side cursor), and a constructor's keys
+still widen to every subclass by `class_isa`, since its keys are the
+class's inherited attrs.
+
+Whether a fat-comma key IS a key is the callee's to say. When the file
+declares the callable, or a key of its input (a `has` declares the
+constructor's), its local table is authoritative and a key it lacks
+emits nothing. When it does not (an imported function, a method
+another file declares or an ancestor supplies), every stringy key binds
+to its call and the owner is read with the index in hand. A builtin and a
+keyword a framework installed (`has`, `extends`), and a call a plugin
+pattern emitted for (DBIC's `__PACKAGE__->has_many(widgets => …)`), are
+no callable taking names: the framework reads their arguments, so they
+never defer.
+
+A blessed hash's keys are slots of the class it is blessed into, not of
+the package whose method blesses it: `bless {…}, 'Other'` slots `Other`.
+
+## Every language spells it the same way
+
+A pack states both halves in its query document. `@def.input` on a
+parameter declares its key, paired with the parameter's local by
+`@def.pair`; the extractor files the key under the named input of the
+callable whose scope the parameter binds in. `@arity.label` on a
+call's argument name (php's `f(b: 2)`, python's `f(b=2)`) rides the
+call's own reference, and the call's key refs follow it bound to it
+(`CallArgKey`), so a label resolves like a Perl call key: its owner is
+read off the call, a construction's being the class's constructor
+(`called_member`). A receiver is the object, never a key, and a
+callable called by no name (a closure, a lambda) declares none.
+
+The key is no binding: where a variable and its key are twins, the
+variable is the place its value lives (`binding_symbol`).
+
+A token may declare more than two things: PHP's promoted constructor
+parameter (`private int $x`) is the class's property, the constructor's
+local and the key `new P(x: 1)` passes. `Symbol::declared_with` is a
+ring through every symbol one token declared (`declared_together`), and
+`@def.pair` joins the defs declared at one name token whichever match
+states them, so a pattern of its own can add a declaration a token's
+three captures cannot hold. Such a group is the property's: its field
+group carries the constructor's input, so a rename from the property, a
+`$this->x` read, the local or a label rewrites all of them.
+
+A pack's collecting parameter (`**kw`, `...$rest`) does not yet own its
+reads: a pack mints no keyed-access refs (`kw['name']`) for it to own.
+TODO(pack-collected-keys): once keyed access lands for packs, a key read
+directly off a callable's `RestNamed`/`Rest` parameter is owned by that
+callable's `Input` and the first read declares it, as
+`bind_collected_keys` does for Perl's `%args`.
+
+## A named argument fills no place
+
+A call's label rides its argument as `CallArg::Named { key, value }`
+(`@arity.label` inside the `@arity.arg`). It fills no place: the arity a
+call states and the places `ReturnExpr::Arg(n)` reads count the unnamed
+arguments only, so `pick(1, c: 3)` is one place and one name, never two
+places. TODO(named-arg-binding): bind each named argument to the callee's
+parameter whose `ParamInfo::key` it names, which needs the callee's
+parameters at query time (cross-file: from the index) and has its first
+consumer in typing a parameter from its call sites (whole-program).

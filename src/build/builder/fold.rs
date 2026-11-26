@@ -562,8 +562,7 @@ impl<'a> Builder<'a> {
         //    HashKeyDef may not be visible at consumer build;
         //    the type already pinned the class.
         //  * **Non-Parametric receiver, locally typed.** Fall
-        //    through to `Sub { package: receiver, name: method
-        //    }` with `has_hash_key_def` strict-eq gating —
+        //    through to the method's named input (`Input`) with `has_hash_key_def` strict-eq gating —
         //    prevents `Foo::bar(name=>1)` from latching onto
         //    `Sub{Foo,new}` keys.
         //  * **Chain receiver, type unresolvable at build.**
@@ -571,17 +570,15 @@ impl<'a> Builder<'a> {
         //    chain hop whose link-type lives in another file
         //    (helper-style: `$c->sner_r->search({...})`) returns
         //    None at this point. Emit `HashKeyAccess` refs
-        //    eagerly with `owner: None`; enrichment runs later
-        //    with `module_index` and fixes the owner once the
-        //    receiver type is resolvable. Same precedent as
-        //    cross-file invocant refresh (PR #34): build emits
-        //    what it can; enrichment fills gaps.
+        //    bound to their call (`CallArgKey`); the owner is
+        //    decided from that call once the receiver type is
+        //    resolvable (`docs/adr/query-delayed-facts.md`).
         enum Path<'a> {
             Claimed(HashKeyOwner, Node<'a>),
             Strict(HashKeyOwner, Node<'a>),
-            StrictOrDefer(HashKeyOwner, Node<'a>),
-            Deferred(Node<'a>),
-            ColumnKeyed(HashKeyOwner, Node<'a>),
+            StrictOrDefer(HashKeyOwner, RefIdx, Node<'a>),
+            Deferred(RefIdx, Node<'a>),
+            ColumnKeyed(HashKeyOwner, RefIdx, Node<'a>),
         }
         // Plugin-declared verbs whose first hashref arg is column-keyed (owned
         // so it doesn't borrow `self` across the `&mut self` emit loop below).
@@ -618,10 +615,7 @@ impl<'a> Builder<'a> {
                 // class: link the first hashref's column keys to the class's
                 // columns. Cross-file (class elsewhere) stays `StrictOrDefer` —
                 // the deferred owner mints the column owner at query time.
-                let owner = HashKeyOwner::Sub {
-                    package: Some(cls.clone()),
-                    name: r.target_name.clone(),
-                };
+                let owner = HashKeyOwner::named_input(Some(cls.clone()), r.target_name.clone());
                 // A class that defines its OWN `sub <verb>` has overridden DBIC's
                 // verb — the call dispatches to the user's method, whose hash arg
                 // is not column-keyed — so don't column-key it (fall to Strict).
@@ -631,15 +625,16 @@ impl<'a> Builder<'a> {
                         && s.package.as_deref() == Some(cls.as_str())
                 });
                 if local_class && !user_shadows_verb && column_keyed.contains(&r.target_name) {
-                    pending.push(Path::ColumnKeyed(owner, args));
+                    pending.push(Path::ColumnKeyed(owner, RefIdx(i as u32), args));
                     continue;
                 }
-                pending.push(if local_class {
+                pending.push(if self.declares_input(&owner) || self.framework_read.contains(&args.id()) {
                     Path::Strict(owner, args)
                 } else {
-                    // The class lives elsewhere — a local def miss can't
-                    // veto; defer the gate to query time.
-                    Path::StrictOrDefer(owner, args)
+                    // The callable is declared elsewhere (another file, or
+                    // inherited) — a local def miss can't veto; defer the
+                    // gate to query time.
+                    Path::StrictOrDefer(owner, RefIdx(i as u32), args)
                 });
                 continue;
             }
@@ -653,25 +648,27 @@ impl<'a> Builder<'a> {
                 .map(|n| n.is(Kind::MethodCallExpression))
                 .unwrap_or(false);
             if is_chain_receiver {
-                pending.push(Path::Deferred(args));
+                pending.push(Path::Deferred(RefIdx(i as u32), args));
             }
         }
+        // A method call's receiver fills the first parameter (`$_[0]`).
+        let member = Some(crate::model::conventions::PERL_SPELLINGS.receiver);
         for path in pending {
             match path {
                 Path::Claimed(owner, args) => {
-                    self.emit_call_arg_key_accesses(args, Gate::Open(owner));
+                    self.emit_call_arg_key_accesses(args, Gate::Open(owner), member);
                 }
                 Path::Strict(owner, args) => {
-                    self.emit_call_arg_key_accesses(args, Gate::Strict(owner));
+                    self.emit_call_arg_key_accesses(args, Gate::Strict(owner), member);
                 }
-                Path::StrictOrDefer(owner, args) => {
-                    self.emit_call_arg_key_accesses(args, Gate::StrictOrDefer(owner));
+                Path::StrictOrDefer(owner, call, args) => {
+                    self.emit_call_arg_key_accesses(args, Gate::StrictOrDefer(owner, call), member);
                 }
-                Path::Deferred(args) => {
-                    self.emit_call_arg_key_accesses(args, Gate::Deferred);
+                Path::Deferred(call, args) => {
+                    self.emit_call_arg_key_accesses(args, Gate::Deferred(call), member);
                 }
-                Path::ColumnKeyed(owner, args) => {
-                    self.emit_call_arg_key_accesses(args, Gate::ColumnKeyed(owner));
+                Path::ColumnKeyed(owner, call, args) => {
+                    self.emit_call_arg_key_accesses(args, Gate::ColumnKeyed(owner, call), member);
                 }
             }
         }
@@ -1939,6 +1936,108 @@ impl<'a> Builder<'a> {
                     },
                 );
             }
+        }
+    }
+
+    /// A callable's collecting parameter (`my ($class, %args) = @_`, a
+    /// signature's `%opts`) receives the named arguments its callers write,
+    /// so its direct key reads are those arguments: each read is owned by the
+    /// callable's named input, and the first read of a key declares it. Then
+    /// the plain calls' argument keys, held back for this, are emitted.
+    ///
+    /// TODO(arg-key-flows-to-slot): a key read here and stored into the
+    /// blessed slot (`bless { name => $args{name} }`) is one attr; joining
+    /// the read to the slot follows the value, which is whole-program flow.
+    /// Whether this file states what `owner`'s callable takes: it declares
+    /// the callable, or a key of its input (a framework's constructor key,
+    /// a `has`). Then the local table is authoritative for the call's keys.
+    fn declares_input(&self, owner: &HashKeyOwner) -> bool {
+        let HashKeyOwner::Input { package, name, .. } = owner else { return false };
+        self.symbols.iter().any(|s| match (&s.kind, &s.detail) {
+            (SymKind::Sub | SymKind::Method, _) => *s.name == **name && s.package.as_deref() == package.as_deref(),
+            (SymKind::HashKeyDef, SymbolDetail::HashKeyDef { owner: o, .. }) => self.as_registered(o) == *owner,
+            _ => false,
+        })
+    }
+
+    pub(super) fn bind_collected_keys(&mut self) {
+        use crate::model::file_analysis::InputSlot;
+        let mut declared: std::collections::HashSet<(HashKeyOwner, String)> = std::collections::HashSet::new();
+        let mut minted: Vec<(String, Span, ScopeId, HashKeyOwner)> = Vec::new();
+        for r in self.refs.iter_mut() {
+            if !matches!(r.kind, RefKind::HashKeyAccess { .. }) {
+                continue;
+            }
+            let Some(HashKeyOwner::Variable { name, def_scope }) = r.hash_key_owner() else { continue };
+            let scope = &self.scopes[def_scope.0 as usize];
+            let Some(callable) = scope.owner.map(|id| &self.symbols[id.0 as usize]) else { continue };
+            let SymbolDetail::Sub { params, .. } = &callable.detail else { continue };
+            // `%args` collects the names a call passes; `$o` (`$o->{key}`)
+            // holds the hash the argument at its place is.
+            let slot = match params.iter().enumerate().find(|(_, p)| p.name == *name) {
+                Some((_, p)) if p.pass == ParamPass::RestNamed => InputSlot::Named,
+                Some((j, p)) if matches!(p.pass, ParamPass::Positional | ParamPass::Either) && !p.is_invocant => {
+                    InputSlot::At(j as u16)
+                }
+                _ => continue,
+            };
+            let owner = HashKeyOwner::input_of(callable, &self.namespace_ranges).with_slot(slot);
+            if declared.insert((owner.clone(), r.target_name.clone())) {
+                minted.push((r.target_name.clone(), r.span, r.scope, owner.clone()));
+            }
+            r.bind_hash_key_owner(owner);
+        }
+        for (key, span, scope, owner) in minted {
+            if self.has_hash_key_def(&key, &owner) {
+                continue;
+            }
+            let package = match &owner {
+                HashKeyOwner::Input { package, .. } => package.as_deref().map(str::to_string),
+                HashKeyOwner::AnonInput { callable, .. } => self.symbols[callable.0 as usize].package.clone(),
+                _ => continue,
+            };
+            let detail = SymbolDetail::HashKeyDef { owner, is_dynamic: false };
+            self.add_symbol_in_scope(scope, key, SymKind::HashKeyDef, span, span, detail, Namespace::Language, package);
+        }
+        // A value call's keys are its callable's, where the operand's value
+        // names one in this file; else the call decides at query time.
+        for (args, operand) in std::mem::take(&mut self.pending_value_call_keys) {
+            let r = &self.refs[operand];
+            let held = self.bag_query_variable(&r.target_name, r.scope, crate::model::witnesses::ReadPoint::position(r.span.start));
+            let call = crate::model::witnesses::RefIdx(operand as u32);
+            let gate = match held.as_ref().and_then(InferredType::held_callable) {
+                Some(crate::model::file_analysis::HeldCallable::Symbol(sid)) => {
+                    Gate::Strict(HashKeyOwner::input_of(&self.symbols[sid.0 as usize], &self.namespace_ranges))
+                }
+                Some(crate::model::file_analysis::HeldCallable::Named { package, name }) => {
+                    let owner = HashKeyOwner::named_input(Some(package.to_string()), name);
+                    if self.declares_input(&owner) { Gate::Strict(owner) } else { Gate::StrictOrDefer(owner, call) }
+                }
+                None => Gate::Deferred(call),
+            };
+            self.emit_call_arg_key_accesses(args, gate, None);
+        }
+        for (args, call, name, here) in std::mem::take(&mut self.pending_call_arg_keys) {
+            let pinned = self.refs[call].resolved_package().map(str::to_string);
+            // A callee this file does not declare (imported, or another
+            // package's) takes what its own file says: a key the local table
+            // lacks binds to the call, and its owner is read off the call
+            // with the index in hand.
+            let package = pinned.or(here);
+            // A builtin or a keyword a framework installed (`has`, `extends`)
+            // is no callable taking names: the framework reads its arguments.
+            let at = self.import_scope_at(self.refs[call].span.start);
+            let framework = crate::model::builtins::is_builtin(&name)
+                || self.imports.keyword(at, &name)
+                || self.framework_read.contains(&args.id());
+            let owner = HashKeyOwner::named_input(package, name);
+            let elsewhere = !framework && !self.declares_input(&owner);
+            let gate = if elsewhere {
+                Gate::StrictOrDefer(owner, crate::model::witnesses::RefIdx(call as u32))
+            } else {
+                Gate::Strict(owner)
+            };
+            self.emit_call_arg_key_accesses(args, gate, None);
         }
     }
 

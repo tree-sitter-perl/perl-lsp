@@ -32,6 +32,8 @@ Foo->bar(1);
         at_key_position: false,
         used_keys: Default::default(),
         first_arg_string: None,
+        name_start: None,
+        site: Default::default(),
     };
     let slot = Slot::ArgPosition { callee: Some(callee), index: 0, expected: None };
     let point = Point::new(0, 0);
@@ -89,7 +91,7 @@ fn detect_slot_perl_method_position() {
     let src = "package Foo;\nsub greet { 1 }\npackage main;\nmy $f = bless {}, 'Foo';\n$f->\n";
     let (tree, analysis) = build(src);
     let point = Point::new(4, 4); // right after `$f->`
-    let slot = detect_slot(&analysis, &tree, src, point, "perl", None, None).slot;
+    let slot = detect_slot(&analysis, &tree, src, point, "perl", None, None, None).slot;
     match slot {
         Slot::Member { receiver, op } => {
             assert_eq!(op, MemberOp::Arrow);
@@ -111,7 +113,7 @@ fn detect_slot_string_arg_of_method_call_is_not_member() {
     let line = src.lines().nth(1).unwrap();
     let col = line.find("Artist").unwrap() + 2; // inside 'Artist'
     let point = Point::new(1, col);
-    let slot = detect_slot(&analysis, &tree, src, point, "perl", None, None).slot;
+    let slot = detect_slot(&analysis, &tree, src, point, "perl", None, None, None).slot;
     assert!(
         !matches!(slot, Slot::Member { .. }),
         "cursor inside a string call-arg must not be a Member slot, got {:?}",
@@ -128,7 +130,7 @@ fn detect_slot_perl_use_module_name_is_module_path() {
     let src = "use Sc\n";
     let (tree, analysis) = build(src);
     let point = Point::new(0, 6);
-    let detected = detect_slot(&analysis, &tree, src, point, "perl", None, None);
+    let detected = detect_slot(&analysis, &tree, src, point, "perl", None, None, None);
     assert_eq!(detected.arm, DetectorArm::UseModule);
     match detected.slot {
         Slot::ModulePath { prefix } => assert_eq!(prefix, "Sc"),
@@ -153,7 +155,7 @@ fn detect_slot_cpp_qualified_path_is_module_path() {
 
     use crate::lsp::cursor_slot::DetectorArm;
     // Mid-token: `fmtx::f|`.
-    let detected = detect_slot(&analysis, &tree, src, Point::new(2, 11), "cpp", None, None);
+    let detected = detect_slot(&analysis, &tree, src, Point::new(2, 11), "cpp", None, None, None);
     assert_eq!(detected.arm, DetectorArm::QualifiedPath);
     match detected.slot {
         Slot::ModulePath { prefix } => assert_eq!(prefix, "fmtx"),
@@ -164,7 +166,7 @@ fn detect_slot_cpp_qualified_path_is_module_path() {
     let src2 = "namespace fmtx { void format_to(int); }\nvoid caller() {\n    fmtx::\n}\n";
     let tree2 = parser.parse(src2, None).unwrap();
     let analysis2 = reg.for_id("cpp").unwrap().analyze_with_path(src2, None);
-    let detected = detect_slot(&analysis2, &tree2, src2, Point::new(2, 10), "cpp", None, None);
+    let detected = detect_slot(&analysis2, &tree2, src2, Point::new(2, 10), "cpp", None, None, None);
     assert_eq!(detected.arm, DetectorArm::QualifiedPath);
     match detected.slot {
         Slot::ModulePath { prefix } => assert_eq!(prefix, "fmtx"),
@@ -182,7 +184,7 @@ fn pack_slot(lang: &str, src: &str) -> crate::lsp::cursor_slot::DetectedSlot {
     let driver = crate::build::language_driver::LanguageRegistry::compiled().for_id(lang).unwrap();
     let tree = driver.make_parser().parse(&src, None).unwrap();
     let analysis = driver.analyze_with_path(&src, None);
-    detect_slot(&analysis, &tree, &src, point, lang, None, None)
+    detect_slot(&analysis, &tree, &src, point, lang, None, None, None)
 }
 
 #[cfg(any(feature = "php", feature = "python"))]

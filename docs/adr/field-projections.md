@@ -76,8 +76,9 @@ the same single-sourcing rule as `resolve_symbol`/`refs_to`
 ## Consumer-file keys without the class
 
 Files that only `use` the class still index ctor keys:
-`Gate::StrictOrDefer` emits `owner: None` candidates at build, and
-query-time re-derives the owner (`deferred_hash_key_owner`) — the
+`Gate::StrictOrDefer` binds a locally unowned key to its call
+(`RefBinding::CallArgKey`), and query time decides the owner from that
+call (`deferred_hash_key_owner`) — the
 receiver-gated discipline applied to hash keys. This is the one
 deliberately lazy resolution left in the ref model: dependency files
 are never enriched, so candidates ride the cache and resolve when

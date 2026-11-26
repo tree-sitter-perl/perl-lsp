@@ -23,6 +23,7 @@ pub fn pack_completion(
     language: &str,
     path: Option<&crate::util::canonical_path::CanonicalPath>,
     module_index: &ModuleIndex,
+    held: Option<&crate::build::cursor_sentinel::HeldCallee>,
 ) -> (Vec<CompletionItem>, bool) {
     let base_idx: &dyn crate::model::file_analysis::CrossFileLookup = module_index;
     // Scope member/type resolution to the file's include closure.
@@ -34,7 +35,7 @@ pub fn pack_completion(
     // cursor-tier entry (`docs/adr/cursor-slots.md`); this adapter only
     // projects it onto LSP items.
     let crate::lsp::cursor_slot::DetectedSlot { mut slot, arm } =
-        crate::lsp::cursor_slot::detect_slot(analysis, tree, source, point, language, path.map(|p| p.as_path()), Some(xidx));
+        crate::lsp::cursor_slot::detect_slot(analysis, tree, source, point, language, path.map(|p| p.as_path()), Some(xidx), held);
     if let crate::lsp::cursor_slot::Slot::Member { receiver, .. } = &slot {
         if let Some(ty) = receiver.receiver_type.as_ref() {
             // Mode A: the member items carry the operator-swap edit
@@ -113,6 +114,11 @@ pub fn pack_completion(
         }
     }
     let mut items = symbols::in_scope_completion(analysis, point);
+    // `f(ti|` — the word may be a value or a label: the callee's named
+    // inputs join the identifier universe, ahead of it.
+    if let crate::lsp::cursor_slot::Slot::Label { labels, .. } = &slot {
+        items.extend(labels.iter().cloned().map(symbols::candidate_to_completion_item));
+    }
     let macros_live = macro_completion(source, point, language, path, &mut items);
     let closure_live = closure_symbol_completion(
         open_docs, analysis, source, point, path, module_index, &mut items);

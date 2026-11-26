@@ -4077,7 +4077,10 @@ impl ReducerRegistry {
         }
         let recv = receiver.and_then(|r| self.operand_type(bag, q, state, site, r)).map(InferredType::into_invocant);
         // Positional argument types up to the first spread; an operand that
-        // types nothing holds its position as `Unknown`.
+        // types nothing holds its position as `Unknown`. A named argument
+        // fills no place: the places after it count without it.
+        // TODO(named-arg-binding): bind each named argument to the callee's
+        // parameter whose `ParamInfo::key` it names, so `Arg(n)` reads it.
         // TODO(prototypes): a callee prototype like `(\@)` takes an aggregate
         // as ONE value, so whether an argument spreads is the callee's call;
         // the operand only says it can flatten. Needs prototype parsing.
@@ -4092,6 +4095,7 @@ impl ReducerRegistry {
                     spread = true;
                     break;
                 }
+                CallArg::Named { .. } => {}
             }
         }
         let exact = args.is_some() && !spread;
