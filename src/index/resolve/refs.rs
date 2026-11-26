@@ -49,14 +49,11 @@ pub(super) fn group_from_projections(
             rename: MemberRename::Bare,
         });
     }
-    if p.has_param {
+    if let Some(crate::model::file_analysis::HashKeyOwner::Input { package, name, slot }) = &p.input {
         members.push(GroupMember {
             target: TargetRef::new(
                 p.bare.clone(),
-                TargetKind::HashKeyOfSub {
-                    package: Some(p.class.clone()),
-                    name: "new".to_string(),
-                },
+                TargetKind::HashKeyOfInput { package: package.as_deref().map(str::to_string), name: name.to_string(), slot: *slot },
                 class_analysis,
             ),
             rename: MemberRename::Bare,
@@ -533,6 +530,8 @@ pub(super) fn matcher_view(
                     && !r.match_verdict_baked()
             }),
         TargetKind::HashKeyOfSub { .. }
+        | TargetKind::HashKeyOfInput { .. }
+        | TargetKind::HashKeyOfHandler { .. }
         | TargetKind::HashKeyOfBridged(_)
         | TargetKind::InternalHashKey { .. } => refs_keyed(&view, &target.name).any(|r| {
             matches!(r.kind, RefKind::HashKeyAccess { .. })
@@ -551,6 +550,8 @@ pub(super) fn matcher_view(
             TargetKind::Handler { .. } => "refs.upgrade_by.handler",
             TargetKind::Sub { .. } | TargetKind::Method { .. } => "refs.upgrade_by.methodcall",
             TargetKind::HashKeyOfSub { .. }
+            | TargetKind::HashKeyOfInput { .. }
+        | TargetKind::HashKeyOfHandler { .. }
             | TargetKind::HashKeyOfBridged(_)
             | TargetKind::InternalHashKey { .. } => "refs.upgrade_by.hashkey",
             _ => "refs.upgrade_by.other",
@@ -562,6 +563,8 @@ pub(super) fn matcher_view(
         TargetKind::Handler { .. } => "refs.rowsview_by.handler",
         TargetKind::Sub { .. } | TargetKind::Method { .. } => "refs.rowsview_by.methodcall",
         TargetKind::HashKeyOfSub { .. }
+        | TargetKind::HashKeyOfInput { .. }
+        | TargetKind::HashKeyOfHandler { .. }
         | TargetKind::HashKeyOfBridged(_)
         | TargetKind::InternalHashKey { .. } => "refs.rowsview_by.hashkey",
         _ => "refs.rowsview_by.other",

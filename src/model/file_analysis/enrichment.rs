@@ -866,7 +866,12 @@ impl FileAnalysis {
             if !contains_point(&gated.call_span(), point) {
                 continue;
             }
+            // Only the handler's name is the dispatch: an argument the call
+            // passes the handler is the handler's to resolve.
             if let GateResult::Applies(c) = self.resolve_dispatch_candidate(gated, module_index) {
+                if !contains_point(&c.span, point) {
+                    continue;
+                }
                 return Some(AppliedDispatch {
                     name: c.name.clone(),
                     span: c.span,

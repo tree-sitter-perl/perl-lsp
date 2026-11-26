@@ -76,6 +76,7 @@ pub struct Receiver {
 /// the patched buffer. The cursor is expected to sit just after a `.` /
 /// `->` (possibly with trailing whitespace / a partial member already
 /// typed — the caller strips that; here we patch exactly at `cursor`).
+#[cfg(test)]
 pub fn patch(src: &str, cursor: usize) -> String {
     let mut out = String::with_capacity(src.len() + SENTINEL.len());
     out.push_str(&src[..cursor]);
@@ -205,10 +206,38 @@ pub struct SentinelParse<'w> {
     pub cursor: usize,
     pub patched: String,
     pub tree: Tree,
+    /// Whether `patched` closes a bracket the written buffer left open
+    /// after the sentinel (`sentinel_parse`'s retry was kept).
+    pub closed_open: bool,
+    /// The analysis of `patched`, made the first time an arm needs what
+    /// the written buffer failed to state, and never twice per request.
+    finished: std::cell::OnceCell<FileAnalysis>,
+}
+
+impl SentinelParse<'_> {
+    /// The finished buffer's analysis through `completed` (the language's
+    /// own analysis of a buffer), shared by every arm of this request.
+    pub fn finished(&self, completed: &dyn Fn(&str) -> FileAnalysis) -> &FileAnalysis {
+        self.finished.get_or_init(|| {
+            crate::util::ghost_stats::count("cursor.finished_analysis");
+            completed(&self.patched)
+        })
+    }
 }
 
 /// The sentinel parse at `cursor`, or `None` where no arm may splice: the
 /// cursor sits in a string, char or comment of the written parse.
+///
+/// A construct the user is still typing has no closer yet (`f(a, ti|`), so
+/// the sentinel can land in an ERROR with no call around it, or in a list
+/// that swallowed the code after it. Then the parse is retried once with
+/// the closer of the innermost open bracket before the cursor that nothing
+/// closes, and the retry is kept only when that bracket and the spliced
+/// closer are children of one node that parsed. The pairs are the
+/// document's (`query_extract::Recovery`), and the check never asks which
+/// arm will read the tree. At most two parses per request, at any depth:
+/// outer brackets belong to the constructs around the cursor, and the code
+/// after the cursor may close them.
 pub fn sentinel_parse<'w>(
     parser: &mut Parser,
     cfg: &crate::build::query_extract::LangPack,
@@ -219,19 +248,162 @@ pub fn sentinel_parse<'w>(
     if cursor_in_skip(written, src, cursor, cfg) {
         return None;
     }
-    let patched = patch(src, cursor);
-    let mut edited = written.clone();
+    let (patched, tree) = reparse_with(parser, src, written, cursor, SENTINEL)?;
+    let plain = SentinelParse { written, src, cursor, patched, tree, closed_open: false, finished: Default::default() };
+    if !plain.tree.root_node().has_error() {
+        return Some(plain);
+    }
+    let Some(rec) = crate::build::query_extract::recovery(&written.language(), cfg).filter(|r| !r.is_empty()) else {
+        return Some(plain);
+    };
+    let Some(open) = unclosed_open(&plain.tree, cursor, rec) else { return Some(plain) };
+    let Some((close, close_text)) = rec.closer_of(open.kind) else { return Some(plain) };
+    // The space keeps a closer from fusing with the sentinel into one word.
+    let insert = format!("{SENTINEL} {close_text}");
+    crate::util::ghost_stats::count("cursor.recovery.retry");
+    let Some((patched, tree)) = reparse_with(parser, src, written, cursor, &insert) else { return Some(plain) };
+    let at = cursor + SENTINEL.len() + 1;
+    if pair_holds(&tree, open.at, open.kind, at, close) {
+        return Some(SentinelParse { written, src, cursor, patched, tree, closed_open: true, finished: Default::default() });
+    }
+    crate::util::ghost_stats::count("cursor.recovery.rejected");
+    Some(plain)
+}
+
+/// Reparse `src` with `insert` spliced at `cursor`, reusing `old`: the
+/// splice is a pure insertion on one row, so the edit is exact and only the
+/// damaged region reparses. Every byte before `cursor` keeps its offset.
+fn reparse_with(parser: &mut Parser, src: &str, old: &Tree, cursor: usize, insert: &str) -> Option<(String, Tree)> {
+    let mut patched = String::with_capacity(src.len() + insert.len());
+    patched.push_str(&src[..cursor]);
+    patched.push_str(insert);
+    patched.push_str(&src[cursor..]);
+    let mut edited = old.clone();
     let pos = byte_to_point(src, cursor);
     edited.edit(&InputEdit {
         start_byte: cursor,
         old_end_byte: cursor,
-        new_end_byte: cursor + SENTINEL.len(),
+        new_end_byte: cursor + insert.len(),
         start_position: pos,
         old_end_position: pos,
-        new_end_position: Point::new(pos.row, pos.column + SENTINEL.len()),
+        new_end_position: Point::new(pos.row, pos.column + insert.len()),
     });
     let tree = parser.parse(&patched, Some(&edited))?;
-    Some(SentinelParse { written, src, cursor, patched, tree })
+    Some((patched, tree))
+}
+
+/// An open bracket token: where it starts and its kind.
+#[derive(Clone, Copy)]
+struct OpenToken {
+    at: usize,
+    kind: u16,
+}
+
+/// The innermost declared open bracket before `cursor` that the plain
+/// sentinel parse leaves without a real closer, or `None` when the
+/// innermost one is closed (the cursor is inside a construct that parsed,
+/// whatever the rest of the file did).
+///
+/// One descent from the root to the sentinel, then each node on that path
+/// read from the inside out: its children before the cursor, right to
+/// left, popping a bracket per closer. A child that parsed whole is
+/// balanced by the grammar and skipped; one holding an error is read too,
+/// since an ERROR keeps the tokens it could not place.
+fn unclosed_open(tree: &Tree, cursor: usize, rec: &crate::build::query_extract::Recovery) -> Option<OpenToken> {
+    let path = path_to(tree.root_node(), cursor, cursor + SENTINEL.len());
+    let mut pending = 0usize;
+    for (depth, anc) in path.iter().enumerate().rev() {
+        let mut w = anc.walk();
+        let mut todo: Vec<Node> = anc.children(&mut w).filter(|c| c.end_byte() <= cursor).collect();
+        while let Some(n) = todo.pop() {
+            if n.child_count() > 0 {
+                if n.has_error() {
+                    let mut w = n.walk();
+                    todo.extend(n.children(&mut w));
+                }
+                continue;
+            }
+            if n.is_named() || n.is_missing() {
+                continue;
+            }
+            let kind = n.kind_id();
+            if rec.is_close(kind) {
+                pending += 1;
+            } else if rec.is_open(kind) {
+                if pending > 0 {
+                    pending -= 1;
+                    continue;
+                }
+                let open = OpenToken { at: n.start_byte(), kind };
+                // Its closer, if the plain parse gave it one, is a sibling
+                // after the cursor that the grammar did not invent; a
+                // bracket an ERROR holds has none.
+                let holder = holder_of(&path[..=depth], n.start_byte());
+                let (close, _) = rec.closer_of(kind)?;
+                let closed = holder.is_some_and(|h| {
+                    let mut w = h.walk();
+                    let found = !h.is_error()
+                        && h.children(&mut w).any(|c| c.start_byte() >= cursor && !c.is_missing() && c.kind_id() == close);
+                    found
+                });
+                return (!closed).then_some(open);
+            }
+        }
+    }
+    None
+}
+
+/// The nodes from `root` down to the smallest one covering `start..end`.
+fn path_to(root: Node<'_>, start: usize, end: usize) -> Vec<Node<'_>> {
+    let mut path = vec![root];
+    loop {
+        let node = *path.last().expect("the path starts at the root");
+        let mut w = node.walk();
+        let next = node.children(&mut w).find(|c| c.start_byte() <= start && c.end_byte() >= end);
+        match next {
+            Some(c) => path.push(c),
+            None => return path,
+        }
+    }
+}
+
+/// The node that holds the leaf starting at `at` as a direct child: the
+/// deepest one on the descent from `path`'s innermost node toward `at`.
+fn holder_of<'t>(path: &[Node<'t>], at: usize) -> Option<Node<'t>> {
+    let mut node = *path.last()?;
+    loop {
+        let mut w = node.walk();
+        let child = node.children(&mut w).find(|c| c.start_byte() <= at && at < c.end_byte().max(c.start_byte() + 1))?;
+        if child.child_count() == 0 {
+            return (child.start_byte() == at).then_some(node);
+        }
+        node = child;
+    }
+}
+
+/// The retry did what it meant to: the open bracket at `open_at` and the
+/// closer spliced at `close_at` are children of one node that parsed, the
+/// closer real, not one the grammar invented. Nodes above the holder may
+/// be ERRORs (`f(a, g(|` closes `g`'s call inside a statement that stays
+/// broken). A descent from the root toward the pair, so no step climbs.
+fn pair_holds(tree: &Tree, open_at: usize, open: u16, close_at: usize, close: u16) -> bool {
+    let mut node = tree.root_node();
+    loop {
+        let mut w = node.walk();
+        let kids: Vec<Node> = node.children(&mut w).collect();
+        let leaf = |at: usize, kind: u16| {
+            kids.iter().any(|c| c.child_count() == 0 && c.start_byte() == at && c.kind_id() == kind && !c.is_missing())
+        };
+        if leaf(open_at, open) && leaf(close_at, close) {
+            // An ERROR around the holder is the rest of the statement, still
+            // half-typed; only the holder itself must have parsed.
+            return !node.is_error();
+        }
+        match kids.into_iter().find(|c| c.start_byte() <= open_at && c.end_byte() > close_at) {
+            Some(c) => node = c,
+            None => return false,
+        }
+    }
 }
 
 /// The identity being typed at the cursor, where the document spells one a
@@ -240,6 +412,112 @@ pub fn sentinel_parse<'w>(
 /// the capture it will be (`CursorDocument::identity_prefix_at`).
 pub fn identity_prefix(sp: &SentinelParse<'_>, cfg: &crate::build::query_extract::LangPack) -> Option<String> {
     crate::build::query_extract::CursorDocument::new(&sp.tree, sp.patched.as_bytes(), cfg)?.identity_prefix_at(sp.cursor, cfg)
+}
+
+/// The call argument being written at the cursor as a bare word, where a
+/// label may go (`CursorDocument::label_site_at`): `f(ti|`, `f(a: 1, |`.
+pub fn label_site(
+    sp: &SentinelParse<'_>,
+    cfg: &crate::build::query_extract::LangPack,
+) -> Option<crate::build::query_extract::LabelSite> {
+    let bytes = sp.src.as_bytes();
+    let mut word_start = sp.cursor.min(bytes.len());
+    while word_start > 0 && (bytes[word_start - 1].is_ascii_alphanumeric() || bytes[word_start - 1] == b'_') {
+        word_start -= 1;
+    }
+    crate::build::query_extract::CursorDocument::new(&sp.tree, sp.patched.as_bytes(), cfg)?
+        .label_site_at(sp.cursor, word_start)
+}
+
+/// The labels a call may still pass where the cursor writes one of its
+/// arguments as a bare word (`label_site`), `None` where it writes no
+/// argument. Empty when the callee takes no label or none resolves.
+///
+/// The callee is read through the one call → callee binding every
+/// named-argument consumer shares (`FileAnalysis::callee_at`), on the
+/// written buffer's analysis. A call the user has not closed (`f(a, |`)
+/// often leaves no call there, or one that swallowed the rest of the file
+/// and the declaration with it; then, where the written buffer failed to
+/// close or parse the call, the finished buffer's analysis answers: the
+/// same document over the same callee bytes. The labels are resolved against
+/// the analysis that named the callee, since its symbol lives there.
+pub fn call_labels(
+    sp: &SentinelParse<'_>,
+    cfg: &crate::build::query_extract::LangPack,
+    analysis: &FileAnalysis,
+    module_index: Option<&dyn CrossFileLookup>,
+    completed: &dyn Fn(&str) -> FileAnalysis,
+    held: Option<&HeldCallee>,
+) -> Option<Vec<crate::model::file_analysis::CompletionCandidate>> {
+    let site = label_site(sp, cfg)?;
+    let _session = crate::model::witnesses::ResolutionSession::enter(module_index);
+    // An answer is one that found the callee's declaration, or labels
+    // without one: a call by name alone may be the written buffer's
+    // misreading, the declaration swallowed by the unclosed call.
+    let on = |fa: &FileAnalysis| {
+        let callee = fa.callee_at(site.callee.start, module_index)?;
+        let labels = callee.labels(fa, module_index);
+        (callee.at.is_some() || !labels.is_empty()).then_some((callee, labels))
+    };
+    let start = point_to_byte(sp.src, site.callee.start);
+    let written_failed = || sp.closed_open || parsed_as_error(sp.written, start, sp.cursor);
+    let answer = on(analysis).or_else(|| {
+        if !written_failed() {
+            return None;
+        }
+        let head = &sp.src[..point_to_byte(sp.src, site.callee.end)];
+        let tail = &sp.src[sp.cursor.min(sp.src.len())..];
+        if let Some(answer) = held.and_then(|h| h.get(head, tail)) {
+            return Some(answer);
+        }
+        let answer = on(sp.finished(completed))?;
+        if let Some(h) = held {
+            h.hold(head, tail, &answer);
+        }
+        Some(answer)
+    });
+    Some(
+        answer
+            .map(|(callee, labels)| FileAnalysis::complete_call_labels(&callee, &labels, &site.used, &site.written))
+            .unwrap_or_default(),
+    )
+}
+
+/// The callee an open document's unclosed call last resolved through the
+/// finished buffer, held across keystrokes as the document holds its stable
+/// outline: analyzing the finished buffer costs a whole-file analysis, and
+/// typing an argument changes neither what names the callee nor where it is
+/// declared.
+///
+/// The answer holds while the text up to the callee's end and the text from
+/// the cursor on are as they were when it was made: only the argument being
+/// typed between them moved, which `complete_call_labels` re-reads each time
+/// (the labels already used, the one being written). A written-buffer answer
+/// is never held; it is cheap and always tried first, so the index landing
+/// still answers through it. One entry per document.
+#[derive(Default)]
+pub struct HeldCallee(std::sync::Mutex<Option<Held>>);
+
+struct Held {
+    head: String,
+    tail: String,
+    callee: crate::model::file_analysis::Callee,
+    labels: Vec<String>,
+}
+
+impl HeldCallee {
+    fn get(&self, head: &str, tail: &str) -> Option<(crate::model::file_analysis::Callee, Vec<String>)> {
+        let held = self.0.lock().ok()?;
+        let h = held.as_ref().filter(|h| h.head == head && h.tail == tail)?;
+        crate::util::ghost_stats::count("cursor.held_callee.hit");
+        Some((h.callee.clone(), h.labels.clone()))
+    }
+
+    fn hold(&self, head: &str, tail: &str, (callee, labels): &(crate::model::file_analysis::Callee, Vec<String>)) {
+        if let Ok(mut held) = self.0.lock() {
+            *held = Some(Held { head: head.to_owned(), tail: tail.to_owned(), callee: callee.clone(), labels: labels.clone() });
+        }
+    }
 }
 
 /// The completion context at a dangling member access: the receiver's type
@@ -283,7 +561,7 @@ pub fn member_completion_ctx(
     module_index: Option<&dyn CrossFileLookup>,
     completed: &dyn Fn(&str) -> FileAnalysis,
 ) -> Option<MemberCompletionCtx> {
-    let SentinelParse { written: old, src, cursor, ref patched, ref tree } = *sp;
+    let SentinelParse { written: old, src, cursor, ref patched, ref tree, .. } = *sp;
     let doc = CursorDocument::new(tree, patched.as_bytes(), cfg)?;
     let site = doc.member_named_at(cursor)?;
     // Downstream projects `class_name()` without an index, so the
@@ -293,7 +571,7 @@ pub fn member_completion_ctx(
     let receiver_type = resolve_node_type(site.recv, &doc, cfg, &patched, analysis, module_index)
         .or_else(|| {
             parsed_as_error(old, site.recv.start_byte(), site_end)
-                .then(|| resolve_node_type(site.recv, &doc, cfg, &patched, &completed(&patched), module_index))
+                .then(|| resolve_node_type(site.recv, &doc, cfg, &patched, sp.finished(completed), module_index))
                 .flatten()
         })
         .map(|t| analysis.refine_instance_dispatch(t, module_index));

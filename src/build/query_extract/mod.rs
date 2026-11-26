@@ -35,6 +35,84 @@ use tree_sitter::{Language, Point, Query, QueryCursor, StreamingIterator, Tree};
 pub(crate) struct CompiledPack {
     pub(crate) query: Query,
     pub(crate) captures: Vec<Option<Capture>>,
+    /// What follows a label a call passes an argument under
+    /// (`#set! label.written`): what label completion writes.
+    pub(crate) label_written: Option<String>,
+    /// The pairs the cursor reparse may close (`#recover-pair!`).
+    pub(crate) recovery: Recovery,
+}
+
+/// The directive that declares a pair the cursor reparse may close:
+/// `(#recover-pair! "(" ")")`, read once at compile and never run as a
+/// match filter.
+pub(crate) const RECOVER_PAIR: &str = "recover-pair!";
+
+/// The bracket pairs a document declares for half-typed code. Which token
+/// opens and which closes is a fact about the language's tokens, not about
+/// any one construct, so a document states it once, on its `(ERROR)`
+/// pattern. Each token is resolved to its kind id at compile: a token the
+/// grammar lacks, or a second closer for one open, fails the compile.
+#[derive(Debug, Default)]
+pub struct Recovery {
+    pairs: Vec<Pair>,
+}
+
+#[derive(Debug)]
+struct Pair {
+    open: u16,
+    close: u16,
+    close_text: String,
+}
+
+impl Recovery {
+    fn read(query: &Query, language: &Language) -> Result<Recovery, String> {
+        let mut pairs: Vec<Pair> = Vec::new();
+        for pattern in 0..query.pattern_count() {
+            for p in query.general_predicates(pattern) {
+                if &*p.operator != RECOVER_PAIR {
+                    continue;
+                }
+                let [tree_sitter::QueryPredicateArg::String(open), tree_sitter::QueryPredicateArg::String(close)] = &*p.args
+                else {
+                    return Err(format!("#{RECOVER_PAIR} takes an open and a close token"));
+                };
+                let id = |tok: &str| match language.id_for_node_kind(tok, false) {
+                    0 => Err(format!("#{RECOVER_PAIR}: `{tok}` is not a token of this grammar")),
+                    id => Ok(id),
+                };
+                let (open_id, close_id) = (id(open)?, id(close)?);
+                match pairs.iter().find(|q| q.open == open_id) {
+                    Some(q) if q.close == close_id => {}
+                    Some(_) => return Err(format!("#{RECOVER_PAIR}: `{open}` is declared with two closers")),
+                    None => pairs.push(Pair { open: open_id, close: close_id, close_text: close.to_string() }),
+                }
+            }
+        }
+        Ok(Recovery { pairs })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
+
+    /// The closer an open token's kind takes, as a kind id and as written.
+    pub fn closer_of(&self, open: u16) -> Option<(u16, &str)> {
+        self.pairs.iter().find(|p| p.open == open).map(|p| (p.close, p.close_text.as_str()))
+    }
+
+    pub fn is_open(&self, kind: u16) -> bool {
+        self.pairs.iter().any(|p| p.open == kind)
+    }
+
+    pub fn is_close(&self, kind: u16) -> bool {
+        self.pairs.iter().any(|p| p.close == kind)
+    }
+}
+
+/// The recovery pairs `pack`'s document declares, through the extractor's
+/// own compilation. `None` when the document does not compile.
+pub fn recovery(language: &Language, pack: &LangPack) -> Option<&'static Recovery> {
+    cached_query(language, pack).ok().map(|c| &c.recovery)
 }
 
 /// Compile each pack's skeleton query exactly once and reuse it.
@@ -67,7 +145,7 @@ fn compile(language: &Language, pack: &LangPack) -> Result<CompiledPack, String>
     let query = Query::new(language, source).map_err(|e| format!("query: {e}"))?;
     crate::build::query_predicates::check_source(source).map_err(|e| format!("query: {e}"))?;
     let captures = vocab::capture_table(query.capture_names(), &pack.member_spaces).map_err(|e| format!("query: {e}"))?;
-    crate::build::query_predicates::check(&query, language, &[]).map_err(|e| format!("query: {e}"))?;
+    crate::build::query_predicates::check(&query, language, &[RECOVER_PAIR]).map_err(|e| format!("query: {e}"))?;
     vocab::check_settings(&query).map_err(|e| format!("query: {e}"))?;
     vocab::check_space_marks(source).map_err(|e| format!("query: {e}"))?;
     vocab::check_links(&query, &captures).map_err(|e| match e {
@@ -79,7 +157,12 @@ fn compile(language: &Language, pack: &LangPack) -> Result<CompiledPack, String>
             format!("query: @link.from.{w} links for a walk whose root @{} the document never captures", w.root())
         }
     })?;
-    Ok(CompiledPack { query, captures })
+    let label_written = (0..query.pattern_count())
+        .flat_map(|p| query.property_settings(p).iter())
+        .find(|s| *s.key == *vocab::SettingKey::LabelWritten.spelling())
+        .and_then(|s| s.value.as_deref().map(str::to_string));
+    let recovery = Recovery::read(&query, language).map_err(|e| format!("query: {e}"))?;
+    Ok(CompiledPack { query, captures, label_written, recovery })
 }
 
 /// Every capture `pack`'s document mints, through the extractor's own

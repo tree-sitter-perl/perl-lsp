@@ -1,0 +1,107 @@
+{
+  "project": {
+    "repo": "https://github.com/pallets/flask",
+    "pin": "49943b5a94413a530761350f04e896f76e8d620e",
+    "root_subdir": "",
+    "note": "corpus/python (flask). A label typed one keystroke at a time inside an unclosed call in src/flask/app.py: `_`, `_a`, `_an`, `_anc` after `self.url_for(endpoint=\"x\", `, one completion per keystroke."
+  },
+  "readiness": {
+    "file": "src/flask/app.py",
+    "line": 915,
+    "character": 36
+  },
+  "steps": [
+    {
+      "action": "open",
+      "file": "src/flask/app.py"
+    },
+    {
+      "action": "insert_line",
+      "file": "src/flask/app.py",
+      "line": 1202,
+      "text": "        self.url_for(endpoint=\"x\", _",
+      "name": "type-_",
+      "await_diagnostics": true
+    },
+    {
+      "action": "completion",
+      "file": "src/flask/app.py",
+      "line": 1202,
+      "character": 36,
+      "name": "completion-1"
+    },
+    {
+      "action": "revert",
+      "file": "src/flask/app.py",
+      "name": "revert-1",
+      "await_diagnostics": true
+    },
+    {
+      "action": "insert_line",
+      "file": "src/flask/app.py",
+      "line": 1202,
+      "text": "        self.url_for(endpoint=\"x\", _a",
+      "name": "type-_a",
+      "await_diagnostics": true
+    },
+    {
+      "action": "completion",
+      "file": "src/flask/app.py",
+      "line": 1202,
+      "character": 37,
+      "name": "completion-2"
+    },
+    {
+      "action": "revert",
+      "file": "src/flask/app.py",
+      "name": "revert-2",
+      "await_diagnostics": true
+    },
+    {
+      "action": "insert_line",
+      "file": "src/flask/app.py",
+      "line": 1202,
+      "text": "        self.url_for(endpoint=\"x\", _an",
+      "name": "type-_an",
+      "await_diagnostics": true
+    },
+    {
+      "action": "completion",
+      "file": "src/flask/app.py",
+      "line": 1202,
+      "character": 38,
+      "name": "completion-3"
+    },
+    {
+      "action": "revert",
+      "file": "src/flask/app.py",
+      "name": "revert-3",
+      "await_diagnostics": true
+    },
+    {
+      "action": "insert_line",
+      "file": "src/flask/app.py",
+      "line": 1202,
+      "text": "        self.url_for(endpoint=\"x\", _anc",
+      "name": "type-_anc",
+      "await_diagnostics": true
+    },
+    {
+      "action": "completion",
+      "file": "src/flask/app.py",
+      "line": 1202,
+      "character": 39,
+      "name": "completion-4"
+    },
+    {
+      "action": "revert",
+      "file": "src/flask/app.py",
+      "name": "revert-4",
+      "await_diagnostics": true
+    },
+    {
+      "action": "rss",
+      "name": "post-completion"
+    }
+  ]
+}
