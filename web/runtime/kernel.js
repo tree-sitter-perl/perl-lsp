@@ -95,7 +95,9 @@ function spawn(arg, main) {
       writeStdin();
     } else {
       postMessage(d);
-      if (d.exit !== undefined) for (const t of threads.values()) t.terminate();
+      // A trap in one thread leaves the shared memory in an unknown state,
+      // so it ends the process, as a fault in one native thread would.
+      if (d.exit !== undefined || d.trap) for (const t of threads.values()) t.terminate();
     }
   };
   worker.onerror = e => postMessage({ trap: 'thread ' + tid + ' failed to start: ' + e.message });

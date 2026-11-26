@@ -98,6 +98,7 @@ const site = path.resolve(process.argv[2] ?? 'site');
 const server = await serveDirectory(site, { isolated: false });
 const browser = await chromium.launch();
 const failures = [];
+let dead = false;
 try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   page.on('pageerror', e => { if (e.message !== 'Canceled') console.error('[page]', e.message); });
@@ -151,9 +152,17 @@ try {
       console.log(`  ✗ ${id}: ${String(e.message).split('\n')[0]}`);
       if (expected.report) console.log('    the page says: ' + await page.textContent('#results'));
       if (process.argv[3]) await page.screenshot({ path: process.argv[3].replace(/\.png$/, `-${id}.png`) });
+      // A dead server answers nothing more: the remaining scenes would
+      // each wait out their deadline to say the same thing.
+      if ((await page.textContent('#status')).includes('trapped')) {
+        dead = true;
+        break;
+      }
     }
   }
-  if (failures.length) console.log('server log:\n' + (await page.evaluate(() => (window.serverLog ?? []).join(''))).slice(-6000));
+  // A trap is printed whole: the frames that say what the thread was doing
+  // are at the far end of its backtrace.
+  if (failures.length) console.log('server log:\n' + (await page.evaluate(() => (window.serverLog ?? []).join(''))).slice(dead ? -60000 : -6000));
   await page.keyboard.press('Escape');
   await page.click('[data-scene="chain"]');
   await page.locator('.monaco-hover-content').first().waitFor({ timeout: 5000 }).catch(() => {});
