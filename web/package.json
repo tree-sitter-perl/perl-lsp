@@ -6,7 +6,8 @@
     "smoke": "node test/smoke.mjs"
   },
   "dependencies": {
-    "@bjorn3/browser_wasi_shim": "0.4.2"
+    "@bjorn3/browser_wasi_shim": "0.4.2",
+    "monaco-editor": "0.52.2"
   },
   "devDependencies": {
     "playwright": "1.63.0"

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>perl-lsp live demo</title>
+<script src="coi.js"></script>
+<link rel="stylesheet" href="demo.css">
+</head>
+<body>
+<header>
+  <h1>perl-lsp <span>live demo</span></h1>
+  <p>The real language server, compiled to WebAssembly and running in this tab. Nothing is sent anywhere.</p>
+  <div id="status" role="status">Starting…</div>
+</header>
+<main>
+  <nav aria-label="Project files"><h2>Project</h2><ul id="files"></ul></nav>
+  <div id="editor"></div>
+  <aside>
+    <h2>Try this</h2>
+    <ol id="scenes"></ol>
+  </aside>
+</main>
+<script src="vs/loader.js"></script>
+<script type="module" src="demo.js"></script>
+</body>
+</html>

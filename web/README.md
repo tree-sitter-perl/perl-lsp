@@ -17,3 +17,22 @@ threads share one memory. `shim` is the URL of
 
 `npm ci && npm run smoke` runs the server on `demo/` in headless Chromium and
 checks hover, definition, completion and references across files.
+
+## The demo page
+
+`demo/` is a static page: Monaco as the editor, the server in workers, and
+`demo.js` mapping Monaco's providers onto LSP requests.
+
+```
+scripts/wasm/build.sh --release
+cd web && npm ci
+node build-site.mjs ../target/wasm32-wasip1-threads/release/perl-lsp.wasm site
+```
+
+`site/` is self-contained and can be served by any static host. On a host
+that cannot send the isolation headers (GitHub Pages), `coi.js` registers a
+service worker that adds them and reloads the page once.
+`node test/demo.mjs site` drives the built page. The "Demo page" workflow
+deploys it to GitHub Pages when run by hand.
+
+Design and limits: `docs/adr/wasm-target.md`.

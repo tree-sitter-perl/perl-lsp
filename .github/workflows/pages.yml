@@ -1,0 +1,45 @@
+name: Demo page
+
+# Publishes web/demo with a release build of the wasm server to GitHub
+# Pages. Manual only: a deploy replaces the public page.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/wasm-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the server
+        run: scripts/wasm/build.sh --release
+
+      - name: Assemble the site
+        working-directory: web
+        run: |
+          npm ci --omit=dev
+          node build-site.mjs ../target/wasm32-wasip1-threads/release/perl-lsp.wasm "$RUNNER_TEMP/site"
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: ${{ runner.temp }}/site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

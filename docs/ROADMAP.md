@@ -88,10 +88,9 @@ opportunistically; each is a commit, not an arc.
 - Aspirational type features (effects/throws) —
   `prompt-type-system-futures.md`. Pillar 1 (narrowing) landed; pillar 2
   is out of the QA loop by its own charter.
-- Web extension — `prompt-wasm-web-extension.md`. The crate split it
-  assumed was executed and REJECTED (layering tests enforce the DAG
-  instead); branch `workspace-split` is the playbook if wasm ever
-  forces it.
+- Web extension — `adr/wasm-target.md`. The threaded wasm build and the
+  demo page exist; vscode.dev needs either visitor-enabled isolation or
+  the single-threaded rework the ADR describes.
 - The `lsp-engine` crate cut — parked by `prompt-multi-language.md`'s
   own text until a second pack language's ceiling work (Epic 13) makes
   the split pay for itself.

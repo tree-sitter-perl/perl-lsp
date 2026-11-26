@@ -1,0 +1,34 @@
+:root { --bg: #f6f5f1; --panel: #ffffff; --fg: #1d2330; --muted: #626a78; --line: #d8d5cb; --accent: #2f5fb3; --ok: #1f7a4d; --bad: #b3372f; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #15181d; --panel: #1e1e1e; --fg: #e4e7ec; --muted: #98a1b0; --line: #2d333d; --accent: #8fb0f0; --ok: #5cc794; --bad: #f08a80; color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { display: flex; flex-direction: column; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
+header { padding: 14px 20px 10px; border-bottom: 1px solid var(--line); }
+h1 { margin: 0; font-size: 20px; }
+h1 span { font-weight: 400; color: var(--muted); }
+header p { margin: 2px 0 0; color: var(--muted); max-width: 70ch; }
+#status { margin-top: 6px; font: 13px ui-monospace, monospace; color: var(--muted); }
+#status.ok { color: var(--ok); }
+#status.bad { color: var(--bad); }
+main { flex: 1; min-height: 0; display: grid; grid-template-columns: 180px minmax(0, 1fr) 300px; }
+nav, aside { padding: 14px 16px; overflow: auto; }
+nav { border-right: 1px solid var(--line); }
+aside { border-left: 1px solid var(--line); }
+h2 { margin: 0 0 8px; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+ul, ol { margin: 0; padding: 0; list-style: none; }
+#files button, #scenes button { all: unset; cursor: pointer; display: block; width: 100%; padding: 4px 8px; border-radius: 4px; }
+#files button { font: 13px ui-monospace, monospace; }
+#files button[aria-current="true"] { background: var(--panel); color: var(--accent); }
+#files button:hover, #scenes button:hover, #files button:focus-visible, #scenes button:focus-visible { background: var(--panel); }
+#scenes li { margin-bottom: 8px; counter-increment: scene; }
+#scenes strong { display: block; }
+#scenes span { color: var(--muted); font-size: 13px; }
+#editor { min-width: 0; min-height: 320px; background: var(--panel); }
+@media (max-width: 900px) {
+  main { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(360px, 1fr) auto; }
+  nav, aside { border: 0; border-bottom: 1px solid var(--line); }
+  #files { display: flex; flex-wrap: wrap; gap: 4px; }
+  #files button { width: auto; }
+}

@@ -195,30 +195,12 @@ jobs:
     name: Wasm build (wasip1-threads)
     if: github.event.action != 'edited' || github.event.changes.base   # see `on:`
     runs-on: ubuntu-latest
-    env:
-      WASI_SDK: "25"
-      WASI_SYSROOT_SHA256: d09c62c18efcddffe4b2fdd8c5830109cc8e36130cdbc9acdc0bd1b204c942bb
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install the pinned toolchain
-        run: |
-          toolchain="$(cat scripts/wasm/toolchain)"
-          rustup toolchain install "$toolchain" --profile minimal -t wasm32-wasip1-threads
-          echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/wasm-toolchain
 
       - uses: Swatinem/rust-cache@v2
-
-      # Only the sysroot (libc headers for the C dependencies), not the whole
-      # SDK: the runner's own clang has the wasm32 backend. Pinned by digest
-      # because it is fetched at build time.
-      - name: Fetch WASI sysroot
-        run: |
-          url="https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-$WASI_SDK/wasi-sysroot-$WASI_SDK.0.tar.gz"
-          curl -sSfL --retry 3 -o "$RUNNER_TEMP/sysroot.tgz" "$url"
-          echo "$WASI_SYSROOT_SHA256  $RUNNER_TEMP/sysroot.tgz" | sha256sum -c -
-          tar xzf "$RUNNER_TEMP/sysroot.tgz" -C "$RUNNER_TEMP"
-          echo "WASI_SYSROOT=$RUNNER_TEMP/wasi-sysroot-$WASI_SDK.0" >> "$GITHUB_ENV"
 
       - name: Build
         run: scripts/wasm/build.sh
@@ -231,3 +213,11 @@ jobs:
           npm ci
           npx playwright install --with-deps chromium
           npm run smoke
+
+      # Served as GitHub Pages serves it, without isolation headers: the
+      # page's service worker has to supply them before the server starts.
+      - name: Demo page test
+        working-directory: web
+        run: |
+          node build-site.mjs ../target/wasm32-wasip1-threads/debug/perl-lsp.wasm "$RUNNER_TEMP/site"
+          node test/demo.mjs "$RUNNER_TEMP/site"

@@ -33,7 +33,13 @@ function at(needle, offset = 0) {
   return { line, character: lines[line].indexOf(needle) + offset };
 }
 
-const server = await serve(wasm);
+const web = path.join(repo, 'web');
+const server = await serve(url => {
+  if (url === '/') return path.join(web, 'test/smoke.html');
+  if (url === '/perl-lsp.wasm') return wasm;
+  if (url.startsWith('/shim/')) return path.join(web, 'node_modules/@bjorn3/browser_wasi_shim/dist', url.slice('/shim/'.length));
+  if (url.startsWith('/runtime/')) return path.join(web, 'runtime', url.slice('/runtime/'.length));
+});
 const browser = await chromium.launch();
 let failed = false;
 try {

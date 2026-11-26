@@ -3,6 +3,7 @@
 editors/vscode/node_modules/
 editors/vscode/out/
 web/node_modules/
+web/site/
 .node-version
 
 .claude/*
