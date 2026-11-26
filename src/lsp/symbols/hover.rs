@@ -313,7 +313,7 @@ fn render_symbol_hover(
     let mut out = format!("```{}\n{}\n```\n\n*{}*", language, sig, hover_kind_label(sym));
     if matches!(sym.kind, FaSymKind::Class) {
         for attr in &sym.attributes {
-            out.push_str(&format!("\n\n*{}*", attr));
+            out.push_str(&format!("\n\n*{}*", crate::model::file_analysis::markdown_prose(attr)));
         }
     }
     if !matches!(sym.kind, FaSymKind::Sub | FaSymKind::Method) {

@@ -1424,3 +1424,17 @@ my $n = $by_moniker->first->name;
         "a moniker row has no class without the index",
     );
 }
+
+/// A parameterised type in a hover's prose survives a Markdown client,
+/// which would otherwise read `<Product>` as an HTML tag and drop it.
+#[test]
+fn a_parameterised_type_is_markdown_prose_in_hover() {
+    use crate::model::file_analysis::{callable_hover_tail, markdown_prose};
+    assert_eq!(markdown_prose("Shop::Cart"), "Shop::Cart");
+    assert_eq!(markdown_prose("Row<Product>"), "Row&lt;Product>");
+    assert_eq!(markdown_prose("Box<int&>"), "Box&lt;int&amp;>");
+    assert_eq!(
+        callable_hover_tail(Some(("class", "Box<int>")), Some("Row<Product>"), None),
+        "\n\n*class Box&lt;int>*\n\n*returns: Row&lt;Product>*"
+    );
+}
