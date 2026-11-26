@@ -896,7 +896,7 @@ fn h13_field_receiver_member_slot_resolves() {
         parser.set_language(&tree_sitter_cpp::LANGUAGE.into()).unwrap();
         let tree = parser.parse(src, None).unwrap();
         let fa = cpp_driver().analyze(src);
-        let detected = detect_slot(&fa, &tree, src, point_after(src, marker), "cpp", None, None);
+        let detected = detect_slot(&fa, &tree, src, point_after(src, marker), "cpp", None, None, None);
         match detected.slot {
             Slot::Member { receiver, .. } => receiver
                 .receiver_type

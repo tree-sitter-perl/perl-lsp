@@ -54,12 +54,67 @@
        definition: (function_definition name: (identifier) @mark.constructor))]))
  (#eq? @mark.constructor "__init__"))
 
+; A class the standard library builds from its annotated fields has the
+; constructor it writes: `@dataclass` an `__init__`, a `NamedTuple` base a
+; `__new__`, a `TypedDict` base the dict's `__init__`. Each takes the
+; fields as its keys (below), so `A(timeout=1)` passes the field.
+; The constructor is declared at the class's name, which writes it.
+; TODO(dataclass-framework-family): attrs (`@attr.s`, `@define`) and
+; pydantic (`BaseModel`) build the same constructor; they are frameworks,
+; so their vocabulary is a plugin's data document once pack plugins land
+; (owner: frameworks epic, after 0.11).
+((decorated_definition
+   (decorator [(identifier) @_gen
+               (attribute attribute: (identifier) @_gen)
+               (call function: [(identifier) @_gen (attribute attribute: (identifier) @_gen)])])
+   definition: (class_definition
+     name: (identifier) @def.method @def.method.anchor @mark.constructor))
+ (#eq? @_gen "dataclass")
+ (#set! def.name "__init__"))
+((class_definition
+   name: (identifier) @def.method @def.method.anchor @mark.constructor
+   superclasses: (argument_list [(identifier) @_gen (attribute attribute: (identifier) @_gen)]))
+ (#eq? @_gen "NamedTuple")
+ (#set! def.name "__new__"))
+((class_definition
+   name: (identifier) @def.method @def.method.anchor @mark.constructor
+   superclasses: (argument_list [(identifier) @_gen (attribute attribute: (identifier) @_gen)]))
+ (#eq? @_gen "TypedDict")
+ (#set! def.name "__init__"))
+
+; Such a class's annotated field is a key its constructor takes, declared
+; with the field by the one token; a `ClassVar` is the class's own, no
+; field.
+; TODO(dataclass-inherited-fields): a dataclass subclass's `__init__` also
+; takes each dataclass ancestor's fields, ancestors first; a construction's
+; owners should include every ancestor's generated constructor input.
+; Owner: Python pack follow-up.
+((decorated_definition
+   (decorator [(identifier) @_gen
+               (attribute attribute: (identifier) @_gen)
+               (call function: [(identifier) @_gen (attribute attribute: (identifier) @_gen)])])
+   definition: (class_definition
+     body: (block
+       (expression_statement
+         (assignment left: (identifier) @def.input.name type: (type) @_ty) @def.input @def.pair))))
+ (#eq? @_gen "dataclass")
+ (#not-match? @_ty "^(typing[.])?ClassVar"))
+((class_definition
+   superclasses: (argument_list [(identifier) @_gen (attribute attribute: (identifier) @_gen)])
+   body: (block
+     (expression_statement
+       (assignment left: (identifier) @def.input.name type: (type) @_ty) @def.input @def.pair)))
+ (#any-of? @_gen "NamedTuple" "TypedDict")
+ (#not-match? @_ty "^(typing[.])?ClassVar"))
+
 ; `@scope.sub`: params/locals are sub-body content — shielded from the
 ; outline and the class-content lane (a method local carries the sticky
 ; class package; the Sub boundary is what marks it a local, not a member).
 (function_definition) @scope.sub
 ; A lambda is a callable too: what it yields is its own.
 (lambda) @scope.sub
+; …and a value: the value is the callable.
+(lambda) @def.anon
 ; A comprehension runs in a function of its own: its loop variables are its
 ; locals, in force from its first token (the element is written before the
 ; `for` that binds it), and never the names of the code around it.
@@ -136,9 +191,65 @@
 
 (parameters
   (identifier) @def.var.name @def.var)
+(parameters
+  [(list_splat_pattern (identifier) @def.var.name)
+   (dictionary_splat_pattern (identifier) @def.var.name)] @def.var)
 (typed_parameter . (identifier) @def.var.name @def.var)
 (default_parameter name: (identifier) @def.var.name @def.var)
 (typed_default_parameter name: (identifier) @def.var.name @def.var)
+; A `def`'s parameter is also the key a call may pass it by (`f(a=1)`):
+; the one token declares the name and the key, a lambda's too, which a
+; call reaches through the value that holds it; `*args` and `**kw` collect
+; what no key names. (A positional-only parameter, before a `/`, mints a
+; key no call can write.)
+(function_definition
+  parameters: (parameters (identifier) @def.input @def.var @def.pair))
+(function_definition
+  parameters: (parameters
+    [(typed_parameter . (identifier) @def.input.name @def.var.name)
+     (default_parameter name: (identifier) @def.input.name @def.var.name)
+     (typed_default_parameter name: (identifier) @def.input.name @def.var.name)] @def.input @def.var @def.pair))
+
+; A `def`'s parameter list, in order: a plain parameter is reached by
+; place or by name, required unless it has a default; `*args` collects the
+; places left and `**kw` the names. A bare `*` (or `*args`) makes the
+; parameters after it named only, a `/` the ones before it placed only.
+(function_definition parameters: (parameters) @arity.sig)
+(parameters [(identifier) (typed_parameter . (identifier))] @arity.required @arity.either)
+(parameters
+  [(default_parameter value: (_) @arity.default)
+   (typed_default_parameter value: (_) @arity.default)] @arity.optional @arity.either)
+(parameters [(list_splat_pattern) (typed_parameter (list_splat_pattern))] @arity.variadic @arity.rest_places)
+(parameters [(dictionary_splat_pattern) (typed_parameter (dictionary_splat_pattern))] @arity.variadic @arity.rest_names)
+(parameters
+  [(keyword_separator) (list_splat_pattern) (typed_parameter (list_splat_pattern))]
+  [(identifier) (typed_parameter . (identifier)) (default_parameter) (typed_default_parameter)] @arity.by_name)
+(parameters
+  [(identifier) (typed_parameter . (identifier)) (default_parameter) (typed_default_parameter)] @arity.by_place
+  (positional_separator))
+
+; A lambda's parameter list is a `def`'s, written without parentheses.
+(lambda
+  parameters: (lambda_parameters (identifier) @def.input @def.var @def.pair))
+(lambda
+  parameters: (lambda_parameters
+    [(typed_parameter . (identifier) @def.input.name @def.var.name)
+     (default_parameter name: (identifier) @def.input.name @def.var.name)
+     (typed_default_parameter name: (identifier) @def.input.name @def.var.name)] @def.input @def.var @def.pair))
+
+(lambda parameters: (lambda_parameters) @arity.sig)
+(lambda_parameters [(identifier) (typed_parameter . (identifier))] @arity.required @arity.either)
+(lambda_parameters
+  [(default_parameter value: (_) @arity.default)
+   (typed_default_parameter value: (_) @arity.default)] @arity.optional @arity.either)
+(lambda_parameters [(list_splat_pattern) (typed_parameter (list_splat_pattern))] @arity.variadic @arity.rest_places)
+(lambda_parameters [(dictionary_splat_pattern) (typed_parameter (dictionary_splat_pattern))] @arity.variadic @arity.rest_names)
+(lambda_parameters
+  [(keyword_separator) (list_splat_pattern) (typed_parameter (list_splat_pattern))]
+  [(identifier) (typed_parameter . (identifier)) (default_parameter) (typed_default_parameter)] @arity.by_name)
+(lambda_parameters
+  [(identifier) (typed_parameter . (identifier)) (default_parameter) (typed_default_parameter)] @arity.by_place
+  (positional_separator))
 
 ; An annotated parameter holds a value of its annotation, as an annotated
 ; assignment's target does.
@@ -276,7 +387,10 @@
 ; A bare name read. An attribute's name (`count` in `o.count`) is the member
 ; read above, never a bare name; its receiver is.
 ((identifier) @expr.read.var
- (#not-has-parent? @expr.read.var attribute))
+ (#not-has-parent? @expr.read.var attribute keyword_argument))
+(keyword_argument value: (identifier) @expr.read.var)
+; A keyword argument's name is a key the callee takes, written `a=`.
+((keyword_argument name: (identifier) @arity.label) (#set! label.written "="))
 (attribute object: (identifier) @expr.read.var)
 
 ; Parentheses hold the value they wrap.
@@ -389,3 +503,10 @@
 ; A def that yields returns a generator, whatever its `return` says.
 ((yield) @expr.return.class
  (#set! return.class "typing.Generator"))
+
+; ---- half-typed code: the expression brackets the cursor reparse may close
+; when the user has not typed the closer yet (`f(a, |`). A token fact, stated
+; once for the document. Never a block brace: an unclosed `{` is the normal
+; state while writing a body, and closing it would buy a retry per request
+; for nothing a cursor arm reads. ----
+((ERROR) (#recover-pair! "(" ")") (#recover-pair! "[" "]") (#recover-pair! "{" "}"))

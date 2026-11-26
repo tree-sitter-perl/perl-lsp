@@ -468,7 +468,7 @@ impl WitnessPayload {
                     f(t);
                 }
                 for arg in args.iter_mut().flatten() {
-                    let (CallArg::One(t) | CallArg::Spread(t)) = arg;
+                    let (CallArg::One(t) | CallArg::Spread(t) | CallArg::Named { value: t, .. }) = arg;
                     f(t);
                 }
             }
@@ -955,6 +955,9 @@ pub enum CallArg {
     /// Flattens to any number of values (`@args`, `%h`): positions after it,
     /// and the arity, are unknown.
     Spread(WitnessAttachment),
+    /// Passed by name (`f(b: 2)`, `f(b=2)`): it fills no place, so the
+    /// arity and the places after it count without it.
+    Named { key: String, value: WitnessAttachment },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
