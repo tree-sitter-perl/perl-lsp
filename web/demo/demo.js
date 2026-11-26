@@ -23,6 +23,17 @@ const SCENES = [
     { id: 'ref', title: 'ref() checks narrow too', note: 'Inside the ARRAY branch $input is an ArrayRef.', file: 'lib/Shop/Util.pm', on: '@$input', offset: 1, action: HOVER },
     { id: 'inlay', title: 'Inlay hints', note: 'Return types and variable types appear inline, greyed.', file: 'lib/Shop/Cart.pm', on: 'sub totals' },
   ]],
+  ['Control flow', [
+    { id: 'flow-return', title: 'An early return', note: 'After `return ... unless defined $item`, $item is a Shop::Item for the rest of the sub.', file: 'flow.pl', on: '$item->label', action: HOVER },
+    { id: 'flow-noreturn', title: 'A call that never returns', note: 'fail() always dies, so the line after it only runs with an item.', file: 'flow.pl', on: '$item->name', action: HOVER },
+    { id: 'flow-ordie', title: '// die', note: 'The undef case never gets past the assignment.', file: 'flow.pl', on: '$item = Shop::Item->parse($line) //', action: HOVER },
+    { id: 'flow-loop', title: 'next in a loop', note: 'The rest of the loop body only sees real items.', file: 'flow.pl', on: '$cart->add( $item', offset: 12, action: HOVER },
+    { id: 'flow-reassign', title: 'Assigning again', note: 'The guard was about the old value: the second parse may be undef again, and the call is flagged.', file: 'flow.pl', on: '$item->price', action: HOVER },
+    { id: 'flow-redundant', title: 'A guard that cannot fail', note: 'new() always returns a cart, so `defined $cart` is flagged as redundant.', file: 'flow.pl', on: 'defined $cart', offset: 9, action: HOVER },
+    { id: 'flow-closure', title: 'A closure runs later', note: '$item is assigned again after the closure is made, so inside it the guard is not taken as proof.', file: 'flow.pl', on: '{ $item->name }', offset: 3, action: HOVER },
+    { id: 'flow-try', title: 'try / catch', note: 'Assigned in try, untouched in catch: the two ways out are joined.', file: 'flow.pl', on: 'return $item;', nth: 1, offset: 8, action: HOVER },
+    { id: 'flow-deref', title: 'The wrong kind of reference', note: 'ref() proved an array; a hash deref on the next line would die at runtime.', file: 'flow.pl', on: '$input->{count}', offset: 9, action: HOVER },
+  ]],
   ['Navigation', [
     { id: 'def', title: 'Go to definition, across files', note: 'From the call into lib/Shop/Util.pm.', file: 'app.pl', on: 'format_price(', action: DEFINITION },
     { id: 'role', title: 'A method from a role', note: 'describe() is not in Shop::Item; it comes from the role it consumes.', file: 'app.pl', on: '$book->describe', offset: 7, action: DEFINITION },
