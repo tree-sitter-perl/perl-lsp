@@ -38,6 +38,9 @@ jobs:
 
       - name: Assemble the site
         working-directory: web
+        env:
+          # Unset, the page counts nothing.
+          GOATCOUNTER_URL: ${{ vars.GOATCOUNTER_URL }}
         run: |
           npm ci --omit=dev
           cpm install -L "$RUNNER_TEMP/demo-perl" --cpanfile demo/project/cpanfile

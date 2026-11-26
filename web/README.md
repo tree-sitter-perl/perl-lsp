@@ -48,6 +48,11 @@ what the server says about a plugin that does not compile.
 `site/` is self-contained and can be served by any static host. On a host
 that cannot send the isolation headers (GitHub Pages), `coi.js` registers a
 service worker that adds them and reloads the page once.
+With `GOATCOUNTER_URL=https://<code>.goatcounter.com/count` in the build's
+environment the page counts visits with [GoatCounter](https://www.goatcounter.com)
+and says so; without it the page loads nothing from another host. The "Demo
+page" workflow reads it from the repository variable of the same name.
+
 The project the page opens is `demo/project/`, written so each scene in
 `demo.js` has something to show. `node test/demo.mjs site` clicks every scene
 on the built page and checks what appears; a new scene needs an expectation

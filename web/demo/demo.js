@@ -642,3 +642,18 @@ for (const [group, scenes] of SCENES) {
 }
 
 show('app.pl');
+
+// A deployment that wants visits counted names its GoatCounter endpoint at
+// build time. The count waits until here so the load that only installs
+// the service worker, and reloads, is not a visit.
+const counter = document.querySelector('meta[name="goatcounter"]').content;
+if (counter) {
+  const script = document.createElement('script');
+  script.async = true;
+  // Without CORS a cross-origin isolated page refuses the script.
+  script.crossOrigin = 'anonymous';
+  script.dataset.goatcounter = counter;
+  script.src = 'https://gc.zgo.at/count.js';
+  document.head.append(script);
+  document.getElementById('counted').hidden = false;
+}
