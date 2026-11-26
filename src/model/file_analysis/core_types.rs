@@ -465,6 +465,12 @@ pub struct NameSpellings {
     /// as it mints each row, never by a consumer.
     pub imports: ImportRule,
     /// What calling a name that is a class does.
+    ///
+    /// TODO(names-class-predicate): a per-language switch a consumer reads
+    /// (`FileAnalysis::class_named_by_call`). The rule belongs in the
+    /// language's query document, as a `#names-class?` predicate on the
+    /// call pattern that is decided at query time; this field and
+    /// `ClassCall` go when it does.
     pub class_call: ClassCall,
     /// Which class a site's code belongs to (`FileAnalysis::package_at`).
     pub enclosing_class: EnclosingClass,
