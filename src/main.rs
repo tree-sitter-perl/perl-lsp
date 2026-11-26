@@ -15,7 +15,9 @@ use lsp::{backend, panic_guard, plugin_cli, stdio_bridge};
 use backend::Backend;
 use tower_lsp::{LspService, Server};
 
-#[tokio::main]
+// tokio has no multi-thread scheduler on WASI.
+#[cfg_attr(not(target_os = "wasi"), tokio::main)]
+#[cfg_attr(target_os = "wasi", tokio::main(flavor = "current_thread"))]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
 
