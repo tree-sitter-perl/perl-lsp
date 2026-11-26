@@ -1588,3 +1588,22 @@ sub c { my $x = {}; print $x->{typo}; }
         fa.closed_shape_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
     assert_eq!(typos, vec![("typo".to_string(), 3)]);
 }
+
+/// A value call's keys are the input of the callable the value holds: an
+/// anonymous sub's own (never another anonymous sub's in the package), or
+/// a named sub's through `\&f`.
+#[test]
+fn a_value_calls_keys_reach_the_callable_it_holds() {
+    let src = "use strict;
+my $f = sub { my %a = @_; $a{timeout} };
+my $o = sub { my %a = @_; $a{timeout} };
+sub g { my %a = @_; $a{retries} }
+my $h = \\&g;
+$f->(timeout => 1);
+$h->(retries => 2);
+";
+    let fa = build_fa(src);
+    let def = |row: usize, col: usize| fa.find_definition(Point::new(row, col), None).map(|s| (s.start.row, s.start.column));
+    assert_eq!(def(5, 5), Some((1, 29)), "$f's anon sub, not $o's");
+    assert_eq!(def(6, 5), Some((3, 23)), "\\&g's sub");
+}

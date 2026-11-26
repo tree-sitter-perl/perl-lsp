@@ -1293,7 +1293,7 @@ def f(c: Counter):
     let tree = parser.parse(src, None).unwrap();
     let store = crate::index::open_docs::OpenDocs::new();
     let (items, _) =
-        crate::lsp::backend::pack_completion(&store, &fa, src, &tree, Point::new(8, 6), "python", Some(&crate::util::canonical_path::CanonicalPath::resolve(path.clone())), &idx);
+        crate::lsp::backend::pack_completion(&store, &fa, src, &tree, Point::new(8, 6), "python", Some(&crate::util::canonical_path::CanonicalPath::resolve(path.clone())), &idx, None);
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
     for name in ["n", "count", "bump", "__init__"] {
         assert!(labels.contains(&name), "{name} in {labels:?}");
@@ -2449,4 +2449,275 @@ def f(c):
     };
     assert_eq!(fa.inferred_type_via_bag("x", Point::new(11, 12)), Some(InferredType::ClassName("A".into())), "nothing raises past the write");
     assert_eq!(fa.inferred_type_via_bag("y", Point::new(19, 8)), two("B", "C"), "the entry value only unwinds through the finally");
+}
+
+/// A keyword argument (`f(b=2)`) is the key the callee's parameter `b`
+/// declares, never a read of a variable `b`; the receiver is no key.
+#[cfg(feature = "python")]
+#[test]
+fn a_keyword_argument_is_its_parameter() {
+    let src = "def f(a, b=1, *args, d, **kw):
+    return b
+f(1, b=2, d=4)
+class C:
+    def m(self, x: int):
+        return x
+C().m(x=1)
+";
+    let fa = py_in(src, None);
+    let lines: Vec<&str> = src.lines().collect();
+    let at = |row: usize, needle: &str| Point::new(row, lines[row].find(needle).unwrap());
+    let def = fa.find_definition(at(2, "b="), None).expect("label goes to its parameter");
+    assert_eq!((def.start.row, def.start.column), (0, 9));
+    let def = fa.find_definition(at(6, "x="), None).expect("method label");
+    assert_eq!((def.start.row, def.start.column), (4, lines[4].find("x:").unwrap()));
+    assert!(!fa.symbols().iter().any(|s| s.kind == SymKind::HashKeyDef && s.name == "self"), "the receiver is no key");
+
+    let mut edits: Vec<(usize, usize)> =
+        fa.rename_at(Point::new(0, 9), "c").expect("renames").into_iter().map(|(s, _)| (s.start.row, s.start.column)).collect();
+    edits.sort();
+    assert_eq!(edits, [(0, 9), (1, 11), (2, 5)]);
+}
+
+/// A `def` states each parameter and how a call reaches it: `/` places the
+/// ones before it, a bare `*` or `*args` names the ones after it, `*args`
+/// and `**kw` collect what is left, and `self` is the receiver.
+#[cfg(feature = "python")]
+#[test]
+fn a_def_states_how_each_parameter_is_reached() {
+    use crate::model::file_analysis::{ParamPass, SymbolDetail};
+    let fa = py_in("class C:\n    def m(self, a, b=1, /, c=2, *args, d, e=3, **kw):\n        return a\n", None);
+    let m = fa.symbols().iter().find(|s| s.name == "m").unwrap();
+    let SymbolDetail::Sub { params, .. } = &m.detail else { panic!("{:?}", m.detail) };
+    let got: Vec<(&str, ParamPass, Option<&str>, Option<&str>, bool)> = params
+        .iter()
+        .map(|p| (p.name.as_str(), p.pass, p.key.as_deref(), p.default.as_deref(), p.is_invocant))
+        .collect();
+    use ParamPass::*;
+    assert_eq!(
+        got,
+        [
+            ("self", Positional, None, None, true),
+            ("a", Positional, None, None, false),
+            ("b", Positional, None, Some("1"), false),
+            ("c", Either, Some("c"), Some("2"), false),
+            ("args", RestPositional, None, None, false),
+            ("d", Named, Some("d"), None, false),
+            ("e", Named, Some("e"), Some("3"), false),
+            ("kw", RestNamed, None, None, false),
+        ]
+    );
+}
+
+/// A bare word written as a call's argument may be a label: completion
+/// offers the callee's parameters as `name=` (the ones not yet passed and
+/// reachable by name), in its own file and through an import.
+#[cfg(feature = "python")]
+#[test]
+fn a_call_argument_completes_the_callees_labels() {
+    let db = "def connect(host, /, timeout=30, *, retry=False, **opts):\n    pass\n";
+    let app = "from pkg.db import connect\n\ndef local(name, size=1):\n    pass\n\nlocal(|)\nconnect(timeout=1, |)\n";
+    let at = app.find('|').unwrap();
+    let app_src = format!("{}{}", &app[..at], &app[at + 1..]);
+    let second = app_src.rfind(", ").unwrap() + 2;
+    let (t, idx) = indexed("pylabels", &[("pkg/__init__.py", ""), ("pkg/db.py", db), ("pkg/app.py", &app_src)]);
+    let path = t.0.join("pkg/app.py");
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_python::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(&app_src, None).unwrap();
+    let store = crate::index::open_docs::OpenDocs::new();
+    let canon = crate::util::canonical_path::CanonicalPath::resolve(path.clone());
+    let point_of = |byte: usize| {
+        let row = app_src[..byte].matches('\n').count();
+        Point::new(row, byte - app_src[..byte].rfind('\n').map_or(0, |n| n + 1))
+    };
+    let labels = |byte: usize| -> Vec<(String, Option<String>)> {
+        let (items, _) =
+            crate::lsp::backend::pack_completion(&store, &fa, &app_src, &tree, point_of(byte), "python", Some(&canon), &idx, None);
+        items.into_iter().filter(|i| i.label.ends_with('=')).map(|i| (i.label, i.insert_text)).collect()
+    };
+    assert_eq!(
+        labels(at),
+        vec![("name=".to_string(), Some("name=".to_string())), ("size=".to_string(), Some("size=".to_string()))],
+    );
+    // `host` is positional-only and `timeout` is passed; `**opts` names no
+    // key of its own.
+    assert_eq!(labels(second).into_iter().map(|(l, _)| l).collect::<Vec<_>>(), ["retry="]);
+}
+
+/// Calling a class constructs it: its labels are its `__init__`'s
+/// parameters after `self`.
+#[cfg(feature = "python")]
+#[test]
+fn calling_a_class_completes_its_init_labels() {
+    let src = "class Point:\n    def __init__(self, x, y=0):\n        pass\n\nPoint()\n";
+    let (t, idx) = indexed("pyctorlabels", &[("pkg/__init__.py", ""), ("pkg/m.py", src)]);
+    let path = t.0.join("pkg/m.py");
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_python::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(src, None).unwrap();
+    let store = crate::index::open_docs::OpenDocs::new();
+    let canon = crate::util::canonical_path::CanonicalPath::resolve(path.clone());
+    let (items, _) = crate::lsp::backend::pack_completion(&store, &fa, src, &tree, Point::new(4, 6), "python", Some(&canon), &idx, None);
+    let labels: Vec<String> = items.into_iter().map(|i| i.label).filter(|l| l.ends_with('=')).collect();
+    assert_eq!(labels, ["x=", "y="]);
+}
+
+/// A call's key lands on the parameter of the callable the call runs,
+/// wherever it is declared: an imported function's, an imported class's
+/// `__init__` (inherited too), a method of an imported class's instance.
+#[cfg(feature = "python")]
+#[test]
+fn a_call_key_lands_on_the_callees_parameter_across_files() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let lib = "def connect(host, timeout=30):\n    pass\n\nclass Base:\n    def __init__(self, size=1):\n        pass\n\nclass A(Base):\n    def m(self, retries=3):\n        pass\n";
+    let app = "from pkg.lib import connect, A\n\nconnect('h', timeout=1)\nA(size=2)\nA().m(retries=4)\n";
+    let (t, idx) = indexed("pycallee", &[("pkg/__init__.py", ""), ("pkg/lib.py", lib), ("pkg/app.py", app)]);
+    let path = t.0.join("pkg/app.py");
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let store = OpenDocs::new();
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.clone()));
+    for (at, want) in [(Point::new(2, 13), (0, 18)), (Point::new(3, 2), (4, 23)), (Point::new(4, 6), (8, 16))] {
+        let cs = resolve(&store, &fa, key.clone(), at, Some(&idx), OverrideScope::default());
+        let defs: Vec<(String, usize, usize)> = cs
+            .definitions()
+            .iter()
+            .map(|d| (d.key.canonical_path().unwrap().file_name().unwrap().to_string_lossy().to_string(), d.span.start.row, d.span.start.column))
+            .collect();
+        assert_eq!(defs, [("lib.py".to_string(), want.0, want.1)], "goto-def from {at:?}");
+    }
+}
+
+/// A module function's named input is that module's: two modules
+/// declaring the same function keep their parameters apart.
+#[cfg(feature = "python")]
+#[test]
+fn a_module_functions_keys_are_its_modules() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let f = "def f(timeout=1):\n    pass\n";
+    let app = "from pkg.m1 import f\n\nf(timeout=2)\n";
+    let (t, idx) = indexed("pymodinput", &[("pkg/__init__.py", ""), ("pkg/m1.py", f), ("pkg/m2.py", f), ("pkg/app.py", app)]);
+    let store = OpenDocs::new();
+    let refs_from = |rel: &str| -> Vec<String> {
+        let path = t.0.join(rel);
+        let fa = idx.workspace_file_for_test(&path).unwrap();
+        let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path));
+        let cs = resolve(&store, &fa, key, Point::new(0, 6), Some(&idx), OverrideScope::default());
+        let mut files: Vec<String> = cs
+            .references()
+            .iter()
+            .map(|l| l.key.canonical_path().unwrap().file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        files.sort();
+        files
+    };
+    assert_eq!(refs_from("pkg/m1.py"), ["app.py", "m1.py"]);
+    assert_eq!(refs_from("pkg/m2.py"), ["m2.py"]);
+}
+
+/// A lambda is a callable written as a value: a call by the name holding
+/// it passes keys of the lambda's own parameters, which no other callable
+/// of the same parameter name shares.
+#[cfg(feature = "python")]
+#[test]
+fn a_lambda_called_by_its_name_takes_its_keys() {
+    let src = "def f(timeout):\n    return timeout\nf(timeout=1)\ng = lambda timeout: timeout\ng(timeout=2)\n";
+    let fa = py_in(src, None);
+    let def = fa.find_definition(Point::new(4, 2), None).expect("label goes to the lambda's parameter");
+    assert_eq!((def.start.row, def.start.column), (3, 11));
+    let def = fa.find_definition(Point::new(2, 2), None).expect("the def's label stays the def's");
+    assert_eq!((def.start.row, def.start.column), (0, 6));
+    let mut edits: Vec<(usize, usize)> =
+        fa.rename_at(Point::new(3, 11), "t").expect("renames").into_iter().map(|(s, _)| (s.start.row, s.start.column)).collect();
+    edits.sort();
+    assert_eq!(edits, [(3, 11), (3, 20), (4, 2)]);
+}
+
+/// A class the standard library builds from its annotated fields has the
+/// constructor it writes, and each field is a key that constructor takes:
+/// `A(timeout=1)` goes to the field, and renaming the field renames it.
+#[test]
+fn a_generated_constructor_takes_its_fields() {
+    let src = "from dataclasses import dataclass
+from typing import NamedTuple, TypedDict, ClassVar
+@dataclass(frozen=True)
+class A:
+    timeout: int
+    retries: int = 3
+    limit: ClassVar[int] = 1
+class B(NamedTuple):
+    timeout: int
+class C(TypedDict):
+    timeout: int
+A(timeout=1)
+B(timeout=1)
+C(timeout=1)
+";
+    let fa = py_in(src, Some(&module(&["m"], false)));
+    let lines: Vec<&str> = src.lines().collect();
+    for (call, field) in [(11, 4), (12, 8), (13, 10)] {
+        let def = fa
+            .find_definition(Point::new(call, lines[call].find("timeout").unwrap()), None)
+            .unwrap_or_else(|| panic!("label on line {call} goes to its field"));
+        assert_eq!((def.start.row, def.start.column), (field, 4), "line {call}");
+    }
+    let mut edits: Vec<usize> =
+        fa.rename_at(Point::new(4, 4), "t").expect("renames").into_iter().map(|(s, _)| s.start.row).collect();
+    edits.sort();
+    edits.dedup();
+    assert_eq!(edits, [4, 11]);
+    assert!(
+        !fa.symbols().iter().any(|s| s.name == "limit" && matches!(s.kind, SymKind::HashKeyDef)),
+        "a ClassVar is no field"
+    );
+}
+
+/// A call the user has not closed completes the labels it would have
+/// closed: the cursor reparse closes the innermost open bracket, and the
+/// callee is read on the finished buffer where the written one left none.
+#[cfg(feature = "python")]
+#[test]
+fn an_unclosed_call_completes_its_labels() {
+    let decl = "def local(name, size=1):\n    pass\n\ndef pick(n, m=2):\n    pass\n\nclass K:\n    def go(self, speed=1):\n        pass\n\nk = K()\n";
+    let labels = |body: &str| -> Vec<String> {
+        let marked = format!("{decl}{body}");
+        let at = marked.find('|').unwrap();
+        let src = marked.replacen('|', "", 1);
+        let row = src[..at].matches('\n').count();
+        let point = Point::new(row, at - src[..at].rfind('\n').map_or(0, |n| n + 1));
+        let path = std::path::PathBuf::from("complete.py");
+        let driver = crate::build::language_driver::LanguageRegistry::compiled();
+        let idx = crate::index::module_index::ModuleIndex::new_for_test();
+        idx.insert_workspace_for_test(path.clone(), driver.for_path(&path).unwrap().analyze(&src));
+        let fa = idx.workspace_file_for_test(&path).unwrap();
+        let tree = driver.for_path(&path).unwrap().make_parser().parse(&src, None).unwrap();
+        let store = crate::index::open_docs::OpenDocs::new();
+        let canon = crate::util::canonical_path::CanonicalPath::fixture(path);
+        let (items, _) = crate::lsp::backend::pack_completion(&store, &fa, &src, &tree, point, "python", Some(&canon), &idx, None);
+        let mut l: Vec<String> = items.into_iter().map(|i| i.label).filter(|l| l.ends_with('=')).collect();
+        l.sort();
+        l
+    };
+    let both = ["name=", "size="];
+    for (body, want) in [
+        ("local(|", &both[..]),
+        ("local(name=1, |", &["size="][..]),
+        ("local(name=1, |\nx = 2\n", &["size="]),
+        ("def h():\n    x = local(name=1, |\n    return x\n", &["size="]),
+        ("local(name=1, pick(|", &["m=", "n="]),
+        ("local(name=1, pick(|\nx = 2\n", &["m=", "n="]),
+        ("local([1, 2], |", &both),
+        ("local([1, |", &[]),
+        ("local(name=1, {'a': |", &[]),
+        ("local(name=1, (|", &[]),
+        ("k.go(|", &["speed="]),
+        ("local(na|, size=2)\n", &["name="]),
+        ("local(pick(|, size=2)\n", &["m=", "n="]),
+    ] {
+        assert_eq!(labels(body), want, "{body:?}");
+    }
 }

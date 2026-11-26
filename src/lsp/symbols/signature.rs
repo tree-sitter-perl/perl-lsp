@@ -413,7 +413,7 @@ fn dispatch_info_for_enclosing_call(
 
     // First DispatchCall ref whose span is contained by this call.
     for r in analysis.refs() {
-        let RefKind::DispatchCall { dispatcher } = &r.kind else { continue };
+        let RefKind::DispatchCall { dispatcher, .. } = &r.kind else { continue };
         if !span_contains_span(&call_start, &r.span) { continue; }
         let Some(HandlerOwner::Class(class)) = r.handler_owner() else { continue };
         return Some((r.target_name.clone(), class.clone(), dispatcher.clone()));

@@ -71,6 +71,9 @@ pub struct MethodSurface {
     /// Hash keys owned by this sub (`HashKeyOwner::Sub`) — the
     /// imported-hash-key completion surface.
     pub hash_keys: Vec<String>,
+    /// The names this callable takes as named arguments
+    /// (`HashKeyOwner::Input`) — the call-argument completion surface.
+    pub input_keys: Vec<String>,
     /// How a call to this ends, as far as this file alone can tell. `None`:
     /// it depends on a callee outside the file, the same honesty `ret` has.
     pub ends: Option<crate::model::witnesses::Ends>,
@@ -253,11 +256,7 @@ impl Surface {
                     ) {
                         continue;
                     }
-                    let owner = HashKeyOwner::Sub {
-                        package: sym.package.clone(),
-                        name: sym.name.clone(),
-                    };
-                    let hash_keys: Vec<String> = {
+                    let keys_of = |owner: HashKeyOwner| -> Vec<String> {
                         let mut ks: Vec<String> = hash_key_defs
                             .iter()
                             .filter(|s| {
@@ -277,6 +276,11 @@ impl Surface {
                         ks.dedup();
                         ks
                     };
+                    let hash_keys = keys_of(HashKeyOwner::Sub {
+                        package: sym.package.clone(),
+                        name: sym.name.clone(),
+                    });
+                    let input_keys = keys_of(HashKeyOwner::input_of(sym, &fa.namespace_ranges));
                     let m = MethodSurface {
                         name: sym.name.clone(),
                         kind: crate::model::file_analysis::sym_kind_code(&sym.kind),
@@ -289,6 +293,7 @@ impl Surface {
                             .filter(|t| !names_anonymous(t))
                             .map(|t| despan(&t)),
                         hash_keys,
+                        input_keys,
                         ends: feed.analysis.local_ends(sym.id),
                     };
                     match sym.package.clone() {
@@ -409,6 +414,7 @@ impl Surface {
                         _ => None,
                     }),
                     hash_keys: Vec::new(),
+                    input_keys: Vec::new(),
                     ends: None,
                 },
             })
