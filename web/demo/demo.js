@@ -1,7 +1,7 @@
 // The demo page: Monaco as the editor, perl-lsp (in workers) as the language
 // server, and this file as the thin adapter between Monaco's provider
 // interfaces and LSP requests. No analysis happens here.
-import { startServer } from './runtime/client.js';
+import { runCommand, startServer } from './runtime/client.js';
 
 const LANGUAGE = 'perl';
 const ROOT = 'file:///work';
@@ -92,6 +92,7 @@ const SCENES = [
     { id: 'moo-source', title: 'Into Moo', note: 'use Moo opens the installed module.', file: 'lib/Shop/Item.pm', on: 'use Moo', offset: 5, action: DEFINITION },
   ]],
   ['Whole program', [
+    { id: 'heatmap', title: 'Heatmap and dead code', note: 'Runs `perl-lsp --heatmap` on this project, in the tab: who calls what, how much, and which subs nothing reaches.', report: ['--heatmap', '/work', '--html'] },
     { id: 'callers', title: 'Who calls this?', note: 'Incoming calls to subtotal.', file: 'lib/Shop/Cart.pm', on: 'sub subtotal', offset: 4, list: 'incomingCalls' },
     { id: 'callees', title: 'What does this call?', note: 'Outgoing calls from totals, across files.', file: 'lib/Shop/Cart.pm', on: 'sub totals', offset: 4, list: 'outgoingCalls' },
     { id: 'subtypes', title: 'Subclasses', note: 'Every class that inherits from Shop::Discount.', file: 'lib/Shop/Discount.pm', on: 'package Shop::Discount', offset: 8, list: 'subtypes' },
@@ -511,7 +512,39 @@ search.addEventListener('input', async () => {
   listItems(`Symbols matching "${query}"`, (found ?? []).map(s => ({ name: s.name, uri: s.location.uri, selectionRange: s.location.range })));
 });
 
+// A report is a CLI mode of the same binary, run to completion in a process
+// of its own on the project as it stands in the editor. Its output is a
+// self-contained page, shown sandboxed.
+const report = document.getElementById('report');
+report.querySelector('button').onclick = () => report.close();
+let reporting = false;
+async function runReport(scene) {
+  if (reporting) return;
+  reporting = true;
+  const files = structuredClone(project);
+  for (const [path, model] of models) {
+    if (path.startsWith(DEPS)) continue;
+    const parts = path.split('/'), name = parts.pop();
+    parts.reduce((tree, part) => tree[part] ??= {}, files)[name] = model.getValue();
+  }
+  results.textContent = `Running perl-lsp ${scene.report.join(' ')} …`;
+  try {
+    const started = performance.now();
+    const run = await runCommand({ wasm: 'perl-lsp.wasm', shim: 'shim/index.js', files: { ...files, local: { lib: { perl5: deps } } }, args: scene.report });
+    if (run.code !== 0) throw new Error(run.stderr.trim().split('\n').pop() || `exit code ${run.code}`);
+    results.textContent = `perl-lsp ${scene.report.join(' ')} finished in ${((performance.now() - started) / 1000).toFixed(1)} s.`;
+    report.querySelector('h2').textContent = scene.title;
+    report.querySelector('iframe').srcdoc = run.stdout;
+    report.showModal();
+  } catch (e) {
+    results.textContent = 'The report failed: ' + e.message;
+  } finally {
+    reporting = false;
+  }
+}
+
 function runScene(scene) {
+  if (scene.report) return void runReport(scene);
   const model = models.get(scene.file);
   const match = model.findMatches(scene.on, false, false, true, null, false)[scene.nth ?? 0];
   if (!match) return;

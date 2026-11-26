@@ -2,6 +2,47 @@
 // base protocol over the server's stdin and stdout.
 //
 // Needs a cross-origin isolated page (shared memory between workers).
+function launch({ wasm, shim, files, args, env }) {
+  return {
+    wasm: new URL(wasm, location.href).href,
+    shim: new URL(shim, location.href).href,
+    files,
+    args: ['perl-lsp', ...args],
+    env: ['HOME=/home', 'XDG_CACHE_HOME=/home/.cache', ...env],
+  };
+}
+
+// Runs one CLI invocation (`perl-lsp --heatmap /work`, ...) to completion in
+// a process of its own: its own kernel, file system and memory, so it shares
+// nothing with a running server.
+export function runCommand({ wasm, shim, files, args, env = [] }) {
+  if (!crossOriginIsolated) throw new Error('perl-lsp needs a cross-origin isolated page for its threads');
+  const kernel = new Worker(new URL('./kernel.js', import.meta.url), { type: 'module', name: 'perl-lsp-command' });
+  const out = [], err = [];
+  return new Promise((resolve, reject) => {
+    const text = chunks => new TextDecoder().decode(concat(chunks));
+    const done = code => { kernel.terminate(); resolve({ code, stdout: text(out), stderr: text(err) }); };
+    kernel.onmessage = ev => {
+      const d = ev.data;
+      if (d.out === 1) out.push(d.data);
+      else if (d.out === 2) err.push(d.data);
+      else if (d.log) err.push(new TextEncoder().encode(d.log));
+      else if (d.trap) { kernel.terminate(); reject(new Error('the command trapped: ' + d.trap.split('\n')[0])); }
+      else if (d.fatal) { kernel.terminate(); reject(new Error('the command could not start: ' + d.fatal)); }
+      else if (d.exit !== undefined) done(d.exit);
+    };
+    kernel.onerror = e => reject(new Error('the kernel worker failed: ' + (e.message || 'unknown error')));
+    kernel.postMessage({ start: launch({ wasm, shim, files, args, env }) });
+  });
+}
+
+function concat(chunks) {
+  const joined = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+  let offset = 0;
+  for (const c of chunks) { joined.set(c, offset); offset += c.length; }
+  return joined;
+}
+
 export function startServer({ wasm, shim, files, env = [] }) {
   if (!crossOriginIsolated) throw new Error('perl-lsp needs a cross-origin isolated page for its threads');
   const kernel = new Worker(new URL('./kernel.js', import.meta.url), { type: 'module', name: 'perl-lsp-kernel' });
@@ -61,15 +102,7 @@ export function startServer({ wasm, shim, files, env = [] }) {
     else if (d.exit !== undefined) fail('the server exited with code ' + d.exit);
   };
   kernel.onerror = e => fail('the kernel worker failed: ' + (e.message || 'unknown error'));
-  kernel.postMessage({
-    start: {
-      wasm: new URL(wasm, location.href).href,
-      shim: new URL(shim, location.href).href,
-      files,
-      args: ['perl-lsp'],
-      env: ['HOME=/home', 'XDG_CACHE_HOME=/home/.cache', ...env],
-    },
-  });
+  kernel.postMessage({ start: launch({ wasm, shim, files, args: [], env }) });
 
   return {
     request(method, params) {

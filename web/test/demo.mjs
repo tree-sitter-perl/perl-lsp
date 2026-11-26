@@ -13,6 +13,7 @@ const suggest = text => ['.suggest-widget', text];
 const peek = text => ['.reference-zone-widget', text];
 const results = text => ['#results', text];
 // A definition scene ends on another line or file: [file, text of the line].
+// A report scene opens a dialog whose framed page mentions `report`.
 const lands = (file, line) => ({ file, line });
 
 const EXPECT = {
@@ -78,6 +79,7 @@ const EXPECT = {
   'moo-ctor': suggest('points'),
   'moo-clearer': lands('lib/Shop/Customer.pm', "clearer => 'forget_address'"),
   'moo-source': lands('local/lib/perl5/Moo.pm', 'package Moo'),
+  heatmap: { report: 'perl-lsp usage heatmap' },
   callers: results('add_shipping'),
   callees: results('round_cents'),
   subtypes: results('Shop::Discount::Fixed'),
@@ -104,6 +106,16 @@ try {
     try {
       // Cross-file answers arrive once the resolver has landed the other
       // files, so each scene is retried until it shows or time runs out.
+      if (expected.report) {
+        await page.keyboard.press('Escape');
+        await page.click(`[data-scene="${id}"]`);
+        await page.locator('#report[open]').waitFor({ timeout: 120000 });
+        await page.frameLocator('#report iframe').getByText(expected.report).first().waitFor({ timeout: 10000 });
+        if (process.argv[3]) await page.screenshot({ path: process.argv[3].replace(/\.png$/, `-${id}.png`) });
+        await page.click('#report button');
+        console.log(`  ✓ ${id}`);
+        continue;
+      }
       await assert.doesNotReject(async () => {
         for (const deadline = Date.now() + 30000; ;) {
           await page.keyboard.press('Escape');

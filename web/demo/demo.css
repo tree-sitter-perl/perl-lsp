@@ -39,3 +39,10 @@ nav [aria-current="true"] { background: var(--panel); color: var(--accent); }
   #files { display: flex; flex-wrap: wrap; gap: 4px; }
   #files button { width: auto; }
 }
+#report { width: min(1200px, 94vw); height: 90vh; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--fg); }
+#report[open] { display: flex; flex-direction: column; }
+#report::backdrop { background: rgb(0 0 0 / 0.45); }
+#report header { display: flex; align-items: center; justify-content: space-between; padding: 8px 14px; }
+#report h2 { margin: 0; font-size: 15px; }
+#report button { font: inherit; padding: 2px 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--fg); cursor: pointer; }
+#report iframe { flex: 1; width: 100%; border: 0; background: #fff; }

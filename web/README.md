@@ -15,6 +15,10 @@ threads share one memory. `shim` is the URL of
 [`@bjorn3/browser_wasi_shim`](https://github.com/bjorn3/browser_wasi_shim)'s
 `dist/index.js`.
 
+`runCommand({ wasm, shim, files, args })` in `runtime/client.js` runs one CLI
+mode to completion in a process of its own and resolves with its exit code,
+stdout and stderr. The demo page uses it for `--heatmap /work --html`.
+
 `npm ci && npm run smoke` runs the server on `demo/` in headless Chromium and
 checks hover, definition, completion and references across files.
 
