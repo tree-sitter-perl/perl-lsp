@@ -69,7 +69,7 @@ impl HandlerDisplay {
 /// hash keys and dispatch handlers are different concepts even though
 /// both happen to be keyed by a name under a class. Keeping them split
 /// prevents overload creep — each stays free to evolve on its own axis.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum HandlerOwner {
     /// Handler is registered on a specific class (typical for Mojo
     /// events, Moose roles, DBIC relationships, etc.).
@@ -634,6 +634,10 @@ impl<T> ReceiverGated<T> {
 
 // ---- Hash key owner (for scope graph) ----
 
+/// Held inline by every ref binding, witness attachment and key symbol, so
+/// its width is theirs: the input variants keep their names as `Box<str>`
+/// and a handler's owner behind a `Box` to stay within the widest of the
+/// others (`row_types_keep_their_size`).
 #[derive(Debug, Clone, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
 pub enum HashKeyOwner {
     Class(String),
@@ -654,12 +658,103 @@ pub enum HashKeyOwner {
     /// in scope). Without this, two different packages each defining
     /// `sub get_config { ... host ... }` would collide at query time.
     Sub { package: Option<String>, name: String },
+    /// Keys a callable takes as its input: the names its callers write
+    /// (`connect(timeout => 30)`, `Foo->new(size => 1)`, `f(b: 2)`) and the
+    /// parameters that answer to them (a `has` / `:param` / Class::Tiny
+    /// constructor key). Kept apart from `Sub`, the keys a callable returns,
+    /// so a call's keys never reach its return value's (`named-arguments.md`).
+    Input { package: Option<Box<str>>, name: Box<str>, slot: InputSlot },
+    /// The input of a callable no name reaches — an anonymous sub, a
+    /// closure, a lambda: its calls reach it through the value that holds
+    /// it, so it is the declaration's own and file-local, like `Variable`.
+    AnonInput { callable: SymbolId, slot: InputSlot },
+    /// The input of a string-dispatched handler (a Minion task, a Mojo
+    /// event): what its dispatch calls pass (`enqueue(mail => [to => …])`,
+    /// `emit(ready => to => …)`), answered by the parameters of the
+    /// callback it was registered with. Its own namespace, apart from any
+    /// method of the owner class of the same name.
+    Handler {
+        owner: Box<HandlerOwner>,
+        name: Box<str>,
+        #[serde(default)]
+        slot: InputSlot,
+    },
+}
+
+/// Where in a callable's input a key sits.
+#[derive(Debug, Clone, Copy, Default, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
+pub enum InputSlot {
+    /// Among the callable's named arguments.
+    #[default]
+    Named,
+    /// In the hash the argument bound to parameter `n` holds
+    /// (`sub f ($job, $o) { $o->{timeout} }`, `f($job, {timeout => 1})`).
+    /// `n` counts the callable's whole parameter list, its invocant too,
+    /// so the declaration and every way of calling it agree.
+    At(u16),
 }
 
 impl HashKeyOwner {
+    /// The same callable's keys at `slot`; an owner that is no
+    /// callable's input stays as it is.
+    pub fn with_slot(self, slot: InputSlot) -> Self {
+        match self {
+            HashKeyOwner::Input { package, name, .. } => HashKeyOwner::Input { package, name, slot },
+            HashKeyOwner::AnonInput { callable, .. } => HashKeyOwner::AnonInput { callable, slot },
+            HashKeyOwner::Handler { owner, name, .. } => HashKeyOwner::Handler { owner, name, slot },
+            other => other,
+        }
+    }
+
+    /// Where among its callable's input this owner's keys sit.
+    pub fn input_slot(&self) -> Option<InputSlot> {
+        match self {
+            HashKeyOwner::Input { slot, .. } | HashKeyOwner::AnonInput { slot, .. } | HashKeyOwner::Handler { slot, .. } => Some(*slot),
+            _ => None,
+        }
+    }
+
+    /// A callable's named-argument keys: what `f(key => …)` passes.
+    pub fn named_input(package: Option<String>, name: impl Into<String>) -> Self {
+        HashKeyOwner::Input {
+            package: package.map(String::into_boxed_str),
+            name: name.into().into_boxed_str(),
+            slot: InputSlot::Named,
+        }
+    }
+
+    /// The named input of the callable `sym`: under its package, or, for
+    /// a callable no package holds, the namespace its declaration sits in
+    /// — a module's function is that module's, not every module's.
+    pub fn input_of(sym: &Symbol, namespaces: &[NamespaceRange]) -> Self {
+        if let SymbolDetail::Handler { owner, .. } = &sym.detail {
+            return HashKeyOwner::Handler { owner: Box::new(owner.clone()), name: sym.name.as_str().into(), slot: InputSlot::Named };
+        }
+        if sym.flags.contains(SymbolFlags::ANONYMOUS) {
+            return HashKeyOwner::AnonInput { callable: sym.id, slot: InputSlot::Named };
+        }
+        let package = sym.package.clone().or_else(|| {
+            namespace_range_at(namespaces, sym.selection_span.start)
+                .map(|r| r.namespace.clone())
+                .filter(|n| !n.is_empty())
+        });
+        Self::named_input(package, sym.name.clone())
+    }
+
+    /// The class whose constructor takes this key, for a constructor's
+    /// named input.
+    pub fn constructor_class(&self) -> Option<&str> {
+        match self {
+            HashKeyOwner::Input { package: Some(c), name, .. }
+                if crate::model::conventions::is_constructor_name(name) => Some(c),
+            _ => None,
+        }
+    }
+
     /// Directional match: would a lookup with `lookup` owner reach a
     /// def with `self` owner? Strict equality, plus the broadening
-    /// rule that a `Class(C)` lookup picks up `Sub{Some(C), _}` defs.
+    /// rule that a `Class(C)` lookup picks up `Sub{Some(C), _}` and
+    /// `Input{Some(C), _}` defs.
     ///
     /// Why: bless-inside-a-sub registers HashKeyDefs as `Sub{C,
     /// sub_name}` (the constructor sub). `has` does the same. But
@@ -672,6 +767,7 @@ impl HashKeyOwner {
         if self == lookup { return true; }
         match (self, lookup) {
             (HashKeyOwner::Sub { package: Some(c1), .. }, HashKeyOwner::Class(c2)) => c1 == c2,
+            (HashKeyOwner::Input { package: Some(c1), .. }, HashKeyOwner::Class(c2)) => **c1 == **c2,
             _ => false,
         }
     }

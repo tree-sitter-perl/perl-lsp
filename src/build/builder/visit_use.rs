@@ -109,10 +109,7 @@ impl<'a> Builder<'a> {
             return;
         }
 
-        let owner = HashKeyOwner::Sub {
-            package: Some(pkg),
-            name: "new".to_string(),
-        };
+        let owner = HashKeyOwner::named_input(Some(pkg), "new");
         for (name, sel_span) in &attr_names {
             // rw accessor: one Method symbol serves getter and writer. No isa
             // → no return type, so no accessor witness (only provenance).
@@ -332,6 +329,16 @@ impl<'a> Builder<'a> {
                 self.framework_modes.insert(pkg.clone(), grant.mode);
                 for keyword in grant.imports {
                     self.imports.push_keyword(&pkg, keyword);
+                }
+                for alias in grant.inputs {
+                    let from = HashKeyOwner::named_input(Some(pkg.clone()), alias.from).with_slot(alias.slot);
+                    let to = HashKeyOwner::named_input(Some(pkg.clone()), alias.to);
+                    if !self.input_aliases.iter().any(|(f, _)| *f == from) {
+                        self.input_aliases.push((from, to));
+                    }
+                }
+                if let Some(option) = grant.ctor_key_option {
+                    self.ctor_key_options.insert(pkg.clone(), option);
                 }
                 if let Some(base) = grant.base {
                     self.framework_bases.insert(pkg, base);

@@ -237,6 +237,11 @@ impl FileAnalysis {
         self.symbols.as_slice()
     }
 
+    /// The other symbols `sym`'s declaration token minted.
+    pub fn declared_together<'s>(&'s self, sym: &'s Symbol) -> impl Iterator<Item = &'s Symbol> + 's {
+        declared_together(self.symbols(), sym)
+    }
+
     /// Mutable symbol view for the post-build stamping passes. Bindings
     /// only — the vec's shape is fixed here, so `SymbolId`s (positional)
     /// and the indices stay valid.

@@ -124,7 +124,7 @@ fn patterns() {
 `,
             projections: #{
                 task: ["str"],
-                callback: ["sub_params"],
+                callback: ["sub_params", "callable_edge"],
             },
             expect: [
                 #{ src: "$minion->add_task(send_email => sub { my ($job) = @_; });", matches: 1,
@@ -198,6 +198,7 @@ fn on_match(pattern, m) {
             owner: task.owner,
             span: task.name_span,
             var_text: m.captures.recv.text,
+            args: task_args(verb, m),
         }
     };
 
@@ -232,6 +233,7 @@ fn on_match(pattern, m) {
                     "foreground",
                 ],
                 params: params,
+                callable: if cb == () { () } else { cb.callable_edge },
                 // Extent covers the whole `add_task(name => sub {…})` so the
                 // outline node encloses the task body — editor sticky-scroll /
                 // breadcrumb pin the task while the cursor is inside it.
@@ -284,6 +286,16 @@ fn on_match(pattern, m) {
     }
 
     out
+}
+
+// An enqueue passes its task the elements of the array after the task
+// name (`enqueue(mail => [to => 'x'])`); the hash after that is
+// enqueue's own options.
+fn task_args(verb, m) {
+    if verb != "enqueue" && verb != "enqueue_p" { return (); }
+    let arr = m.captures.callback;
+    if arr == () { return (); }
+    #{ Elements: arr.span }
 }
 
 // ---- Query hooks (IoC) ----

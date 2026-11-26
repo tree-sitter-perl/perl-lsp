@@ -516,10 +516,7 @@ use Class::Tiny qw( resolvers cache );
         if let SymbolDetail::HashKeyDef { ref owner, .. } = key_def[0].detail {
             assert_eq!(
                 owner,
-                &HashKeyOwner::Sub {
-                    package: Some("Foo".to_string()),
-                    name: "new".to_string(),
-                }
+                &HashKeyOwner::named_input(Some("Foo".to_string()), "new")
             );
         }
     }

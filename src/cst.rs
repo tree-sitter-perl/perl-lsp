@@ -679,6 +679,67 @@ pub(crate) fn names_arg_array(node: Node, src: &[u8]) -> bool {
         && varname_child(node).and_then(|v| v.utf8_text(src).ok()) == Some("_")
 }
 
+/// How a value hands over the rest of a sub's arguments, if it does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ArgRest {
+    /// The list itself: `@_`, or a list ending in it (`(retries => 3, @_)`,
+    /// defaults a caller's pairs override). The binding's sigil says what
+    /// it collects.
+    List,
+    /// A hash built of it (`{@_}`, `{retries => 3, @_}`): the pairs, whatever
+    /// holds the reference.
+    Hash,
+}
+
+/// Whether `value` collects the rest of the sub's arguments. A ternary does
+/// when either arm does (`@_ == 1 ? %{$_[0]} : @_`): the binding may hold them.
+pub(crate) fn collects_arg_rest(value: Node, src: &[u8]) -> Option<ArgRest> {
+    let ends_in_args = |list: Node| list_elements_or_self(list).last().is_some_and(|e| names_arg_array(*e, src));
+    match value.kind_of() {
+        Kind::AnonymousHashExpression => {
+            // `{@_}` holds its one element bare, with no list around it.
+            let body = literal_body(value);
+            let last = if body == value { value.elements().last() } else { list_elements(body).last().copied() };
+            last.is_some_and(|e| names_arg_array(e, src)).then_some(ArgRest::Hash)
+        }
+        Kind::ConditionalExpression => [Field::Consequent, Field::Alternative]
+            .into_iter()
+            .filter_map(|f| value.field(f))
+            .find_map(|arm| collects_arg_rest(arm, src)),
+        _ if names_arg_array(value, src) => Some(ArgRest::List),
+        _ if is_list_literal(value) => ends_in_args(value).then_some(ArgRest::List),
+        _ => None,
+    }
+}
+
+/// The constant keys a hash slice names (`@h{qw(a b)}`, `%h{'a', 'b'}`,
+/// `$r->@{...}`), each with its span, and the node it slices; `None` for an
+/// array slice. A key that is not a constant is left out.
+pub(crate) fn hash_slice_keys<'a>(node: Node<'a>, src: &[u8]) -> Option<(Node<'a>, Vec<(String, Span)>)> {
+    if !matches!(node.kind_of(), Kind::SliceExpression | Kind::KeyvalExpression) {
+        return None;
+    }
+    let base = node.field(Field::Hash).or_else(|| node.field(Field::Hashref))?;
+    let keys = node.elements().find(|c| *c != base)?;
+    let mut out = Vec::new();
+    if keys.is(Kind::QuotedWordList) {
+        qw_word_spans(keys, src, &mut out);
+        return Some((base, out));
+    }
+    for e in list_elements_or_self(keys) {
+        let key = match e.kind_of() {
+            Kind::AutoquotedBareword | Kind::Bareword => e.utf8_text(src).ok().map(|t| (t.to_string(), e.span())),
+            Kind::StringLiteral => string_content_text(e, src).map(|t| (t, string_content_span(e))),
+            Kind::InterpolatedStringLiteral => string_content_text(e, src)
+                .filter(|t| !t.contains(['$', '@']))
+                .map(|t| (t, string_content_span(e))),
+            _ => None,
+        };
+        out.extend(key);
+    }
+    Some((base, out))
+}
+
 /// `$_[N]`: the index of a read of one argument slot.
 pub(crate) fn arg_slot_index<'a>(node: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
     if !node.is(Kind::ArrayElementExpression) {

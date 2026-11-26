@@ -2040,7 +2040,7 @@ fn test_indirect_object_constructor_keys_bind_like_arrow_calls() {
             _ => None,
         })
         .collect();
-    let want = Some(HashKeyOwner::Sub { package: Some("Widget".into()), name: "new".into() });
+    let want = Some(HashKeyOwner::named_input(Some("Widget".into()), "new"));
     assert_eq!(owners, vec![(4, want.clone()), (5, want)]);
 }
 

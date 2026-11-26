@@ -689,8 +689,8 @@ impl<'a> CandidateSet<'a> {
         };
 
         // Cross-file hash-key defs. Two shapes share the lookup:
-        //   * deferred ctor key (`owner: None`) — the build-time gate
-        //     couldn't see the class; derive the owner now (enclosing call's
+        //   * deferred ctor key (bound to its call) — the build-time gate
+        //     couldn't see the class; derive the owner now (the call's
         //     invocant class, index in hand);
         //   * resolved Class owner (`$row->{name}` upgraded post-fold to
         //     `Class(NestedRow)`) whose class — and therefore its
@@ -699,12 +699,22 @@ impl<'a> CandidateSet<'a> {
         if let Some(r) = analysis.ref_at(point) {
             if let RefKind::HashKeyAccess { .. } = r.kind {
                 use crate::model::file_analysis::HashKeyOwner;
+                // A call's key: the callee's declarations, wherever its
+                // declaration lives.
+                if let Some(callee) = analysis.arg_key_callee(r, Some(idx)) {
+                    if let Some((Some(home), def)) =
+                        callee.key_defs(analysis, Some(idx), r.arg_key_place()).into_iter().find(|(_, d)| d.name == r.target_name)
+                    {
+                        return vec![RefLocation::at(FileKey::Path(home.path.clone()), def.selection_span, AccessKind::Declaration)];
+                    }
+                }
                 let owner = match r.hash_key_owner() {
                     Some(o) => Some(o.clone()),
                     None => analysis.deferred_hash_key_owner(r, Some(idx)),
                 };
                 let class = match &owner {
                     Some(HashKeyOwner::Sub { package: Some(c), .. }) => Some(c.clone()),
+                    Some(HashKeyOwner::Input { package: Some(c), .. }) => Some(c.to_string()),
                     Some(HashKeyOwner::Class(c)) => Some(c.clone()),
                     _ => None,
                 };

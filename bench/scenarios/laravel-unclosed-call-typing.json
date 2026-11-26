@@ -1,0 +1,106 @@
+{
+  "project": {
+    "repo": "https://github.com/laravel/framework",
+    "pin": "1449bf241017087fbd38c118ecaabef3f6797fdc",
+    "note": "corpus/php (laravel). A label typed one keystroke at a time inside an unclosed call in Query/Builder.php (152 KB): `d`, `di`, `dir`, `dire` after `$this->orderBy(column: 'id', `, one completion per keystroke."
+  },
+  "readiness": {
+    "file": "src/Illuminate/Database/Query/Builder.php",
+    "line": 1126,
+    "character": 22
+  },
+  "steps": [
+    {
+      "action": "open",
+      "file": "src/Illuminate/Database/Query/Builder.php"
+    },
+    {
+      "action": "insert_line",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "line": 932,
+      "text": "        $this->orderBy(column: 'id', d",
+      "name": "type-d",
+      "await_diagnostics": true
+    },
+    {
+      "action": "completion",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "line": 932,
+      "character": 38,
+      "name": "completion-1"
+    },
+    {
+      "action": "revert",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "name": "revert-1",
+      "await_diagnostics": true
+    },
+    {
+      "action": "insert_line",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "line": 932,
+      "text": "        $this->orderBy(column: 'id', di",
+      "name": "type-di",
+      "await_diagnostics": true
+    },
+    {
+      "action": "completion",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "line": 932,
+      "character": 39,
+      "name": "completion-2"
+    },
+    {
+      "action": "revert",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "name": "revert-2",
+      "await_diagnostics": true
+    },
+    {
+      "action": "insert_line",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "line": 932,
+      "text": "        $this->orderBy(column: 'id', dir",
+      "name": "type-dir",
+      "await_diagnostics": true
+    },
+    {
+      "action": "completion",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "line": 932,
+      "character": 40,
+      "name": "completion-3"
+    },
+    {
+      "action": "revert",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "name": "revert-3",
+      "await_diagnostics": true
+    },
+    {
+      "action": "insert_line",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "line": 932,
+      "text": "        $this->orderBy(column: 'id', dire",
+      "name": "type-dire",
+      "await_diagnostics": true
+    },
+    {
+      "action": "completion",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "line": 932,
+      "character": 41,
+      "name": "completion-4"
+    },
+    {
+      "action": "revert",
+      "file": "src/Illuminate/Database/Query/Builder.php",
+      "name": "revert-4",
+      "await_diagnostics": true
+    },
+    {
+      "action": "rss",
+      "name": "post-completion"
+    }
+  ]
+}

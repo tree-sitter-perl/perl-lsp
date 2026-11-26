@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::file_analysis::{
-    AccessKind, Bridge, HandlerDisplay, HandlerOwner, HashKeyOwner, InferredType, ParamInfo, Span,
+    AccessKind, Bridge, HandlerDisplay, HandlerOwner, HashKeyOwner, InferredType, ParamInfo, ParamPass, Span,
     SymKind, SymbolDetail,
 };
 
@@ -259,7 +259,14 @@ pub struct ImportWord {
 pub struct EmittedParam {
     pub name: String,
     pub default: Option<String>,
+    /// Shorthand for a rest parameter: the name's sigil says which rest
+    /// (`@` the leftover places, `%` the leftover pairs). Wins over `pass`
+    /// only when `pass` names no rest.
+    #[serde(default)]
     pub is_slurpy: bool,
+    /// How a call's arguments reach the parameter (`"Named"`, `"Either"`, …).
+    #[serde(default)]
+    pub pass: ParamPass,
     /// Set on params that the user never types at the call site
     /// (`$self` for Perl methods, `$c` for Mojolicious helpers, …).
     /// Whoever emits the params decides — the core never infers
@@ -270,11 +277,18 @@ pub struct EmittedParam {
 
 impl From<EmittedParam> for ParamInfo {
     fn from(p: EmittedParam) -> Self {
+        let pass = match (p.is_slurpy, p.pass.is_rest()) {
+            (true, false) => match crate::model::conventions::unpacked_param_pass(&p.name) {
+                ParamPass::Positional => ParamPass::RestPositional,
+                rest => rest,
+            },
+            _ => p.pass,
+        };
         ParamInfo {
             name: p.name,
             default: p.default,
-            is_slurpy: p.is_slurpy,
-            is_invocant: p.is_invocant,
+            pass,
+            key: None, is_invocant: p.is_invocant,
             // A plugin-declared signature: nothing in the source binds it.
             binding_site: None,
         }
@@ -309,6 +323,28 @@ pub struct TopicRouteDsl {
     /// The block function that scopes the base (push on entry, pop on
     /// exit).
     pub group_fn: String,
+}
+
+/// Where a dispatch call holds the arguments its handler receives, named
+/// by the span of one of the match's captures.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum HandlerArgs {
+    /// The elements of the array literal at this span
+    /// (`enqueue(mail => [to => 'x'])`).
+    Elements(Span),
+    /// The call's arguments after the one at this span
+    /// (`emit(ready => to => 'x')`).
+    After(Span),
+}
+
+impl HandlerArgs {
+    /// The region as the model records it on the dispatch's ref.
+    pub fn region(self) -> crate::model::file_analysis::HandlerRegion {
+        match self {
+            HandlerArgs::Elements(s) => crate::model::file_analysis::HandlerRegion::Elements(s),
+            HandlerArgs::After(s) => crate::model::file_analysis::HandlerRegion::After(s),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -418,6 +454,11 @@ pub enum EmitAction {
         /// whole group DX for plugins.
         #[serde(default)]
         attr: Option<String>,
+        /// The callable this method runs (a helper's callback, its
+        /// `callable_edge`): an anonymous callback's keys are the method's
+        /// named inputs, so a call of the method reaches them.
+        #[serde(default)]
+        callable: Option<crate::model::witnesses::WitnessAttachment>,
     },
     /// Synthesize a `HashKeyDef` for a constructor/stash/etc. key.
     HashKeyDef {
@@ -489,6 +530,10 @@ pub enum EmitAction {
         /// appends non-invocant params.
         #[serde(default)]
         outline_label: Option<String>,
+        /// The callable the handler runs (the callback's `callable_edge`):
+        /// an anonymous callback's keys are the handler's named inputs.
+        #[serde(default)]
+        callable: Option<crate::model::witnesses::WitnessAttachment>,
     },
     /// Emit a call-site reference for a Handler — e.g. the cursor is on
     /// `'ready'` in `$x->emit('ready', ...)`. `dispatcher` is the
@@ -505,6 +550,10 @@ pub enum EmitAction {
         /// Receiver expression text, e.g. `"$emitter"` or `"$self"`.
         /// Informational only; empty is fine.
         var_text: String,
+        /// Where this call holds the arguments it passes the handler:
+        /// their keys are the handler's named inputs.
+        #[serde(default)]
+        args: Option<HandlerArgs>,
     },
     /// Emit a MethodCall reference pointing at a named method on a known
     /// class. Used where a string or other expression represents a
@@ -972,6 +1021,25 @@ pub struct FrameworkModeMaker {
     pub imports: Vec<String>,
     #[serde(default)]
     pub base: Option<String>,
+    /// Callables whose input is another's in a package this module makes
+    /// (Moo's `BUILDARGS` and `BUILD` take what `new` is called with).
+    #[serde(default)]
+    pub inputs: Vec<InputAlias>,
+    /// The `has` option that spells an attribute's constructor key in place
+    /// of its name (Moo's `init_arg`); `undef` there means no key.
+    #[serde(default)]
+    pub ctor_key_option: Option<String>,
+}
+
+/// In a package a framework makes, the input of callable `from` at `slot`
+/// is callable `to`'s named input: a key one reads is a key the other is
+/// called with.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InputAlias {
+    pub from: String,
+    #[serde(default)]
+    pub slot: crate::model::file_analysis::InputSlot,
+    pub to: String,
 }
 
 /// A library function that reports what a reference is (Scalar::Util's
@@ -2103,6 +2171,7 @@ mod tests {
             name: "$val".into(),
             default: None,
             is_slurpy: false,
+            pass: ParamPass::Positional,
             is_invocant: false,
         };
         let pi: ParamInfo = ep.into();
@@ -2126,6 +2195,7 @@ mod tests {
             outline_label: None,
             return_via_edge: None,
             attr: None,
+            callable: None,
         };
         let json = serde_json::to_string(&action).unwrap();
         assert!(json.contains("\"Method\""));

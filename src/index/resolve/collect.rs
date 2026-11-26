@@ -627,6 +627,18 @@ pub(super) fn symbol_defines_target(
                 ..
             } if op == package && on == name
         ),
+        TargetKind::HashKeyOfInput { package, name, slot } => matches!(
+            &sym.detail,
+            SymbolDetail::HashKeyDef {
+                owner: HashKeyOwner::Input { package: op, name: on, slot: os },
+                ..
+            } if op.as_deref() == package.as_deref() && **on == **name && os == slot
+        ),
+        TargetKind::HashKeyOfHandler { owner, name, slot } => matches!(
+            &sym.detail,
+            SymbolDetail::HashKeyDef { owner: HashKeyOwner::Handler { owner: oo, name: on, slot: os }, .. }
+                if **oo == *owner && **on == **name && os == slot
+        ),
         TargetKind::HashKeyOfBridged(wanted) => matches!(
             &sym.detail,
             SymbolDetail::HashKeyDef { owner: HashKeyOwner::Bridged { class: n }, .. } if n == wanted
@@ -1244,31 +1256,50 @@ pub(super) fn collect_from_analysis(
                 r.resolved_package().is_none()
             }
             (
-                TargetKind::HashKeyOfSub { package, name },
+                TargetKind::HashKeyOfSub { package, name } | TargetKind::HashKeyOfInput { package, name, .. },
                 RefKind::HashKeyAccess { .. },
             ) => {
-                // The owning-sub match, widened across inheritance for
-                // CONSTRUCTOR keys: a base attr's ctor key
-                // (`HashKeyOfSub{Animal, new}`) is also keyed by a SUBCLASS
-                // construction (`Dog->new(name => …)`, owner `Sub{Dog, new}`),
+                // The owning callable's keys on the same side (what it returns
+                // or what it takes), widened across inheritance: a method's
+                // keys reach the subclass calls that dispatch to it, and a
+                // CONSTRUCTOR's reach every subclass: a base attr's ctor key
+                // (`Input{Animal, new}`) is also keyed by a SUBCLASS
+                // construction (`Dog->new(name => …)`, owner `Input{Dog, new}`),
                 // since `name` is the inherited attr. So renaming a base attr
                 // reaches child constructions.
-                let sub_matches = |op: &Option<String>, on: &str| -> bool {
-                    if on != name.as_str() {
+                let wanted_slot = match &target.kind {
+                    TargetKind::HashKeyOfInput { slot, .. } => Some(*slot),
+                    _ => None,
+                };
+                let owner_matches = |o: &HashKeyOwner| -> bool {
+                    let (op, on) = match (o, wanted_slot) {
+                        (HashKeyOwner::Sub { package, name }, None) => (package.as_deref(), name.as_str()),
+                        (HashKeyOwner::Input { package, name, slot }, Some(want)) if *slot == want => (package.as_deref(), &**name),
+                        _ => return false,
+                    };
+                    if on != name {
                         return false;
                     }
-                    op == package
-                        || (crate::model::conventions::is_constructor_name(on)
-                            && match (op.as_deref(), package.as_deref()) {
-                                (Some(child), Some(base)) => {
-                                    analysis.class_isa(child, base, module_index)
-                                }
-                                _ => false,
-                            })
+                    if op == package.as_deref() {
+                        return true;
+                    }
+                    let (Some(child), Some(base)) = (op, package.as_deref()) else {
+                        return false;
+                    };
+                    if crate::model::conventions::is_constructor_name(on) {
+                        analysis.class_isa(child, base, module_index)
+                    } else {
+                        // Any other call on a subclass reaches the callable
+                        // it dispatches to, so an inherited method's keys
+                        // are its declaring class's.
+                        analysis
+                            .resolve_method_in_ancestors(child, on, module_index)
+                            .is_some_and(|m| m.class() == base)
+                    }
                 };
                 match r.hash_key_owner() {
-                    Some(HashKeyOwner::Sub { package: op, name: on }) => sub_matches(op, on),
-                    // owner `None` (build gate blind) OR `Variable` (the var is
+                    Some(o @ (HashKeyOwner::Sub { .. } | HashKeyOwner::Input { .. })) => owner_matches(o),
+                    // bound to its call (build gate blind) OR `Variable` (the var is
                     // bound to an imported call enrichment didn't reach in this
                     // unenriched workspace file) — re-derive cross-file, the same
                     // lazy seam method dispatch + deferred owners use above. This
@@ -1276,17 +1307,24 @@ pub(super) fn collect_from_analysis(
                     // `$c->{key}` access without depending on open-doc enrichment.
                     _ => analysis
                         .deferred_hash_key_owner(r, module_index)
-                        .is_some_and(|o| {
-                            matches!(o, HashKeyOwner::Sub { package: op, name: on } if sub_matches(&op, &on))
-                        }),
+                        .is_some_and(|o| owner_matches(&o)),
                 }
             },
+            (TargetKind::HashKeyOfHandler { owner, name, slot }, RefKind::HashKeyAccess { .. }) => {
+                // A handler's keys: the reads of its own parameter and the
+                // keys each dispatch to it passes, bound to that call.
+                let wanted = HashKeyOwner::Handler { owner: Box::new(owner.clone()), name: name.as_str().into(), slot: *slot };
+                match r.hash_key_owner() {
+                    Some(o) => *o == wanted,
+                    None => analysis.deferred_hash_key_owner(r, module_index).is_some_and(|o| o == wanted),
+                }
+            }
             (TargetKind::HashKeyOfBridged(wanted), RefKind::HashKeyAccess { .. }) => {
                 // A DBIC/Class::Accessor column. Its key uses are the
                 // condition args (`$rs->search({ col => … })`), owned by the
                 // `Column` namespace — NOT `$row->{col}` derefs, which carry a
                 // `Class` lookup and so never match here (a column isn't a hash
-                // slot). The owner-`None` case is the cross-file deferred arg key.
+                // slot). The call-bound case is the cross-file deferred arg key.
                 let target_owner = HashKeyOwner::Bridged { class: wanted.clone() };
                 match r.hash_key_owner() {
                     Some(o) => o.found_by(&target_owner),

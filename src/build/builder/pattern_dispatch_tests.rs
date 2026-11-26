@@ -143,6 +143,7 @@ impl FrameworkPlugin for WidgetPlugin {
             outline_label: None,
             return_via_edge: None,
             attr: None,
+            callable: None,
         }]
     }
 }
@@ -360,6 +361,7 @@ impl FrameworkPlugin for QueuePlugin {
             owner: crate::model::file_analysis::HandlerOwner::Class("Widget::Queue".into()),
             span: task.span,
             var_text: String::new(),
+            args: None,
         }]
     }
 }

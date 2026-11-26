@@ -2154,7 +2154,7 @@ fn span_size_never_picks_a_scope() {
             .collect();
     let seen = count_lines(&files, &|l| l.contains("span_size(") && !l.contains("fn span_size"));
     let allow: &[(&str, usize, &str)] = &[
-        ("model/file_analysis/cursor_queries.rs", 3, "the narrowest ref at a point, the narrowest enclosing callable symbol, the narrowest cursor candidate"),
+        ("model/file_analysis/cursor_queries.rs", 2, "the narrowest ref at a point, the narrowest enclosing callable symbol"),
     ];
     let drift = allowlist_drift("span_size readers (a scope lookup is containment + depth)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
