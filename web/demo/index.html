@@ -14,11 +14,16 @@
   <div id="status" role="status">Starting…</div>
 </header>
 <main>
-  <nav aria-label="Project files"><h2>Project</h2><ul id="files"></ul></nav>
+  <nav aria-label="Project files">
+    <h2>Project</h2>
+    <ul id="files"></ul>
+    <h2><label for="symbol-search">Find a symbol</label></h2>
+    <input id="symbol-search" type="search" placeholder="describe" autocomplete="off" spellcheck="false">
+  </nav>
   <div id="editor"></div>
   <aside>
-    <h2>Try this</h2>
-    <ol id="scenes"></ol>
+    <div id="results" aria-live="polite"></div>
+    <div id="scenes"></div>
   </aside>
 </main>
 <script src="vs/loader.js"></script>

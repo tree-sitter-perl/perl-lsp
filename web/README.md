@@ -32,7 +32,10 @@ node build-site.mjs ../target/wasm32-wasip1-threads/release/perl-lsp.wasm site
 `site/` is self-contained and can be served by any static host. On a host
 that cannot send the isolation headers (GitHub Pages), `coi.js` registers a
 service worker that adds them and reloads the page once.
-`node test/demo.mjs site` drives the built page. The "Demo page" workflow
+The project the page opens is `demo/project/`, written so each scene in
+`demo.js` has something to show. `node test/demo.mjs site` clicks every scene
+on the built page and checks what appears; a new scene needs an expectation
+there. The "Demo page" workflow
 deploys it to GitHub Pages when run by hand.
 
 Design and limits: `docs/adr/wasm-target.md`.

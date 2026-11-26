@@ -6,15 +6,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const web = path.dirname(fileURLToPath(import.meta.url));
-const repo = path.dirname(web);
 const [wasm, out] = process.argv.slice(2);
 if (!wasm || !out) {
   console.error('usage: node build-site.mjs <perl-lsp.wasm> <out-dir>');
   process.exit(2);
 }
 
-// The project the page opens is the repo's own demo, read at build time so
-// the page and the README's recording show the same code.
+// The project the page opens ships as one JSON tree, which is also what
+// the runtime takes to fill the server's file system.
 function perlFiles(dir) {
   const tree = {};
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -35,5 +34,6 @@ fs.cpSync(path.join(web, 'runtime'), path.join(out, 'runtime'), { recursive: tru
 fs.cpSync(path.join(web, 'node_modules/@bjorn3/browser_wasi_shim/dist'), path.join(out, 'shim'), { recursive: true });
 fs.cpSync(path.join(web, 'node_modules/monaco-editor/min/vs'), path.join(out, 'vs'), { recursive: true });
 fs.copyFileSync(wasm, path.join(out, 'perl-lsp.wasm'));
-fs.writeFileSync(path.join(out, 'project.json'), JSON.stringify(perlFiles(path.join(repo, 'demo'))));
+fs.writeFileSync(path.join(out, 'project.json'), JSON.stringify(perlFiles(path.join(web, 'demo/project'))));
+fs.rmSync(path.join(out, 'project'), { recursive: true });
 console.log(`site written to ${out}`);

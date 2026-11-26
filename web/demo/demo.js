@@ -8,14 +8,49 @@ const ROOT = 'file:///work';
 const status = document.getElementById('status');
 const setStatus = (text, kind = '') => { status.textContent = text; status.className = kind; };
 
-// Each scene opens a file, puts the cursor on a token and runs one editor
-// action, so the feature shows without the visitor knowing the keybinding.
+// A scene opens a file, puts the cursor on a token and runs one editor
+// action (or asks the server and lists the answer), so each feature shows
+// without the visitor knowing a keybinding. `on` is text in the file; `nth`
+// picks a later occurrence; `offset` moves the cursor into the token.
+const HOVER = 'editor.action.showHover';
+const DEFINITION = 'editor.action.revealDefinition';
 const SCENES = [
-  { title: 'Types across files', note: '$acct is an Account, inferred through make_account() in Bank.pm.', file: 'app.pl', on: '$acct', action: 'editor.action.showHover' },
-  { title: 'Go to definition', note: 'Jumps from the call into lib/Bank.pm.', file: 'app.pl', on: 'make_account', action: 'editor.action.revealDefinition' },
-  { title: 'Completion from the class', note: 'Moo accessors and methods of Account.', file: 'app.pl', on: 'deposit', action: 'editor.action.triggerSuggest' },
-  { title: 'Find references', note: 'Every use of deposit, in both files.', file: 'app.pl', on: 'deposit', action: 'editor.action.goToReferences' },
-  { title: 'Rename across files', note: 'Renames the method where it is declared and where it is called.', file: 'lib/Account.pm', on: 'deposit', action: 'editor.action.rename' },
+  ['Types, with no annotations', [
+    { id: 'infer', title: 'A constructor call', note: '$cart is a Shop::Cart.', file: 'app.pl', on: '$cart = ', action: HOVER },
+    { id: 'chain', title: 'A chain keeps its type', note: 'add() returns the cart, so apply() is still a Shop::Cart method.', file: 'app.pl', on: '->apply(', offset: 2, action: HOVER },
+    { id: 'maybe', title: 'A value that may be undef', note: 'parse() can return nothing: $parsed is Maybe<Shop::Item>, and calling a method on it is flagged.', file: 'app.pl', on: '$parsed->name', action: HOVER },
+    { id: 'narrow', title: 'A guard narrows the type', note: 'After `if defined`, the same variable is a Shop::Item.', file: 'app.pl', on: '$parsed->name', nth: 1, action: HOVER },
+    { id: 'ref', title: 'ref() checks narrow too', note: 'Inside the ARRAY branch $input is an ArrayRef.', file: 'lib/Shop/Util.pm', on: '@$input', offset: 1, action: HOVER },
+    { id: 'inlay', title: 'Inlay hints', note: 'Return types and variable types appear inline, greyed.', file: 'lib/Shop/Cart.pm', on: 'sub totals' },
+  ]],
+  ['Navigation', [
+    { id: 'def', title: 'Go to definition, across files', note: 'From the call into lib/Shop/Util.pm.', file: 'app.pl', on: 'format_price(', action: DEFINITION },
+    { id: 'role', title: 'A method from a role', note: 'describe() is not in Shop::Item; it comes from the role it consumes.', file: 'app.pl', on: '$book->describe', offset: 7, action: DEFINITION },
+    { id: 'super', title: 'SUPER::', note: 'Resolves to the parent class.', file: 'lib/Shop/Discount/Percent.pm', on: 'SUPER::describe', offset: 7, action: DEFINITION },
+    { id: 'ctor', title: 'A constructor argument', note: 'currency => jumps to where new() reads that key.', file: 'app.pl', on: "currency => 'EUR'", action: DEFINITION },
+    { id: 'key', title: 'A hash key from a return value', note: '{net} jumps to the key in the hash split_tax() returns.', file: 'app.pl', on: '$parts->{net}', offset: 9, action: DEFINITION },
+    { id: 'dynamic', title: 'A method name built at runtime', note: '"add_$kind" is folded: the call resolves to add_shipping.', file: 'app.pl', on: '$cart->$method', offset: 8, action: HOVER },
+    { id: 'refs', title: 'Find references', note: 'label is required by the role, defined in the class, and called.', file: 'lib/Shop/Item.pm', on: 'sub label', offset: 4, action: 'editor.action.goToReferences' },
+    { id: 'impl', title: 'Find implementations', note: 'Every subclass that overrides amount_off.', file: 'lib/Shop/Discount.pm', on: 'sub amount_off', offset: 4, action: 'editor.action.goToImplementation' },
+    { id: 'outline', title: 'Outline', note: 'Packages, subs and Moo attributes of the file.', file: 'lib/Shop/Item.pm', on: 'has name', action: 'editor.action.quickOutline' },
+  ]],
+  ['Editing', [
+    { id: 'complete', title: 'Method completion', note: "The cart's methods, with their return types.", file: 'app.pl', on: '$cart->totals', offset: 7, action: 'editor.action.triggerSuggest' },
+    { id: 'keys', title: 'Hash key completion', note: 'The keys of the hash split_tax() returns.', file: 'app.pl', on: '$parts->{net}', offset: 9, action: 'editor.action.triggerSuggest' },
+    { id: 'signature', title: 'Signature help', note: 'Parameter names, read from the sub body.', file: 'app.pl', on: 'format_price( $totals', offset: 13, action: 'editor.action.triggerParameterHints' },
+    { id: 'rename', title: 'Rename across files', note: 'Renames add where it is defined and in both chained calls.', file: 'lib/Shop/Cart.pm', on: 'sub add ', offset: 4, action: 'editor.action.rename' },
+    { id: 'docs', title: 'POD on hover', note: 'Documentation written next to the sub.', file: 'app.pl', on: '$cart->add(', offset: 7, action: HOVER },
+  ]],
+  ['Diagnostics', [
+    { id: 'typo', title: 'A misspelled method', note: 'totls is not a Shop::Cart method.', file: 'app.pl', on: '# A typo', action: 'editor.action.marker.next' },
+    { id: 'import', title: 'A missing import, with its fix', note: 'round_cents exists in Shop::Util; the quick fix adds it to the use line.', file: 'app.pl', on: 'round_cents(3', action: 'editor.action.quickFix' },
+  ]],
+  ['Whole program', [
+    { id: 'callers', title: 'Who calls this?', note: 'Incoming calls to subtotal.', file: 'lib/Shop/Cart.pm', on: 'sub subtotal', offset: 4, list: 'incomingCalls' },
+    { id: 'callees', title: 'What does this call?', note: 'Outgoing calls from totals, across files.', file: 'lib/Shop/Cart.pm', on: 'sub totals', offset: 4, list: 'outgoingCalls' },
+    { id: 'subtypes', title: 'Subclasses', note: 'Every class that inherits from Shop::Discount.', file: 'lib/Shop/Discount.pm', on: 'package Shop::Discount', offset: 8, list: 'subtypes' },
+    { id: 'class', title: 'Perl 5.38 class syntax', note: 'cart => is the field of the same name, declared with :param.', file: 'app.pl', on: 'cart => $cart', action: DEFINITION },
+  ]],
 ];
 
 const monaco = await new Promise(resolve => {
@@ -34,7 +69,9 @@ const at = (model, position) => ({ textDocument: { uri: model.uri.toString() }, 
 // LSP numbers its completion kinds 1..25 in this order; Monaco names them.
 const COMPLETION_KINDS = ['Text', 'Method', 'Function', 'Constructor', 'Field', 'Variable', 'Class', 'Interface', 'Module', 'Property', 'Unit', 'Value', 'Enum', 'Keyword', 'Snippet', 'Color', 'File', 'Reference', 'Folder', 'EnumMember', 'Constant', 'Struct', 'Event', 'Operator', 'TypeParameter'];
 const toCompletionKind = n => monaco.languages.CompletionItemKind[COMPLETION_KINDS[n - 1]] ?? monaco.languages.CompletionItemKind.Text;
-const SEVERITIES = [monaco.MarkerSeverity.Error, monaco.MarkerSeverity.Warning, monaco.MarkerSeverity.Info, monaco.MarkerSeverity.Hint];
+// An LSP hint is shown as Info: Monaco draws a Hint marker but never shows
+// its message, and the server's unresolved-name diagnostics are hints.
+const SEVERITIES = [monaco.MarkerSeverity.Error, monaco.MarkerSeverity.Warning, monaco.MarkerSeverity.Info, monaco.MarkerSeverity.Info];
 
 function toWorkspaceEdit(edit) {
   const perFile = edit.documentChanges?.map(c => [c.textDocument.uri, c.edits]) ?? Object.entries(edit.changes ?? {});
@@ -61,14 +98,34 @@ for (const [path, text] of flatten(project)) {
   models.set(path, monaco.editor.createModel(text, LANGUAGE, monaco.Uri.parse(`${ROOT}/${path}`)));
 }
 
+// The server's semantic tokens, coloured: sigils by container kind, hash
+// keys, framework keywords, and writes set apart from reads.
+const SEMANTIC_COLOURS = {
+  light: { 'variable.scalar': '1f5fbf', 'variable.array': '8a3ffc', 'variable.hash': '9a6700', parameter: 'b3541e', property: '0b7285', macro: 'a626a4', namespace: '2b6f3e', method: '6f42c1', function: '6f42c1', keyword: 'b3372f', enumMember: '9a6700' },
+  dark: { 'variable.scalar': '6cb6ff', 'variable.array': 'c792ea', 'variable.hash': 'e5c07b', parameter: 'f29e74', property: '56c2d6', macro: 'd78fe6', namespace: '7fd49b', method: 'b6a0ff', function: 'b6a0ff', keyword: 'f08a80', enumMember: 'e5c07b' },
+};
+for (const [name, base] of [['light', 'vs'], ['dark', 'vs-dark']]) {
+  monaco.editor.defineTheme('perl-lsp-' + name, {
+    base,
+    inherit: true,
+    rules: [
+      ...Object.entries(SEMANTIC_COLOURS[name]).map(([token, foreground]) => ({ token, foreground })),
+      { token: 'variable.modification', fontStyle: 'underline' },
+      { token: 'variable.declaration', fontStyle: 'bold' },
+    ],
+    colors: {},
+  });
+}
+const darkMode = matchMedia('(prefers-color-scheme: dark)');
 const editor = monaco.editor.create(document.getElementById('editor'), {
   model: null,
   automaticLayout: true,
   minimap: { enabled: false },
   fontSize: 14,
   'semanticHighlighting.enabled': true,
-  theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'vs-dark' : 'vs',
+  theme: 'perl-lsp-' + (darkMode.matches ? 'dark' : 'light'),
 });
+darkMode.addEventListener('change', () => monaco.editor.setTheme('perl-lsp-' + (darkMode.matches ? 'dark' : 'light')));
 
 const fileList = document.getElementById('files');
 function show(path, selection) {
@@ -115,12 +172,17 @@ const { capabilities } = await lsp.request('initialize', {
   processId: null,
   rootUri: ROOT,
   workspaceFolders: [{ uri: ROOT, name: 'work' }],
+  // The opt-in lints are on so the page can show them.
+  initializationOptions: {
+    diagnostics: { optionalDeref: true, redundantGuard: true, derefShape: true, unresolvedMethodCrossFile: true },
+  },
   capabilities: {
     textDocument: {
       hover: { contentFormat: ['markdown', 'plaintext'] },
       completion: { completionItem: { documentationFormat: ['markdown', 'plaintext'] } },
       signatureHelp: { signatureInformation: { documentationFormat: ['markdown', 'plaintext'] } },
       rename: { prepareSupport: true },
+      codeAction: { codeActionLiteralSupport: { codeActionKind: { valueSet: ['quickfix'] } } },
     },
   },
 });
@@ -137,10 +199,14 @@ for (const model of models.values()) {
   }));
 }
 
+// The server's own diagnostics are kept beside the markers: a code action
+// request must send them back as the server wrote them.
+const diagnostics = new Map();
 lsp.onNotification((method, params) => {
   if (method !== 'textDocument/publishDiagnostics') return;
   const model = monaco.editor.getModel(monaco.Uri.parse(params.uri));
   if (!model) return;
+  diagnostics.set(params.uri, params.diagnostics);
   monaco.editor.setModelMarkers(model, 'perl-lsp', params.diagnostics.map(d => ({
     ...toRange(d.range),
     message: d.message,
@@ -213,6 +279,7 @@ const locations = method => async (model, position, context) => {
 };
 if (capabilities.definitionProvider) L.registerDefinitionProvider(LANGUAGE, { provideDefinition: locations('textDocument/definition') });
 if (capabilities.typeDefinitionProvider) L.registerTypeDefinitionProvider(LANGUAGE, { provideTypeDefinition: locations('textDocument/typeDefinition') });
+if (capabilities.implementationProvider) L.registerImplementationProvider(LANGUAGE, { provideImplementation: locations('textDocument/implementation') });
 if (capabilities.referencesProvider) L.registerReferenceProvider(LANGUAGE, {
   provideReferences: (model, position, context) => locations('textDocument/references')(model, position, context),
 });
@@ -278,6 +345,45 @@ if (capabilities.documentSymbolProvider) L.registerDocumentSymbolProvider(LANGUA
   },
 });
 
+if (capabilities.codeActionProvider) L.registerCodeActionProvider(LANGUAGE, {
+  async provideCodeActions(model, range) {
+    const uri = model.uri.toString();
+    const here = (diagnostics.get(uri) ?? []).filter(d => monaco.Range.areIntersectingOrTouching(toRange(d.range), range));
+    const r = await ask('textDocument/codeAction', {
+      textDocument: { uri },
+      range: { start: toPosition(range.getStartPosition()), end: toPosition(range.getEndPosition()) },
+      context: { diagnostics: here },
+    });
+    return {
+      actions: (r ?? []).filter(a => a.edit).map(a => ({
+        title: a.title,
+        kind: a.kind,
+        isPreferred: a.isPreferred,
+        edit: toWorkspaceEdit(a.edit),
+      })),
+      dispose() {},
+    };
+  },
+});
+
+if (capabilities.foldingRangeProvider) L.registerFoldingRangeProvider(LANGUAGE, {
+  async provideFoldingRanges(model) {
+    const r = await ask('textDocument/foldingRange', { textDocument: { uri: model.uri.toString() } });
+    return (r ?? []).map(f => ({ start: f.startLine + 1, end: f.endLine + 1 }));
+  },
+});
+
+if (capabilities.selectionRangeProvider) L.registerSelectionRangeProvider(LANGUAGE, {
+  async provideSelectionRanges(model, positions) {
+    const r = await ask('textDocument/selectionRange', { textDocument: { uri: model.uri.toString() }, positions: positions.map(toPosition) });
+    return (r ?? []).map(innermost => {
+      const chain = [];
+      for (let s = innermost; s; s = s.parent) chain.push({ range: toRange(s.range) });
+      return chain;
+    });
+  },
+});
+
 const semantic = capabilities.semanticTokensProvider;
 if (semantic?.full) L.registerDocumentSemanticTokensProvider(LANGUAGE, {
   getLegend: () => semantic.legend,
@@ -290,24 +396,80 @@ if (semantic?.full) L.registerDocumentSemanticTokensProvider(LANGUAGE, {
 
 // ---- scenes ----------------------------------------------------------------
 
+// Monaco has no call- or type-hierarchy view, so those answers are listed in
+// the side panel, each entry a link to its location.
+const HIERARCHY = {
+  incomingCalls: ['textDocument/prepareCallHierarchy', 'callHierarchy/incomingCalls', r => r.from],
+  outgoingCalls: ['textDocument/prepareCallHierarchy', 'callHierarchy/outgoingCalls', r => r.to],
+  subtypes: ['textDocument/prepareTypeHierarchy', 'typeHierarchy/subtypes', r => r],
+  supertypes: ['textDocument/prepareTypeHierarchy', 'typeHierarchy/supertypes', r => r],
+};
+const results = document.getElementById('results');
+function listItems(heading, items) {
+  results.textContent = '';
+  const h = document.createElement('h2');
+  h.textContent = heading;
+  results.append(h);
+  const ul = document.createElement('ul');
+  for (const item of items) {
+    const li = document.createElement('li'), b = document.createElement('button');
+    const path = item.uri.slice(ROOT.length + 1);
+    b.textContent = `${item.name}  ${path}:${item.selectionRange.start.line + 1}`;
+    b.onclick = () => show(path, toRange(item.selectionRange));
+    li.append(b);
+    ul.append(li);
+  }
+  if (!items.length) ul.append(Object.assign(document.createElement('li'), { textContent: 'Nothing found.' }));
+  results.append(ul);
+}
+async function listHierarchy(kind, model, position, heading) {
+  const [prepare, method, pick] = HIERARCHY[kind];
+  const roots = await ask(prepare, at(model, position));
+  const answer = roots?.[0] ? await ask(method, { item: roots[0] }) : [];
+  listItems(heading, (answer ?? []).map(pick));
+}
+
+const search = document.getElementById('symbol-search');
+search.addEventListener('input', async () => {
+  const query = search.value.trim();
+  if (!query) return void (results.textContent = '');
+  const found = await ask('workspace/symbol', { query });
+  if (search.value.trim() !== query) return;
+  listItems(`Symbols matching "${query}"`, (found ?? []).map(s => ({ name: s.name, uri: s.location.uri, selectionRange: s.location.range })));
+});
+
+function runScene(scene) {
+  const model = models.get(scene.file);
+  const match = model.findMatches(scene.on, false, false, true, null, false)[scene.nth ?? 0];
+  if (!match) return;
+  const start = match.range.getStartPosition();
+  // One column in by default, so the cursor is inside the token whatever
+  // its sigil.
+  const position = { lineNumber: start.lineNumber, column: start.column + (scene.offset ?? 1) };
+  show(scene.file, monaco.Range.fromPositions(position));
+  editor.revealLineInCenter(position.lineNumber);
+  results.textContent = '';
+  if (scene.list) listHierarchy(scene.list, model, position, scene.title);
+  else if (scene.action) editor.trigger('demo', scene.action, null);
+}
+
 const sceneList = document.getElementById('scenes');
-for (const scene of SCENES) {
-  const li = document.createElement('li'), b = document.createElement('button');
-  const title = document.createElement('strong'), note = document.createElement('span');
-  title.textContent = scene.title;
-  note.textContent = scene.note;
-  b.append(title, note);
-  b.onclick = () => {
-    const match = models.get(scene.file).findMatches(scene.on, false, false, true, null, false)[0];
-    if (!match) return;
-    const start = match.range.getStartPosition();
-    // One column in, so the cursor is inside the token whatever its sigil.
-    const inside = new monaco.Range(start.lineNumber, start.column + 1, start.lineNumber, start.column + 1);
-    show(scene.file, inside);
-    editor.trigger('demo', scene.action, null);
-  };
-  li.append(b);
-  sceneList.append(li);
+for (const [group, scenes] of SCENES) {
+  const heading = document.createElement('h2');
+  heading.textContent = group;
+  const ol = document.createElement('ol');
+  for (const scene of scenes) {
+    const li = document.createElement('li'), b = document.createElement('button');
+    const title = document.createElement('strong'), note = document.createElement('span');
+    title.textContent = scene.title;
+    note.textContent = scene.note;
+    b.dataset.scene = scene.id;
+    b.append(title, note);
+    b.onclick = () => runScene(scene);
+    li.append(b);
+    ol.append(li);
+  }
+  sceneList.append(heading, ol);
 }
 
 show('app.pl');

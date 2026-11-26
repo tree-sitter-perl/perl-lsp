@@ -12,17 +12,23 @@ header p { margin: 2px 0 0; color: var(--muted); max-width: 70ch; }
 #status { margin-top: 6px; font: 13px ui-monospace, monospace; color: var(--muted); }
 #status.ok { color: var(--ok); }
 #status.bad { color: var(--bad); }
-main { flex: 1; min-height: 0; display: grid; grid-template-columns: 180px minmax(0, 1fr) 300px; }
+main { flex: 1; min-height: 0; display: grid; grid-template-columns: 230px minmax(0, 1fr) 320px; }
 nav, aside { padding: 14px 16px; overflow: auto; }
 nav { border-right: 1px solid var(--line); }
 aside { border-left: 1px solid var(--line); }
 h2 { margin: 0 0 8px; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
 ul, ol { margin: 0; padding: 0; list-style: none; }
-#files button, #scenes button { all: unset; cursor: pointer; display: block; width: 100%; padding: 4px 8px; border-radius: 4px; }
-#files button { font: 13px ui-monospace, monospace; }
+#files button, #scenes button, #results button { all: unset; cursor: pointer; display: block; width: 100%; padding: 4px 8px; border-radius: 4px; }
+#files button, #results button { font: 13px ui-monospace, monospace; overflow-wrap: anywhere; }
+#files { margin-bottom: 16px; }
+#symbol-search { width: 100%; padding: 5px 8px; font: 13px ui-monospace, monospace; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; }
+#results:not(:empty) { margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+#results button { white-space: pre-wrap; }
+#scenes h2 { margin-top: 14px; }
+#scenes h2:first-child { margin-top: 0; }
 #files button[aria-current="true"] { background: var(--panel); color: var(--accent); }
-#files button:hover, #scenes button:hover, #files button:focus-visible, #scenes button:focus-visible { background: var(--panel); }
-#scenes li { margin-bottom: 8px; counter-increment: scene; }
+#files button:hover, #scenes button:hover, #results button:hover, #files button:focus-visible, #scenes button:focus-visible, #results button:focus-visible { background: var(--panel); }
+#scenes li { margin-bottom: 4px; }
 #scenes strong { display: block; }
 #scenes span { color: var(--muted); font-size: 13px; }
 #editor { min-width: 0; min-height: 320px; background: var(--panel); }
