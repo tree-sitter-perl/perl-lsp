@@ -3,3 +3,5 @@
 requires 'Moo',         '== 2.005005';
 requires 'Mojolicious', '== 9.54';
 requires 'DBIx::Class', '== 0.082844';
+requires 'Minion',      '== 12.0';
+requires 'Type::Tiny',  '== 2.010001';
