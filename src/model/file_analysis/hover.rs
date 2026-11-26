@@ -4,16 +4,27 @@
 
 use super::*;
 
+/// A type or name as Markdown prose. Outside a code span a client reads
+/// `Row<Product>` as text and an HTML tag, and drops the tag. Entities, not
+/// backslashes: a client that shows Markdown source with concealment
+/// (nvim) folds `&lt;` back to `<` but leaves a backslash on screen.
+pub(crate) fn markdown_prose(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains(['<', '&']) {
+        return text.into();
+    }
+    text.replace('&', "&amp;").replace('<', "&lt;").into()
+}
+
 /// What a callable's hover says under its declaration, in the order every
 /// language shows it: where it lives (`*class Foo*`), what it returns, its
 /// documentation.
 pub(crate) fn callable_hover_tail(owner: Option<(&str, &str)>, returns: Option<&str>, doc: Option<&str>) -> String {
     let mut out = String::new();
     if let Some((word, name)) = owner {
-        out.push_str(&format!("\n\n*{} {}*", word, name));
+        out.push_str(&format!("\n\n*{} {}*", word, markdown_prose(name)));
     }
     if let Some(rt) = returns {
-        out.push_str(&format!("\n\n*returns: {}*", rt));
+        out.push_str(&format!("\n\n*returns: {}*", markdown_prose(rt)));
     }
     if let Some(d) = doc {
         out.push_str(&format!("\n\n{}", d));
@@ -503,7 +514,7 @@ impl FileAnalysis {
                 .inferred_type_via_bag_ctx(&sym.name, at, module_index)
                 .filter(InferredType::is_known)
             {
-                text.push_str(&format!("\n\n*type: {}*", self.render_type(&it)));
+                text.push_str(&format!("\n\n*type: {}*", markdown_prose(&self.render_type(&it))));
             }
         }
 
