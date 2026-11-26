@@ -220,8 +220,14 @@ jobs:
           tar xzf "$RUNNER_TEMP/sysroot.tgz" -C "$RUNNER_TEMP"
           echo "WASI_SYSROOT=$RUNNER_TEMP/wasi-sysroot-$WASI_SDK.0" >> "$GITHUB_ENV"
 
-      # Build only: nothing here runs the module. A change that adds a
-      # dependency or a platform call WASI lacks fails this job; one that
-      # breaks it at runtime is the browser smoke test's to catch.
       - name: Build
         run: scripts/wasm/build.sh
+
+      # The build proves the module links; this proves it runs: the server
+      # answers cross-file LSP requests in headless Chromium, on threads.
+      - name: Browser smoke test
+        working-directory: web
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npm run smoke
