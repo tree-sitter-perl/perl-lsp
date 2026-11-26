@@ -213,3 +213,123 @@ fn no_receiver_on_plain_identifier() {
     let cursor = after(src, "box");
     assert!(receiver_at(&mut cpp(), &crate::build::packs::cpp_pack(), src, cursor).is_none());
 }
+
+// ---- Recovery: the closer the sentinel parse splices after the cursor ----
+
+/// What the shared sentinel parse spliced after `__CURSOR__` at the `|` in
+/// `marked`: the closer it retried with, or `""` when the plain splice stood.
+fn spliced(parser: &mut Parser, pack: &crate::build::query_extract::LangPack, marked: &str) -> String {
+    let cursor = marked.find('|').expect("a cursor mark");
+    let src = marked.replacen('|', "", 1);
+    let written = parser.parse(&src, None).unwrap();
+    let sp = sentinel_parse(parser, pack, &src, &written, cursor).unwrap_or_else(|| panic!("a sentinel parse in {marked:?}"));
+    assert_eq!(&sp.patched[..cursor], &src[..cursor], "{marked:?}: the bytes before the cursor keep their offsets");
+    let insert = &sp.patched[cursor..cursor + sp.patched.len() - src.len()];
+    insert.strip_prefix(SENTINEL).expect("the sentinel leads the splice").trim().to_string()
+}
+
+fn php() -> Parser {
+    let mut p = Parser::new();
+    p.set_language(&tree_sitter_php::LANGUAGE_PHP.into()).unwrap();
+    p
+}
+
+#[test]
+fn an_unclosed_bracket_before_the_cursor_is_closed_once_in_python() {
+    let pack = crate::build::packs::python_pack();
+    let mut p = python();
+    for (marked, closer) in [
+        ("local(|", ")"),
+        ("local(name=1, |", ")"),
+        ("local(name=1, |\nx = 2", ")"),
+        ("def h():\n    x = local(name=1, |\n    return x", ")"),
+        ("local(name=1, pick(|", ")"),
+        ("local(name=1, pick(|\nx = 2", ")"),
+        ("local([1, 2], |", ")"),
+        ("local([1, |", "]"),
+        ("local(name=1, {'a': |", "}"),
+        ("local(name=1, (|", ")"),
+        ("k.go(|", ")"),
+        // The innermost pair is closed: no retry, whatever else the file did.
+        ("local(na|, size=2)", ""),
+        ("local(pick(|, size=2)", ""),
+        ("local(name=1, |)", ""),
+    ] {
+        assert_eq!(spliced(&mut p, &pack, marked), closer, "{marked:?}");
+    }
+}
+
+#[test]
+fn an_unclosed_bracket_before_the_cursor_is_closed_once_in_php() {
+    let pack = crate::build::packs::php_pack();
+    let mut p = php();
+    for (body, closer) in [
+        ("connect(ti|", ")"),
+        ("connect(host: 'h', |", ")"),
+        ("connect(host: 'h', |\n$x = 2;", ")"),
+        ("function h() {\n    $y = connect(host: 'h', |\n    return $y;\n}", ")"),
+        ("connect(host: pick(|", ")"),
+        ("connect(host: pick(|\n$x = 2;", ")"),
+        ("connect([1, 2], |", ")"),
+        ("$z = [connect(|", ")"),
+        ("connect([1, |", "]"),
+        ("connect(host: (|", ")"),
+        ("connect(ho|, retry: true);", ""),
+        ("connect(pick(|, retry: true);", ""),
+        ("if (connect(|\n) {\n}", ""),
+    ] {
+        let marked = format!("<?php {body}");
+        assert_eq!(spliced(&mut p, &pack, &marked), closer, "{marked:?}");
+    }
+}
+
+#[test]
+fn an_unclosed_bracket_before_the_cursor_is_closed_once_in_cpp() {
+    let pack = crate::build::packs::cpp_pack();
+    let mut p = cpp();
+    for (body, closer) in [
+        ("g(|", ")"),
+        ("g(a, |", ")"),
+        ("g(h(x), |", ")"),
+        ("g(a, h(x, |", ")"),
+        ("o.m(x, |", ")"),
+        ("int y = g(a, |\n  int z = 2;", ")"),
+        ("g(a, \"(\", |", ")"),
+        ("g(a, |);", ""),
+        ("box.|", ""),
+    ] {
+        let marked = format!("void f() {{\n  {body}\n}}");
+        assert_eq!(spliced(&mut p, &pack, &marked), closer, "{marked:?}");
+    }
+}
+
+/// The retry closes the innermost bracket only: the code after the cursor
+/// may close the outer ones, and one closer is one reparse at any depth.
+#[test]
+fn a_deep_nest_splices_one_closer() {
+    let pack = crate::build::packs::python_pack();
+    let marked = format!("{}|", "f(".repeat(1000));
+    assert_eq!(spliced(&mut python(), &pack, &marked), ")");
+}
+
+/// A bracket inside a string is the string's text, not an open token.
+#[test]
+fn a_bracket_in_a_string_opens_nothing() {
+    let pack = crate::build::packs::python_pack();
+    assert_eq!(spliced(&mut python(), &pack, "s = \"(\" + |"), "");
+    assert_eq!(spliced(&mut python(), &pack, "g(\"(\", |"), ")");
+}
+
+/// A call that parsed is read on the plain splice, byte for byte.
+#[test]
+fn a_closed_call_reads_the_plain_splice() {
+    let pack = crate::build::packs::python_pack();
+    let mut p = python();
+    for marked in ["local(name=1, |)\n", "local(|)\nx = 2\n", "obj.|\n"] {
+        let cursor = marked.find('|').unwrap();
+        let src = marked.replacen('|', "", 1);
+        let written = p.parse(&src, None).unwrap();
+        let sp = sentinel_parse(&mut p, &pack, &src, &written, cursor).unwrap();
+        assert_eq!(sp.patched, patch(&src, cursor), "{marked:?}");
+    }
+}

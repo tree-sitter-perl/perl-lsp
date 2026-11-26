@@ -78,7 +78,7 @@ impl FileAnalysis {
     // ---- High-level queries ----
 
     /// Go-to-definition: resolve the symbol at cursor to its definition span.
-    pub fn find_definition(&self, point: Point, _module_index: Option<&dyn CrossFileLookup>) -> Option<Span> {
+    pub fn find_definition(&self, point: Point, module_index: Option<&dyn CrossFileLookup>) -> Option<Span> {
         // 1. Check if cursor is on a ref
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
@@ -162,11 +162,22 @@ impl FileAnalysis {
                     });
                 }
                 RefKind::HashKeyAccess { .. } => {
-                    // Try the pre-resolved owner first
-                    if let Some(owner) = r.hash_key_owner() {
-                        for def in self.hash_key_defs_for_owner(owner) {
-                            if def.name == r.target_name {
-                                return Some(def.selection_span);
+                    // The pre-resolved owner, else the one read off the
+                    // key's call; a call's key belongs to the callable the
+                    // call dispatches to.
+                    if let Some(def) = self.arg_key_callee(r, module_index).and_then(|callee| {
+                        callee.key_defs(self, module_index, r.arg_key_place()).into_iter().find(|(home, d)| home.is_none() && d.name == r.target_name)
+                    }) {
+                        return Some(def.1.selection_span);
+                    }
+                    let owner = r.hash_key_owner().cloned().or_else(|| self.deferred_hash_key_owner(r, module_index));
+                    if let Some(owner) = owner {
+                        let declared = self.declaring_input(&owner, module_index);
+                        for owner in std::iter::once(&owner).chain(declared.as_ref()) {
+                            for def in self.hash_key_defs_for_owner(owner) {
+                                if def.name == r.target_name {
+                                    return Some(def.selection_span);
+                                }
                             }
                         }
                     }
@@ -402,9 +413,11 @@ impl FileAnalysis {
                     if r.target_name != sym.name {
                         continue;
                     }
+                    // A call's key is its callee's, whichever callable
+                    // the call reaches.
                     let matches = match r.hash_key_owner() {
                         Some(ro) => owner.found_by(ro),
-                        None => false,
+                        None => self.deferred_hash_key_owner(r, module_index).is_some_and(|ro| owner.found_by(&ro)),
                     };
                     if matches {
                         results.push((r.span, r.access));
@@ -471,6 +484,25 @@ impl FileAnalysis {
     /// (`$p->x`). The field is the source; the rest are projections
     /// (rule #9), so rename rewrites them together.
     fn field_group_at(&self, point: Point) -> Option<FieldGroup> {
+        // Cursor on a `:$name` parameter, its key, or a use of its variable.
+        if let Some(g) = self
+            .symbol_at(point)
+            .or_else(|| {
+                self.ref_at(point)
+                    .filter(|r| matches!(r.kind, RefKind::Variable))
+                    .and_then(|r| r.resolved_symbol())
+                    .map(|id| self.symbol(id))
+            })
+            .and_then(|s| self.param_group_of(s))
+        {
+            return Some(g);
+        }
+        // Cursor on a call's key whose callee is a parameter group here.
+        if let Some(r) = self.ref_at(point).filter(|r| r.hash_key_owner().is_none() && r.arg_key_call().is_some()) {
+            if let Some(g) = self.deferred_hash_key_owner(r, None).and_then(|o| self.input_group_named(&r.target_name, &o)) {
+                return Some(g);
+            }
+        }
         // Cursor on a `has`-decl token: any of the stacked synthesized
         // symbols (accessor Method / ctor HashKeyDef) selects the pair.
         if let Some(s) = self.symbol_at(point) {
@@ -536,10 +568,11 @@ impl FileAnalysis {
         // synthesized def) owned by `Sub { class, new }`.
         let (key, owner) = match self
             .ref_at(point)
-            .map(|r| (r, r.hash_key_owner()))
+            .map(|r| (r, r.hash_key_owner().cloned().or_else(|| self.deferred_hash_key_owner(r, None))))
         {
+            // A call's key binds to its call; its owner is the callee's.
             Some((r, Some(o))) if matches!(r.kind, RefKind::HashKeyAccess { .. }) => {
-                (r.target_name.clone(), o.clone())
+                (r.target_name.clone(), o)
             }
             _ => match self.symbol_at(point) {
                 Some(s) if matches!(s.kind, SymKind::HashKeyDef) => match &s.detail {
@@ -549,18 +582,17 @@ impl FileAnalysis {
                 _ => return None,
             },
         };
-        // The owner names the class: a constructor key (`Sub{class,new}` —
+        // The owner names the class: a constructor key (`Input{class,new}` —
         // `Foo->new(size => …)`), a bridged condition-arg (`Bridged` — DBIC
         // `search({col})`), or an internal slot (`Class` — `$self->{size}`).
         // A `Class`-owner deref reaches the attr ONLY if it's a real internal
         // slot (Moo/bless `InternalKey`); a bridged column isn't a hash slot, so
         // `$row->{col}` (a `Class` lookup) resolves to nothing here.
         let class = match &owner {
-            HashKeyOwner::Sub { package: Some(c), name }
-                if crate::model::conventions::is_constructor_name(name) =>
-            {
-                c.clone()
-            }
+            HashKeyOwner::Input { .. } => match self.input_group_named(&key, &owner) {
+                Some(g) => return Some(g),
+                None => owner.constructor_class()?.to_string(),
+            },
             HashKeyOwner::Bridged { class: c } => c.clone(),
             HashKeyOwner::Class(c) => {
                 let has_internal = self.attr_projections.iter().any(|a| {
@@ -623,7 +655,7 @@ impl FileAnalysis {
     fn field_spelled_by<'s>(&'s self, sym: &'s Symbol) -> Option<&'s Symbol> {
         match sym.kind {
             SymKind::Field => Some(sym),
-            SymKind::Variable => sym.declared_with.map(|id| self.symbol(id)).filter(|f| f.kind == SymKind::Field),
+            SymKind::Variable | SymKind::HashKeyDef => self.declared_together(sym).find(|f| f.kind == SymKind::Field),
             _ => None,
         }
     }
@@ -641,24 +673,48 @@ impl FileAnalysis {
                 && s.name == bare
                 && matches!(
                     &s.detail,
-                    SymbolDetail::HashKeyDef {
-                        owner: HashKeyOwner::Sub { package: Some(p), name },
-                        ..
-                    } if p == class && crate::model::conventions::is_constructor_name(name)
+                    SymbolDetail::HashKeyDef { owner, .. } if owner.constructor_class() == Some(class)
                 )
+                // A `sub new(:$name)` parameter's key is its parameter's group.
+                && self.param_group_of(s).is_none()
         }) {
-            let accessor = key_def
-                .declared_with
-                .map(|id| self.symbol(id))
-                .filter(|s| matches!(s.kind, SymKind::Method));
+            let accessor = self.declared_together(key_def).find(|s| matches!(s.kind, SymKind::Method));
             return Some(FieldGroup {
                 spelling_sym: None,
                 private: false,
                 decl_span: Some(key_def.selection_span),
                 class: class.to_string(),
                 bare: bare.to_string(),
-                has_param: true,
+                input: Some(HashKeyOwner::named_input(Some(class.to_string()), "new")),
+                attr: true,
                 has_reader: accessor.is_some(),
+                reader_kind: MemberKind::CALLABLE,
+            });
+        }
+        // (1b) A blessed slot (`bless { name => … }, $class`): the key the
+        // constructor returns is an instance slot of the class, so it anchors
+        // the slot's group — its `$self->{name}` reads — though no caller
+        // passes it by that name.
+        if let Some(key_def) = self.symbols.iter().find(|s| {
+            matches!(s.kind, SymKind::HashKeyDef)
+                && s.name == bare
+                && matches!(
+                    &s.detail,
+                    SymbolDetail::HashKeyDef { owner: HashKeyOwner::Sub { package: Some(p), .. }, .. } if p == class
+                )
+                && self.attr_projections.iter().any(|a| {
+                    a.class == class && a.attr == bare && matches!(a.kind, AttrProjectionKind::InternalKey)
+                })
+        }) {
+            return Some(FieldGroup {
+                spelling_sym: None,
+                private: false,
+                decl_span: Some(key_def.selection_span),
+                class: class.to_string(),
+                bare: bare.to_string(),
+                input: None,
+                attr: true,
+                has_reader: false,
                 reader_kind: MemberKind::CALLABLE,
             });
         }
@@ -671,7 +727,7 @@ impl FileAnalysis {
                 && s.name == bare
                 && s.package.as_deref() == Some(class)
         })?;
-        let paired = accessor.declared_with.map(|id| self.symbol(id)).is_some_and(|s| {
+        let paired = self.declared_together(accessor).any(|s| {
             matches!(s.kind, SymKind::HashKeyDef)
                 && matches!(
                     &s.detail,
@@ -687,7 +743,8 @@ impl FileAnalysis {
             decl_span: Some(accessor.selection_span),
             class: class.to_string(),
             bare: bare.to_string(),
-            has_param: false,
+            input: None,
+                attr: true,
             has_reader: true,
             reader_kind: MemberKind::CALLABLE,
         })
@@ -697,14 +754,21 @@ impl FileAnalysis {
         // A member declared with a bare name from one token is the field
         // itself: read through the class, shared down the hierarchy like
         // any member, its bare name's uses the variable spellings.
-        if let Some(twin) = sym.declared_with.map(|id| self.symbol(id)).filter(|t| t.kind == SymKind::Variable) {
+        if let Some(twin) = self.declared_together(sym).find(|t| t.kind == SymKind::Variable) {
+            // A promoted constructor parameter is also the key a call
+            // passes it by.
+            let input = self.declared_together(sym).find_map(|t| match &t.detail {
+                SymbolDetail::HashKeyDef { owner: o @ HashKeyOwner::Input { .. }, .. } => Some(o.clone()),
+                _ => None,
+            });
             return Some(FieldGroup {
                 spelling_sym: Some(twin.id),
                 private: false,
                 decl_span: None,
                 class: sym.package.clone()?,
                 bare: sym.name.clone(),
-                has_param: false,
+                input,
+                attr: true,
                 has_reader: true,
                 reader_kind: MemberKind::of_symbol(sym),
             });
@@ -721,10 +785,78 @@ impl FileAnalysis {
             decl_span: None,
             class: sym.package.clone()?,
             bare: sym.name[1..].to_string(),
-            has_param: sym.flags.contains(SymbolFlags::PARAM),
+            input: sym.flags.contains(SymbolFlags::PARAM).then(|| HashKeyOwner::named_input(sym.package.clone(), "new")),
+            attr: true,
             has_reader: sym.flags.contains(SymbolFlags::READER),
             reader_kind: MemberKind::CALLABLE,
         })
+    }
+
+    /// The group of a by-name parameter: the variable the body reads and
+    /// the key a call passes, declared from one `:$name` token.
+    fn param_group_of(&self, sym: &Symbol) -> Option<FieldGroup> {
+        // A promoted parameter's field is the group (`field_group_of`).
+        if self.declared_together(sym).any(|t| t.kind == SymKind::Field) {
+            return None;
+        }
+        let twin_of = |kind| self.declared_together(sym).find(|t| t.kind == kind);
+        let (var, key) = match sym.kind {
+            SymKind::Variable => (sym, twin_of(SymKind::HashKeyDef)?),
+            SymKind::HashKeyDef => (twin_of(SymKind::Variable)?, sym),
+            _ => return None,
+        };
+        let SymbolDetail::HashKeyDef { owner, .. } = &key.detail else {
+            return None;
+        };
+        let package = match owner {
+            HashKeyOwner::Input { package, .. } => package.as_deref(),
+            HashKeyOwner::AnonInput { callable, .. } => self.symbol(*callable).package.as_deref(),
+            _ => return None,
+        };
+        Some(FieldGroup {
+            spelling_sym: Some(var.id),
+            private: true,
+            decl_span: None,
+            class: package.map(str::to_string).unwrap_or_default(),
+            bare: key.name.clone(),
+            input: Some(owner.clone()),
+            attr: false,
+            has_reader: false,
+            reader_kind: MemberKind::CALLABLE,
+        })
+    }
+
+    /// The parameter group `owner`'s callable declares for the key `bare`.
+    fn input_group_named(&self, bare: &str, owner: &HashKeyOwner) -> Option<FieldGroup> {
+        self.symbols
+            .iter()
+            .filter(|s| s.kind == SymKind::HashKeyDef && s.name == bare)
+            .filter(|s| matches!(&s.detail, SymbolDetail::HashKeyDef { owner: o, .. } if o == owner))
+            .find_map(|s| self.param_group_of(s).or_else(|| self.field_group_of(self.field_spelled_by(s)?)))
+    }
+
+    /// The parameter group by its callable's input owner — the
+    /// consumer-side entry for a call key in another file.
+    pub fn input_projections_named(&self, bare: &str, owner: &HashKeyOwner) -> Option<FieldProjections> {
+        self.input_group_named(bare, owner).map(|g| self.projections_of(g))
+    }
+
+    /// A call key's input owner on the class that declares the callable
+    /// the call dispatches to, where that is an ancestor of the class the
+    /// call names; `None` when the call names the declaring class itself.
+    pub fn declaring_input(&self, owner: &HashKeyOwner, module_index: Option<&dyn CrossFileLookup>) -> Option<HashKeyOwner> {
+        let HashKeyOwner::Input { package: Some(class), name, slot } = owner else {
+            return None;
+        };
+        let declaring = self.resolve_method_in_ancestors(class, name, module_index)?.class().to_string();
+        (*declaring != **class).then(|| HashKeyOwner::Input { package: Some(declaring.into()), name: name.clone(), slot: *slot })
+    }
+
+    /// The class's projections of the group's name (accessors, slots) —
+    /// none for a parameter's group, which a same-named attr of the
+    /// callable's package must not join.
+    fn class_projections<'s>(&'s self, g: &'s FieldGroup) -> impl Iterator<Item = &'s AttrProjection> + 's {
+        self.attr_projections.iter().filter(move |a| g.attr && a.class == g.class && a.attr == g.bare)
     }
 
     /// The variable spelling's span narrowed to the bare name: a Corinna
@@ -747,9 +879,7 @@ impl FileAnalysis {
             .collect();
         let mut edits = bare.clone();
         for (method, affix) in self
-            .attr_projections
-            .iter()
-            .filter(|a| a.class == g.class && a.attr == g.bare)
+            .class_projections(g)
             .filter_map(|a| match &a.kind {
                 AttrProjectionKind::Accessor { method, affix } => {
                     Some((method.clone(), affix.clone()))
@@ -809,9 +939,7 @@ impl FileAnalysis {
     fn field_group_spans(&self, g: &FieldGroup) -> Vec<Span> {
         let mut spans = self.field_group_spans_bare(g);
         for a in self
-            .attr_projections
-            .iter()
-            .filter(|a| a.class == g.class && a.attr == g.bare)
+            .class_projections(g)
         {
             if let AttrProjectionKind::Accessor { method, .. } = &a.kind {
                 spans.extend(self.mapped_member_spans(g, method));
@@ -838,18 +966,8 @@ impl FileAnalysis {
             spans.push(decl);
         }
         // Constructor keys at call sites.
-        if g.has_param {
-            let owner = HashKeyOwner::Sub {
-                package: Some(g.class.clone()),
-                name: "new".to_string(),
-            };
-            for r in self.refs() {
-                if let Some(o) = r.hash_key_owner() {
-                    if r.target_name == g.bare && o.found_by(&owner) {
-                        spans.push(r.span);
-                    }
-                }
-            }
+        if let Some(owner) = &g.input {
+            spans.extend(self.input_key_sites(owner, &g.bare));
         }
         // Reader calls (`$p->x`) and reads (`obj.count`) dispatching to
         // this class.
@@ -869,15 +987,7 @@ impl FileAnalysis {
         // InternalKey projection (hash-backed repr; Corinna never does).
         // STRICT Class-owner equality: `found_by` broadening would leak
         // other subs' same-named arg keys into the group.
-        if self
-            .attr_projections
-            .iter()
-            .any(|a| {
-                a.class == g.class
-                    && a.attr == g.bare
-                    && matches!(a.kind, AttrProjectionKind::InternalKey)
-            })
-        {
+        if self.class_projections(g).any(|a| matches!(a.kind, AttrProjectionKind::InternalKey)) {
             for r in self.refs() {
                 if let Some(HashKeyOwner::Class(c)) = r.hash_key_owner() {
                     if c == &g.class && r.target_name == g.bare {
@@ -891,28 +1001,34 @@ impl FileAnalysis {
         spans
     }
 
-    /// Query-time owner for a deferred (`owner: None`) hash-key access:
-    /// find the enclosing call ref and derive `Sub { invocant class,
-    /// method }` with the index in hand. The build-time gate deferred
-    /// exactly because the class wasn't visible locally — this is the
-    /// other half of that bargain (the receiver-gated discipline: the
-    /// type is the gate, resolved at query time).
+    /// The keys this file's calls pass `owner`'s callable by the name `bare`.
+    fn input_key_sites(&self, owner: &HashKeyOwner, bare: &str) -> Vec<Span> {
+        let mut spans = Vec::new();
+        for r in self.refs().iter().filter(|r| r.target_name == bare) {
+            let o = match r.hash_key_owner() {
+                Some(o) => Some(o.clone()),
+                None if r.arg_key_call().is_some() => self.deferred_hash_key_owner(r, None),
+                None => None,
+            };
+            let Some(o) = o else { continue };
+            if o.found_by(owner) || self.declaring_input(&o, None).as_ref() == Some(owner) {
+                spans.push(r.span);
+            }
+        }
+        spans
+    }
+
+    /// Query-time owner for a hash-key access the build couldn't own: a key
+    /// bound to its call (`RefBinding::CallArgKey`) derives `Sub { invocant
+    /// class, method }` (or the column owner) from that call with the index
+    /// in hand; an unowned `$v->{k}` whose variable is bound to an imported
+    /// call takes the producer's owner.
     pub fn deferred_hash_key_owner(
         &self,
         key_ref: &Ref,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<HashKeyOwner> {
-        // Enclosing method call whose span covers this key (an arg key inside a
-        // call, or a `->{key}` deref of the call's return).
-        let enclosing_call = self
-            .refs
-            .iter()
-            .filter(|c| {
-                matches!(c.kind, RefKind::MethodCall { .. })
-                    && contains_point(&c.span, key_ref.span.start)
-                    && contains_point(&c.span, key_ref.span.end)
-            })
-            .min_by_key(|c| span_size(&c.span));
+        let enclosing_call = key_ref.arg_key_call().and_then(|crate::model::witnesses::RefIdx(i)| self.refs.get(i as usize));
 
         // Column-keyed call arg (`$rs->search({ name => … })`, columns
         // cross-file): the key is a COLUMN of the invocant class, not a key of
@@ -953,19 +1069,9 @@ impl FileAnalysis {
             }
         }
 
-        // Inline method-chain receiver: `$obj->method->{key}` — the key
-        // belongs to `method`'s return value, owned `Sub{invocant_class, method}`.
+        // A key of the call's arguments: the callee's named input.
         if let Some(enclosing) = enclosing_call {
-            // An owner is ONE producer: a union receiver's call has a
-            // return per arm, and no single `Sub` owns the key.
-            if let Some(class) =
-                self.receiver_classes(enclosing, module_index, ReceiverPolicy::Edge).single().map(str::to_string)
-            {
-                return Some(HashKeyOwner::Sub {
-                    package: Some(class),
-                    name: enclosing.unqualified_target_name(self.names()).to_string(),
-                });
-            }
+            return self.callee_of(enclosing, module_index).map(|c| c.input_at(self, module_index, key_ref.arg_key_place()));
         }
         // Variable bound to an imported function call: `$c = get_config();
         // $c->{key}`. The build-time walk only pins the owner when the sub's
@@ -1015,23 +1121,8 @@ impl FileAnalysis {
         if split_qualified(&call_ref.target_name, self.names()).0.is_some() {
             return None;
         }
-        let idx = module_index?;
         let name = call_ref.unqualified_target_name(self.names());
-        // The package's own `use`s, later wins, mirroring
-        // `resolve_call_package`. A split exporter's surface lives across
-        // its candidate files.
-        for import in self.imports.in_scope(self.import_scope_at(call_ref.span.start)).rev() {
-            for cached in idx.visible_def_candidates(&import.module_name) {
-                let surface = cached.analysis.export_surface_with_index(&import.module_name, idx);
-                if imported_names(import, &surface)
-                    .iter()
-                    .any(|(local, _)| local.as_str() == name)
-                {
-                    return Some(import.module_name.clone());
-                }
-            }
-        }
-        None
+        self.imported_callable(name, call_ref.span.start, module_index?).map(|(module, _)| module)
     }
 
     /// The cross-file-facing view of the field group at `point`: the
@@ -1076,6 +1167,11 @@ impl FileAnalysis {
         // A `has`/column group's decl token IS its only spelling here; a
         // field-backed group's decl is the variable spelling's own token (the
         // rest of `variable_spans` are body uses), sigil-skipped like them.
+        // An anonymous callable's keys are reached only from this file: no
+        // cross-file member carries them, so its call sites are spellings.
+        if let Some(owner @ HashKeyOwner::AnonInput { .. }) = &g.input {
+            variable_spans.extend(self.input_key_sites(owner, &g.bare));
+        }
         let mut decl_spans: Vec<Span> = g
             .spelling_sym
             .map(|vs| vec![self.bare_spelling(&g, vs, self.symbol(vs).selection_span)])
@@ -1085,9 +1181,7 @@ impl FileAnalysis {
             decl_spans.push(decl);
         }
         let mapped = self
-            .attr_projections
-            .iter()
-            .filter(|a| a.class == g.class && a.attr == g.bare)
+            .class_projections(&g)
             .filter_map(|a| match &a.kind {
                 AttrProjectionKind::Accessor { method, affix } => Some(MappedMember {
                     method: method.clone(),
@@ -1096,17 +1190,13 @@ impl FileAnalysis {
                 _ => None,
             })
             .collect();
-        let has_internal = self.attr_projections.iter().any(|a| {
-            a.class == g.class
-                && a.attr == g.bare
-                && matches!(a.kind, AttrProjectionKind::InternalKey)
-        });
+        let has_internal = self.class_projections(&g).any(|a| matches!(a.kind, AttrProjectionKind::InternalKey));
         // A `Column`-owned HashKeyDef for this attr (DBIC column / Class::Accessor)
         // — its key uses are the condition args (`search({attr=>…})`), reached via
         // the `Column` owner; the group needs a `HashKeyOfClass` member for them.
         // NOT `$row->{attr}` derefs — a column isn't a hash slot (that's why it's
         // `Column`, not `Class`), so a deref never joins.
-        let has_class_key = self.symbols.iter().any(|s| {
+        let has_class_key = g.attr && self.symbols.iter().any(|s| {
             matches!(s.kind, SymKind::HashKeyDef)
                 && s.name == g.bare
                 && matches!(
@@ -1117,7 +1207,8 @@ impl FileAnalysis {
         FieldProjections {
             class: g.class,
             bare: g.bare,
-            has_param: g.has_param,
+            input: g.input,
+            attr: g.attr,
             has_reader: g.has_reader,
             reader_kind: g.reader_kind,
             has_internal,

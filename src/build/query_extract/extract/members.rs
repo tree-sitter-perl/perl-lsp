@@ -7,16 +7,37 @@ use crate::model::file_analysis::{MemberOp, ParamArity};
 
 /// The call's arguments in order (the `@arity.arg`s of its match's
 /// `@arity.args` list), each with whether it spreads (an `@arity.spread` on
-/// the argument's node); `None` when the match wrote no argument list.
-pub(super) fn call_args(ad: &Adorned, match_id: usize) -> Option<Vec<(Span, bool)>> {
+/// the argument's node) and the name it is passed by (an `@arity.label`
+/// inside it); `None` when the match wrote no argument list.
+pub(super) fn call_args(ad: &Adorned, match_id: usize) -> Option<Vec<crate::build::query_extract::WrittenArg>> {
     let list = ad.in_match(match_id, Capture::Arity(ArityCap::Args))?;
     let spreads = |a: &Event| ad.on(a).any(|s| s.cap == Capture::Arity(ArityCap::Spread));
+    let label = |a: &Event| {
+        ad.within(a).map(|i| &ad.events()[i]).find(|t| t.cap == Capture::Arity(ArityCap::Label)).map(|t| t.text.clone())
+    };
     Some(
         ad.list_items(list)
             .filter(|a| a.cap == Capture::Arity(ArityCap::Arg))
-            .map(|a| (a.span(), spreads(a)))
+            .map(|a| crate::build::query_extract::WrittenArg { span: a.span(), spread: spreads(a), label: label(a) })
             .collect(),
     )
+}
+
+/// How many places a call's arguments fill: a named one fills none.
+pub(super) fn places(args: &[crate::build::query_extract::WrittenArg]) -> usize {
+    args.iter().filter(|a| a.label.is_none()).count()
+}
+
+/// The arguments the call passes by name (`@arity.label`s in its match's
+/// `@arity.args` list), each its name and token.
+pub(super) fn call_labels(ad: &Adorned, match_id: usize) -> Vec<(String, Span)> {
+    let Some(list) = ad.in_match(match_id, Capture::Arity(ArityCap::Args)) else {
+        return Vec::new();
+    };
+    ad.list_items(list)
+        .filter(|a| a.cap == Capture::Arity(ArityCap::Label))
+        .map(|a| (a.text.clone(), a.span()))
+        .collect()
 }
 
 /// The operator a member match wrote, with its span: the
@@ -66,6 +87,63 @@ fn arity_of(ad: &Adorned, sig: &Event) -> ParamArity {
     arity
 }
 
+/// A signature's parameters, in order. A parameter's name is the def its
+/// node declares; how a call reaches it is what the document states on it
+/// (`@arity.either` and its narrowings), by place where it states nothing.
+/// `None` when a parameter has no name.
+fn params_of(ad: &Adorned, sig: &Event) -> Option<Vec<crate::model::file_analysis::ParamInfo>> {
+    use crate::model::file_analysis::{ParamInfo, ParamPass};
+    let mut params = Vec::new();
+    for item in ad.list_items(sig) {
+        let required = match item.cap {
+            Capture::Arity(ArityCap::Required) => true,
+            Capture::Arity(ArityCap::Optional) | Capture::Arity(ArityCap::Variadic) => false,
+            _ => continue,
+        };
+        let stated = |cap| ad.on(item).any(|t| t.cap == Capture::Arity(cap));
+        let pass = if ad.on(item).any(|t| t.cap == Capture::Arity(ArityCap::Variadic)) {
+            if stated(ArityCap::RestPlaces) {
+                ParamPass::RestPositional
+            } else if stated(ArityCap::RestNames) {
+                ParamPass::RestNamed
+            } else {
+                ParamPass::Rest
+            }
+        } else if stated(ArityCap::ByName) {
+            ParamPass::Named
+        } else if stated(ArityCap::ByPlace) {
+            ParamPass::Positional
+        } else if stated(ArityCap::Either) {
+            ParamPass::Either
+        } else {
+            ParamPass::Positional
+        };
+        let name = ad.within(item).map(|i| &ad.events()[i]).find(|t| {
+            matches!(t.cap, Capture::Def { part: DefPart::Name, .. })
+        });
+        // A parameter the list does not name (C's `int f(int)`) leaves the
+        // list unstated: no call can name it, and a list missing it lies.
+        let name = name?;
+        let receiver = ad.on(name).any(|t| t.cap == Capture::Receiver);
+        let spelled = ad
+            .within(item)
+            .map(|i| &ad.events()[i])
+            .find(|t| matches!(t.cap, Capture::Def { part: DefPart::Spelled, .. }));
+        params.push(ParamInfo {
+            name: spelled.unwrap_or(name).text.clone(),
+            default: (!required && !pass.is_rest()).then(|| {
+                let written = ad.within(item).map(|i| &ad.events()[i]).find(|t| t.cap == Capture::Arity(ArityCap::Default));
+                written.map_or_else(|| "…".to_string(), |d| d.text.clone())
+            }),
+            key: (pass.takes_name() && !pass.is_rest() && !receiver).then(|| name.text.clone()),
+            pass,
+            is_invocant: receiver,
+            binding_site: Some(name.start),
+        });
+    }
+    Some(params)
+}
+
 /// What each kept def holds inside its own node, read off the tree where
 /// a separate match captured it:
 ///
@@ -83,13 +161,14 @@ pub(super) fn finish(st: &mut ExtractState) {
         let Some(row) = st.minted[ix].def_row else { continue };
         let kind = st.out.symbols[row].kind;
         match kind.sym_kind() {
-            _ if matches!(kind, DefCap::Sub | DefCap::Method) => {
+            _ if matches!(kind, DefCap::Sub | DefCap::Method | DefCap::Anon) => {
                 let name_end = st.out.symbols[row].name_end;
-                st.out.symbols[row].arity = ad
+                let sig = ad
                     .within(e)
                     .map(|i| &ad.events()[i])
-                    .find(|t| t.cap == Capture::Arity(ArityCap::Sig) && !before(t.start, name_end))
-                    .map(|sig| arity_of(ad, sig));
+                    .find(|t| t.cap == Capture::Arity(ArityCap::Sig) && !before(t.start, name_end));
+                st.out.symbols[row].arity = sig.map(|sig| arity_of(ad, sig));
+                st.out.symbols[row].params = sig.and_then(|sig| params_of(ad, sig));
             }
             SymKind::Class => {
                 st.out.symbols[row].inner =

@@ -2138,6 +2138,126 @@ sub fire ($minion) {\n  $minion->enqueue('send_email' => ['a@b']);\n}\n1;\n",
     );
 }
 
+/// A task's keys are the keys an `enqueue` passes it, across files:
+/// `enqueue(mail => [timeout => 1])` names the key the task reads as
+/// `$o{timeout}`, and the read finds the call's key back.
+#[test]
+fn a_task_takes_the_keys_its_enqueue_passes_across_files() {
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let path_reg = PathBuf::from("/tmp/resolve_minion_keys_reg.pm");
+    let path_call = PathBuf::from("/tmp/resolve_minion_keys_call.pm");
+    let fa_reg = parse(
+        "package App::Tasks;\nuse Minion;\n\
+sub setup ($minion) {\n  $minion->add_task(mail => sub ($job, %o) { $o{timeout} });\n}\n1;\n",
+    );
+    let fa_call = parse(
+        "package App::Caller;\nuse Minion;\n\
+sub fire ($minion) {\n  $minion->enqueue(mail => [timeout => 1]);\n}\n1;\n",
+    );
+    idx.insert_workspace_for_test(path_reg.clone(), fa_reg.clone());
+    idx.insert_workspace_for_test(path_call.clone(), fa_call.clone());
+    let key = |p: &PathBuf| FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(p));
+    let at = |row, column| tree_sitter::Point { row, column };
+
+    let defs = resolve(&store, &fa_call, key(&path_call), at(3, 28), Some(&idx), OverrideScope::default()).definitions();
+    assert!(
+        defs.iter().any(|d| file_key_eq(&d.key, &key(&path_reg)) && d.span.start == at(3, 48)),
+        "the enqueued key lands on the task's read, got {defs:?}",
+    );
+    let refs = resolve(&store, &fa_reg, key(&path_reg), at(3, 48), Some(&idx), OverrideScope::default()).references();
+    assert!(
+        refs.iter().any(|r| file_key_eq(&r.key, &key(&path_call)) && r.span.start == at(3, 28)),
+        "the task's key finds the enqueue that passes it, got {refs:?}",
+    );
+}
+
+/// A hash written as a call's argument holds the keys of the parameter
+/// that argument binds, and a callee's names start after its places.
+#[test]
+fn keys_link_by_place() {
+    let store = OpenDocs::new();
+    let path = PathBuf::from("/tmp/resolve_keys_by_place.pl");
+    let fa = parse(
+        "use strict;\n\
+sub f { my ($x, $o) = @_; $o->{timeout} }\n\
+f(1, {timeout => 1});\n\
+sub g { my ($x, %a) = @_; $a{retries} }\n\
+g(1, retries => 2);\n",
+    );
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), fa.clone());
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(&path));
+    let at = |row, column| tree_sitter::Point { row, column };
+    let defs = resolve(&store, &fa, key.clone(), at(2, 6), Some(&idx), OverrideScope::default()).definitions();
+    assert!(defs.iter().any(|d| d.span.start == at(1, 31)), "the hash's key lands on the parameter's read, got {defs:?}");
+    let refs = resolve(&store, &fa, key.clone(), at(1, 31), Some(&idx), OverrideScope::default()).references();
+    assert!(refs.iter().any(|r| r.span.start == at(2, 6)), "the read finds the call's key, got {refs:?}");
+    let defs = resolve(&store, &fa, key, at(4, 5), Some(&idx), OverrideScope::default()).definitions();
+    assert!(defs.iter().any(|d| d.span.start == at(3, 29)), "a name after a place lands on its read, got {defs:?}");
+}
+
+/// A subclass's constructor call passes the keys its parent declares, though
+/// the subclass declares none of its own.
+#[test]
+fn a_subclass_new_passes_its_parent_s_constructor_keys() {
+    let store = OpenDocs::new();
+    let path = PathBuf::from("/tmp/resolve_subclass_new_keys.pl");
+    let fa = parse(
+        "package Foo;\nuse Moo;\nhas name => (is => 'ro');\n\
+package Bar;\nuse Moo;\nextends 'Foo';\n\
+package main;\nBar->new(name => 1);\n",
+    );
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), fa.clone());
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(&path));
+    let at = |row, column| tree_sitter::Point { row, column };
+    let defs = resolve(&store, &fa, key.clone(), at(7, 10), Some(&idx), OverrideScope::default()).definitions();
+    assert!(defs.iter().any(|d| d.span.start.row == 2), "the key lands on the parent's `has`, got {defs:?}");
+    let refs = resolve(&store, &fa, key, at(2, 4), Some(&idx), OverrideScope::default()).references();
+    assert!(refs.iter().any(|r| r.span.start == at(7, 9)), "the `has` finds the subclass's call, got {refs:?}");
+}
+
+/// The shapes that collect a call's names, and a slice's keys, link like
+/// `my %args = @_; $args{k}` does.
+#[test]
+fn collecting_shapes_and_slices_take_the_call_s_keys() {
+    let store = OpenDocs::new();
+    let path = PathBuf::from("/tmp/resolve_collecting_shapes.pl");
+    let fa = parse(
+        "use strict;\n\
+sub a { my $o = {@_}; $o->{timeout} }\n\
+sub b { my %o = (retries => 3, @_); $o{timeout} }\n\
+sub c { my $class = shift; my %o = @_ == 1 ? %{$_[0]} : @_; $o{timeout} }\n\
+sub d { my %o = @_; my ($t) = @o{qw(timeout retries)}; }\n\
+a(timeout => 1); b(timeout => 1); main->c(timeout => 1); d(timeout => 1);\n",
+    );
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), fa.clone());
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(&path));
+    let at = |row, column| tree_sitter::Point { row, column };
+    for (call, read) in [(at(5, 3), at(1, 27)), (at(5, 20), at(2, 39)), (at(5, 43), at(3, 63)), (at(5, 60), at(4, 36))] {
+        let defs = resolve(&store, &fa, key.clone(), call, Some(&idx), OverrideScope::default()).definitions();
+        assert!(defs.iter().any(|d| d.span.start == read), "{call:?} lands on the read at {read:?}, got {defs:?}");
+    }
+}
+
+/// A dotted helper's keys are the keys its chained call passes.
+#[test]
+fn a_dotted_helper_takes_the_keys_its_call_passes() {
+    let store = OpenDocs::new();
+    let path = PathBuf::from("/tmp/resolve_dotted_helper_keys.pl");
+    let fa = parse(
+        "use Mojolicious::Lite -signatures;\n\
+helper 'users.fetch' => sub ($c, %o) { $o{timeout} };\n\
+get '/' => sub ($c) { $c->users->fetch(timeout => 1) };\n",
+    );
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(&path));
+    let at = |row, column| tree_sitter::Point { row, column };
+    let defs = resolve(&store, &fa, key.clone(), at(2, 39), None, OverrideScope::default()).definitions();
+    assert!(defs.iter().any(|d| d.span.start == at(1, 42)), "the call's key lands on the helper's read, got {defs:?}");
+}
+
 /// The query-time `ReceiverGated` gap closer: a Handler `refs_to` must
 /// include a dispatch call-site in a NON-OPEN workspace file whose receiver
 /// `isa Minion` only CROSS-FILE and which does NOT `use Minion` itself. The
@@ -2534,4 +2654,126 @@ fn a_perl_constructor_retrieves_under_its_name() {
     let target = TargetRef::method("new".into(), "Base".into(), None, &fa, None, OverrideScope::Dispatch);
     assert!(target.constructed_classes.is_empty());
     assert_eq!(target.retrieval_keys(fa.names()), ["new"]);
+}
+
+/// A key a callable takes is one entity across files: the callee's
+/// collecting read declares it and every call site's key is a use, and the
+/// identically named key the callable RETURNS is not part of it.
+#[test]
+fn refs_to_an_input_key_joins_the_read_and_the_calls_across_files() {
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let lib = PathBuf::from("/tmp/resolve_input_key_lib.pm");
+    let app = PathBuf::from("/tmp/resolve_input_key_app.pl");
+    idx.insert_workspace_for_test(
+        lib.clone(),
+        parse("package Lib;\nsub new { my ($class, %args) = @_; return bless { host => $args{host} }, $class }\n1;\n"),
+    );
+    idx.insert_workspace_for_test(app.clone(), parse("use Lib;\nmy $l = Lib->new(host => 'h');\n"));
+
+    let results = refs_to(
+        &store,
+        Some(&idx),
+        &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
+            name: "host".to_string(),
+            kind: TargetKind::HashKeyOfInput {
+                package: Some("Lib".to_string()),
+                name: "new".to_string(),
+                slot: crate::model::file_analysis::InputSlot::Named,
+            },
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
+        },
+        RoleMask::EDITABLE,
+    );
+    let in_file = |path: &PathBuf| {
+        let want = crate::util::canonical_path::CanonicalPath::resolve(path);
+        results.iter().filter(move |r| matches!(&r.key, FileKey::Path(p) if *p == want)).collect::<Vec<_>>()
+    };
+    let lib_line = "sub new { my ($class, %args) = @_; return bless { host => $args{host} }, $class }";
+    let read_col = lib_line.find("$args{host}").unwrap() + "$args{".len();
+    let lib_refs = in_file(&lib);
+    assert!(lib_refs.iter().any(|r| (r.span.start.row, r.span.start.column) == (1, read_col)), "the read: {results:?}");
+    let slot_col = lib_line.find("host").unwrap();
+    assert!(!lib_refs.iter().any(|r| (r.span.start.row, r.span.start.column) == (1, slot_col)), "not the returned slot: {results:?}");
+    assert_eq!(in_file(&app).len(), 1, "the call site's key: {results:?}");
+}
+
+/// A Moo class's `BUILDARGS` and `BUILD` read what its `new` is called with.
+#[test]
+fn a_moo_constructor_s_keys_reach_buildargs_and_build() {
+    let store = OpenDocs::new();
+    let path = PathBuf::from("/tmp/resolve_moo_build_keys.pl");
+    let fa = parse(
+        "package Foo; use Moo;\n\
+sub BUILDARGS { my ($class, %args) = @_; return { t => $args{timeout} }; }\n\
+sub BUILD { my ($self, $args) = @_; $args->{retries} }\n\
+package main;\n\
+Foo->new(timeout => 1, retries => 2);\n",
+    );
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), fa.clone());
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(&path));
+    let at = |row, column| tree_sitter::Point { row, column };
+    for (call, read) in [(at(4, 10), at(1, 61)), (at(4, 24), at(2, 44))] {
+        let defs = resolve(&store, &fa, key.clone(), call, Some(&idx), OverrideScope::default()).definitions();
+        assert!(defs.iter().any(|d| d.span.start == read), "{call:?} lands on the read at {read:?}, got {defs:?}");
+    }
+}
+
+/// `init_arg` spells an attribute's constructor key; `undef` mints none.
+#[test]
+fn init_arg_spells_the_constructor_key() {
+    let store = OpenDocs::new();
+    let path = PathBuf::from("/tmp/resolve_init_arg.pl");
+    let fa = parse(
+        "package Foo; use Moo;\n\
+has _timeout => (is => 'ro', init_arg => 'timeout');\n\
+has _cache => (is => 'ro', init_arg => undef);\n\
+package main;\n\
+Foo->new(timeout => 1, _timeout => 2, _cache => 3);\n",
+    );
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), fa.clone());
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(&path));
+    let at = |row, column| tree_sitter::Point { row, column };
+    let defs = resolve(&store, &fa, key.clone(), at(4, 10), Some(&idx), OverrideScope::default()).definitions();
+    assert!(defs.iter().any(|d| d.span.start == at(1, 42)), "the key lands on the init_arg string, got {defs:?}");
+    for miss in [at(4, 24), at(4, 39)] {
+        let defs = resolve(&store, &fa, key.clone(), miss, Some(&idx), OverrideScope::default()).definitions();
+        assert!(!defs.iter().any(|d| d.span.start.row <= 2), "{miss:?} names no constructor key, got {defs:?}");
+    }
+}
+
+/// A task registered by name takes the keys its enqueue passes: the
+/// dispatch is a call of the named sub, wherever it is enqueued.
+#[test]
+fn a_named_task_takes_the_keys_its_enqueue_passes() {
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let path_reg = PathBuf::from("/tmp/resolve_named_task_reg.pm");
+    let path_call = PathBuf::from("/tmp/resolve_named_task_call.pm");
+    let fa_reg = parse(
+        "package App::Tasks;\nuse Minion;\n\
+sub mail ($job, %o) { $o{timeout} }\n\
+sub setup ($minion) { $minion->add_task(mail => \\&mail) }\n1;\n",
+    );
+    let fa_call = parse(
+        "package App::Caller;\nuse Minion;\n\
+sub fire ($minion) {\n  $minion->enqueue(mail => [timeout => 1]);\n}\n1;\n",
+    );
+    idx.insert_workspace_for_test(path_reg.clone(), fa_reg.clone());
+    idx.insert_workspace_for_test(path_call.clone(), fa_call.clone());
+    let key = |p: &PathBuf| FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(p));
+    let at = |row, column| tree_sitter::Point { row, column };
+    let defs = resolve(&store, &fa_call, key(&path_call), at(3, 28), Some(&idx), OverrideScope::default()).definitions();
+    assert!(
+        defs.iter().any(|d| file_key_eq(&d.key, &key(&path_reg)) && d.span.start == at(2, 25)),
+        "the enqueued key lands on the named task's read, got {defs:?}",
+    );
+    let refs = resolve(&store, &fa_reg, key(&path_reg), at(2, 25), Some(&idx), OverrideScope::default()).references();
+    assert!(
+        refs.iter().any(|r| file_key_eq(&r.key, &key(&path_call)) && r.span.start == at(3, 28)),
+        "the task's key finds the enqueue that passes it, got {refs:?}",
+    );
 }

@@ -2408,3 +2408,87 @@ fn rename_options_deserialize_from_init_json() {
     assert_eq!(scope(serde_json::json!({})).unwrap(), OverrideScope::Hierarchy);
     assert!(scope(serde_json::json!({"overrideScope": "bogus"})).is_err());
 }
+
+// ---- Named parameters: `:$name` is one name spelled twice ----
+
+fn rename_group_from(
+    store: &OpenDocs,
+    idx: &crate::index::module_index::ModuleIndex,
+    fa: &FileAnalysis,
+    path: &PathBuf,
+    at: tree_sitter::Point,
+    new_name: &str,
+) -> Vec<(PathBuf, usize, String)> {
+    let resolved = resolve_symbol(fa, at, Some(idx)).expect("cursor resolves");
+    let ResolvedTarget::Group { local_spans, pinned_spans, members, .. } = resolved else {
+        panic!("expected Group, got {:?}", resolved);
+    };
+    let edits = group_rename_edits(
+        store,
+        Some(idx),
+        &FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.clone())),
+        &local_spans,
+        &pinned_spans,
+        &members,
+        new_name,
+        RoleMask::EDITABLE,
+    )
+    .expect("no union sites");
+    let mut out: Vec<(PathBuf, usize, String)> = edits
+        .iter()
+        .map(|(l, t)| {
+            let FileKey::Path(p) = &l.key else { panic!("path key") };
+            (PathBuf::from(p.as_path()), l.span.start.row, t.clone())
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Renaming a named parameter rewrites its variable in the body and the
+/// key at every call, in the callee's file and the caller's; a call key
+/// resolves to the same group.
+#[test]
+fn a_named_parameter_renames_with_its_call_keys_across_files() {
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let lib = PathBuf::from("/tmp/named_param_lib.pm");
+    let app = PathBuf::from("/tmp/named_param_app.pl");
+    let lib_src = "package Net;\nuse v5.40;\nuse Exporter 'import';\nour @EXPORT = ('dial');\nsub dial(:$timeout = 30) { return $timeout }\ndial(timeout => 1);\n1;\n";
+    idx.insert_workspace_for_test(lib.clone(), parse(lib_src));
+    let app_src = "use Net;\ndial(timeout => 5, other => 1);\n";
+    idx.insert_workspace_for_test(app.clone(), parse(app_src));
+    let lib_fa = idx.workspace_file_for_test(&lib).unwrap();
+    let decl_col = lib_src.lines().nth(4).unwrap().find("timeout").unwrap();
+
+    let edits = rename_group_from(&store, &idx, &lib_fa, &lib, tree_sitter::Point::new(4, decl_col), "wait");
+    let canon = |p: &PathBuf| PathBuf::from(crate::util::canonical_path::CanonicalPath::resolve(p).as_path());
+    let rows = |p: &PathBuf| edits.iter().filter(|(f, ..)| *f == canon(p)).map(|(_, r, t)| (*r, t.clone())).collect::<Vec<_>>();
+    // The parameter, its read, and the in-file call key; then the caller's key.
+    assert_eq!(rows(&lib), [(4, "wait".to_string()), (4, "wait".to_string()), (5, "wait".to_string())], "{edits:?}");
+    assert_eq!(rows(&app), [(1, "wait".to_string())], "{edits:?}");
+
+    // From the caller's key: the same group.
+    let app_fa = idx.workspace_file_for_test(&app).unwrap();
+    let from_call = rename_group_from(&store, &idx, &app_fa, &app, tree_sitter::Point::new(1, 6), "wait");
+    assert_eq!(from_call, edits);
+}
+
+/// A method's named parameter is reached by a call on a subclass that
+/// dispatches to it.
+#[test]
+fn a_method_call_key_on_a_subclass_reaches_the_inherited_parameter() {
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let lib = PathBuf::from("/tmp/named_param_base.pm");
+    let app = PathBuf::from("/tmp/named_param_kid.pl");
+    let lib_src = "package Base;\nuse v5.40;\nsub new { bless {}, shift }\nsub fetch($self, :$url) { $url }\n1;\n";
+    idx.insert_workspace_for_test(lib.clone(), parse(lib_src));
+    let app_src = "package Kid;\nuse parent -norequire, 'Base';\npackage main;\nmy $k = Kid->new;\n$k->fetch(url => 'x');\n";
+    idx.insert_workspace_for_test(app.clone(), parse(app_src));
+    let app_fa = idx.workspace_file_for_test(&app).unwrap();
+    let edits = rename_group_from(&store, &idx, &app_fa, &app, tree_sitter::Point::new(4, 11), "href");
+    let canon = |p: &PathBuf| PathBuf::from(crate::util::canonical_path::CanonicalPath::resolve(p).as_path());
+    assert!(edits.iter().filter(|(f, r, _)| *f == canon(&lib) && *r == 3).count() == 2, "param + read: {edits:?}");
+    assert!(edits.iter().any(|(f, r, _)| *f == canon(&app) && *r == 4), "the call key: {edits:?}");
+}

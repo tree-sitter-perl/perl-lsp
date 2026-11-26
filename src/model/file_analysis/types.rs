@@ -828,6 +828,28 @@ fn match_pattern_arg(
     }
 }
 
+/// The callable a code value holds: a declaration in this file, or a
+/// named callable by its package and name (`\\&f`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeldCallable<'t> {
+    Symbol(SymbolId),
+    Named { package: &'t str, name: &'t str },
+}
+
+impl InferredType {
+    /// The callable a code value holds, where its value names one.
+    pub fn held_callable(&self) -> Option<HeldCallable<'_>> {
+        use crate::model::witnesses::{MemberAspect, WitnessAttachment};
+        match self {
+            InferredType::CodeRef { return_edge: Some(WitnessAttachment::Symbol(sid)) } => Some(HeldCallable::Symbol(*sid)),
+            InferredType::CodeRef {
+                return_edge: Some(WitnessAttachment::Member { owner, name, aspect: MemberAspect::Returns, .. }),
+            } => Some(HeldCallable::Named { package: owner, name }),
+            _ => None,
+        }
+    }
+}
+
 impl InferredType {
     /// Rewrite every class name the type carries through `f`, recursing
     /// into the shapes that nest one (sequence elements, optionals, keyed

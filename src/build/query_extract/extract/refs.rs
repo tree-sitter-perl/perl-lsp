@@ -53,7 +53,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     // resolves by name); a wrapper/chain doesn't.
     let simple = matches!(invocant, Some((_, crate::model::conventions::Invocant::Name(_), _)));
     let member_op = simple.then(|| super::members::op_of(ad, e.match_id)).flatten();
-    let arg_count = super::members::call_args(ad, e.match_id).map(|a| a.len());
+    let arg_count = super::members::call_args(ad, e.match_id).map(|a| super::members::places(&a));
     let qualifier = match e.payload.as_deref() {
         Some(Payload::Qualifier(q)) => Some(q.clone()),
         _ => None,
@@ -76,6 +76,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         qualifier,
         spelled: spelled.map(Event::span),
         access: crate::model::file_analysis::AccessKind::Read,
+        arg_keys: super::members::call_labels(ad, e.match_id),
     });
 }
 

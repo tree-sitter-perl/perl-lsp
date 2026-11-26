@@ -718,11 +718,8 @@ my $m = MooApp->new(name => 'alice');
     };
     assert_eq!(
         *owner,
-        HashKeyOwner::Sub {
-            package: Some("MooApp".to_string()),
-            name: "new".to_string()
-        },
-        "constructor-key owner should be Sub{{class, method}}, matching the has-emitted def",
+        HashKeyOwner::named_input(Some("MooApp".to_string()), "new"),
+        "constructor-key owner should be the constructor's named input, matching the has-emitted def",
     );
 
     // No matching HashKeyDef for `count` → no shadow ref.

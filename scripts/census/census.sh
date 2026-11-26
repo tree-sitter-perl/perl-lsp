@@ -24,7 +24,7 @@ for c in "${names[@]}"; do
     root=$corpora/bulk/$c
     [ -d "$root" ] || { echo "census: skip $c (missing)" >&2; continue; }
     pl=""; [ -d "$corpora/deps/$c/lib/perl5" ] && pl=$corpora/deps/$c/lib/perl5
-    python3 "$here/probes.py" "$root" --files "${CENSUS_FILES:-15}" --per-file "${CENSUS_PER_FILE:-40}" --verbs "${CENSUS_VERBS:-hover,definition}" --lang "${CENSUS_LANG:-perl}" >"$out/$c.probes.jsonl"
+    python3 "$here/probes.py" "$root" --files "${CENSUS_FILES:-15}" --per-file "${CENSUS_PER_FILE:-40}" --verbs "${CENSUS_VERBS:-hover,definition}" --lang "${CENSUS_LANG:-perl}" ${CENSUS_UNCLOSED:+--unclosed} >"$out/$c.probes.jsonl"
     for side in base head; do
         bin=$base_bin; [ $side = head ] && bin=$head_bin
         echo "census: $c [$side]" >&2
