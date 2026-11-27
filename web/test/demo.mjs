@@ -168,7 +168,7 @@ try {
   }
   // A trap is printed whole: the frames that say what the thread was doing
   // are at the far end of its backtrace.
-  if (failures.length) console.log('server log:\n' + (await page.evaluate(() => (window.serverLog ?? []).join(''))).slice(dead ? -60000 : -6000));
+  if (failures.length) console.log('server log:\n' + (await page.evaluate(() => (window.serverLog ?? []).join(''))).slice(dead ? -60000 : -40000));
   await page.keyboard.press('Escape');
   await page.click('[data-scene="chain"]');
   await page.locator('.monaco-hover-content').first().waitFor({ timeout: 5000 }).catch(() => {});

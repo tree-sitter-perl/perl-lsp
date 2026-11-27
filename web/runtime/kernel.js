@@ -94,6 +94,7 @@ function spawn(arg, main) {
     } else if (d.stdinRead) {
       writeStdin();
     } else {
+      if (d.trap) d.trap += `\n    memory: ${d.pages} pages as thread ${tid} saw it, ${memory.buffer.byteLength / 65536} as the kernel does\n`;
       postMessage(d);
       // A trap in one thread leaves the shared memory in an unknown state,
       // so it ends the process, as a fault in one native thread would.
