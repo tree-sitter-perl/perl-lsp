@@ -197,7 +197,8 @@ async fn main() {
     // session hangs (the client waits for a response it will only get if it
     // sends more bytes). A plain blocking reader on its own thread, piped in via
     // a channel, has no such race. See `stdio_bridge`.
-    let stdin = stdio_bridge::reader();
+    let session_end = stdio_bridge::SessionEnd::default();
+    let stdin = stdio_bridge::reader(session_end.clone());
     let stdout = stdio_bridge::writer();
 
     // Warm the plugin registry NOW, overlapping the client's own startup and
@@ -216,16 +217,20 @@ async fn main() {
     // Wrap the service so a panic in any handler degrades to a logged warning +
     // graceful response instead of unwinding tower-lsp's single `serve` task.
     // See `panic_guard` for why the boundary lives here and not per-handler.
-    Server::new(stdin, stdout, socket)
-        .serve(panic_guard::PanicGuard::new(service))
-        .await;
+    let serve = Server::new(stdin, stdout, socket)
+        .serve(panic_guard::PanicGuard::new(service, session_end.clone()));
 
-    // `serve()` returns when the client's stdin/socket reaches EOF — the CLEAN
-    // `shutdown`+`exit` path AND the UNCLEAN path (editor crash / kill with no
-    // `exit` notification) both land here. Exit explicitly rather than letting
-    // `main` return into the tokio-runtime drop: background `spawn_blocking`
-    // work (workspace indexing does `rt.block_on(client.send_request(..))`,
-    // which parks forever once the client is gone) can otherwise keep the
-    // runtime — and the process — alive, orphaning a 40-thread server to init.
+    // The session is over when the client says `exit` or its stdin reaches
+    // EOF (an editor crash sends no `exit`). Leave then, without waiting for
+    // `serve()`: it returns only once every in-flight handler has finished,
+    // and one awaiting the client's reply to a server request never will.
+    // Nor may `main` return into the tokio-runtime drop: background
+    // `spawn_blocking` work (workspace indexing parks in
+    // `rt.block_on(client.send_request(..))` once the client is gone) would
+    // keep the runtime, and a 40-thread server, alive.
+    tokio::select! {
+        _ = serve => {}
+        _ = session_end.ended() => {}
+    }
     util::ghost_stats::exit_flushed(0, "eof");
 }
