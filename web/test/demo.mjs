@@ -153,7 +153,7 @@ try {
       if (process.argv[3]) await page.screenshot({ path: process.argv[3].replace(/\.png$/, `-${id}.png`) });
     }
   }
-  if (failures.length) console.log('server log:\n' + (await page.evaluate(() => (window.serverLog ?? []).join(''))).slice(-6000));
+  if (failures.length) console.log('server log:\n' + (await page.evaluate(() => (window.serverLog ?? []).join(''))).slice(-40000));
   await page.keyboard.press('Escape');
   await page.click('[data-scene="chain"]');
   await page.locator('.monaco-hover-content').first().waitFor({ timeout: 5000 }).catch(() => {});

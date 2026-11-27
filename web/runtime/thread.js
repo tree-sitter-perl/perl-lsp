@@ -91,6 +91,9 @@ const local = {
 
 class ProcExit extends Error {}
 
+// A trap's backtrace is the only account of what the thread was doing.
+Error.stackTraceLimit = 100;
+
 onmessage = ev => {
   const d = ev.data;
   reply = new Int32Array(d.reply); memory = d.memory; stdin = d.stdin;
@@ -112,6 +115,8 @@ onmessage = ev => {
       instance.exports.wasi_thread_start(d.tid, d.arg);
     }
   } catch (e) {
-    if (!(e instanceof ProcExit)) postMessage({ trap: 'thread ' + d.tid + ': ' + (e.stack || e) });
+    // The thread's own view of the memory goes with the trap: an access the
+    // engine calls out of bounds is judged against this thread's size.
+    if (!(e instanceof ProcExit)) postMessage({ trap: 'thread ' + d.tid + ': ' + (e.stack || e), pages: memory.buffer.byteLength / 65536 });
   }
 };

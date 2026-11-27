@@ -94,6 +94,7 @@ function spawn(arg, main) {
     } else if (d.stdinRead) {
       writeStdin();
     } else {
+      if (d.trap) d.trap += `\n    memory: ${d.pages} pages as thread ${tid} saw it, ${memory.buffer.byteLength / 65536} as the kernel does\n`;
       postMessage(d);
       if (d.exit !== undefined) for (const t of threads.values()) t.terminate();
     }
