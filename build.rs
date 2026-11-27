@@ -24,6 +24,7 @@
 use std::path::{Path, PathBuf};
 
 fn main() {
+    wrap_allocator_for_shared_memory();
     grammar_vocabulary("perl", ts_parser_perl::LANGUAGE.into());
     grammar_vocabulary("pod", ts_parser_pod::LANGUAGE.into());
     let mut files = Vec::new();
@@ -255,4 +256,18 @@ fn grammar_vocabulary(lang_name: &str, lang: tree_sitter::Language) {
 
     let dir = std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR for a build script");
     std::fs::write(Path::new(&dir).join(format!("{lang_name}_grammar.rs")), out).expect("write the grammar vocabulary");
+}
+
+/// Routes the threaded wasm build's allocator through
+/// `util/shared_memory_refresh.rs`. Shared memory is exactly the `atomics`
+/// builds, so the single-threaded target links libc's allocator untouched.
+fn wrap_allocator_for_shared_memory() {
+    let var = |name: &str| std::env::var(name).unwrap_or_default();
+    let shared = var("CARGO_CFG_TARGET_OS") == "wasi"
+        && var("CARGO_CFG_TARGET_FEATURE").split(',').any(|f| f == "atomics");
+    if shared {
+        for name in ["malloc", "calloc", "realloc", "aligned_alloc", "posix_memalign"] {
+            println!("cargo:rustc-link-arg-bins=--wrap={name}");
+        }
+    }
 }
