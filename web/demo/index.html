@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>perl-lsp live demo</title>
+<meta name="goatcounter" content="">
+<script src="coi.js"></script>
+<link rel="stylesheet" href="demo.css">
+</head>
+<body>
+<header>
+  <h1>perl-lsp <span>live demo</span></h1>
+  <p>The real language server, compiled to WebAssembly and running in this tab. What you type stays in it.<span id="counted" hidden> Visits are counted with GoatCounter, without cookies.</span></p>
+  <div id="status" role="status">Starting…</div>
+</header>
+<main>
+  <nav aria-label="Project files">
+    <h2>Project</h2>
+    <ul id="files"></ul>
+    <div hidden>
+      <h2>Dependencies (read-only)</h2>
+      <ul id="deps"></ul>
+    </div>
+    <h2><label for="symbol-search">Find a symbol</label></h2>
+    <input id="symbol-search" type="search" placeholder="describe" autocomplete="off" spellcheck="false">
+  </nav>
+  <div id="editor"></div>
+  <aside>
+    <div id="results" aria-live="polite"></div>
+    <div id="scenes"></div>
+  </aside>
+</main>
+<dialog id="report" aria-labelledby="report-title">
+  <header><h2 id="report-title"></h2><button type="button">Close</button></header>
+  <iframe sandbox="allow-scripts" title="Report"></iframe>
+</dialog>
+<script src="vs/loader.js"></script>
+<script type="module" src="demo.js"></script>
+</body>
+</html>

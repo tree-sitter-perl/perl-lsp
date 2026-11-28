@@ -121,8 +121,56 @@ fn open_db(path: &std::path::Path, flags: rusqlite::OpenFlags) -> rusqlite::Resu
         if rc != rusqlite::ffi::SQLITE_OK {
             log::debug!("sqlite3_config(MEMSTATUS, 0) refused: {rc}");
         }
+        #[cfg(target_os = "wasi")]
+        wasi_store::install();
     });
+    #[cfg(target_os = "wasi")]
+    wasi_store::installed()?;
     Connection::open_with_flags(path, flags)
+}
+
+/// The store on WASI lives in SQLite's `memdb` VFS: one in-memory database
+/// per path, shared by every connection in the process, locked in-process.
+/// WASI has no file locks, so the default VFS lets two threads' connections
+/// write one file unguarded, and the file ends up malformed.
+///
+/// TODO(wasm-store-persistence): the store dies with the process. Keeping it
+/// needs a VFS that locks in-process AND writes through to the host's files;
+/// the rule it must hold is the one above (every connection to one path sees
+/// one lock table).
+#[cfg(target_os = "wasi")]
+mod wasi_store {
+    use rusqlite::ffi;
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    static RC: AtomicI32 = AtomicI32::new(ffi::SQLITE_OK);
+
+    pub(super) fn install() {
+        // SAFETY: `sqlite3_vfs_find` takes a NUL-terminated name and returns a
+        // VFS SQLite owns for the process's lifetime; registering it again
+        // with `makeDflt` only moves it to the head of the list.
+        let rc = unsafe {
+            let vfs = ffi::sqlite3_vfs_find(c"memdb".as_ptr());
+            if vfs.is_null() {
+                ffi::SQLITE_NOTFOUND
+            } else {
+                ffi::sqlite3_vfs_register(vfs, 1)
+            }
+        };
+        RC.store(rc, Ordering::Relaxed);
+    }
+
+    /// Refuses every open when `memdb` could not be made the default: a store
+    /// on the unlocked default VFS answers from a malformed file.
+    pub(super) fn installed() -> rusqlite::Result<()> {
+        match RC.load(Ordering::Relaxed) {
+            ffi::SQLITE_OK => Ok(()),
+            rc => Err(rusqlite::Error::SqliteFailure(
+                ffi::Error::new(rc),
+                Some("the memdb VFS is unavailable".into()),
+            )),
+        }
+    }
 }
 
 /// The writer open, given the cache directory. Recreates the file only when

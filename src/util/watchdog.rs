@@ -45,6 +45,11 @@ extern "C" fn on_term(_sig: i32) {
     TERM.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// WASI delivers no signals, so there is nothing to make graceful there.
+#[cfg(target_os = "wasi")]
+fn install_term_handler() {}
+
+#[cfg(not(target_os = "wasi"))]
 fn install_term_handler() {
     // SAFETY: `on_term` only stores to an AtomicBool, which is
     // async-signal-safe. SIGTERM's default is termination, so replacing it

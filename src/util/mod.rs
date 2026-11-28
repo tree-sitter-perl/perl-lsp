@@ -8,6 +8,8 @@ pub mod cache_epochs;
 pub mod canonical_path;
 pub mod json_sink;
 pub mod qual_dump;
+#[cfg(all(target_os = "wasi", target_feature = "atomics"))]
+mod shared_memory_refresh;
 pub mod text;
 pub mod timings;
 pub mod watchdog;

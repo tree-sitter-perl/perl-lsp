@@ -20,16 +20,23 @@ use std::task::{Context, Poll};
 use futures::future::{BoxFuture, FutureExt};
 use tower::Service;
 use tower_lsp::jsonrpc::{Error, Request, Response};
+use tower_lsp::lsp_types::notification::{Exit, Notification};
+
+use crate::lsp::stdio_bridge::SessionEnd;
 
 /// Wraps an `LspService` (`Service<Request, Response = Option<Response>>`) so a
 /// panicking handler degrades instead of unwinding the server loop.
 pub struct PanicGuard<S> {
     inner: S,
+    session_end: SessionEnd,
 }
 
 impl<S> PanicGuard<S> {
-    pub fn new(inner: S) -> Self {
-        Self { inner }
+    /// `session_end` is signalled when the client's `exit` passes through: the
+    /// one place every message is seen, and tower-lsp consumes `exit` itself
+    /// without calling a handler.
+    pub fn new(inner: S, session_end: SessionEnd) -> Self {
+        Self { inner, session_end }
     }
 }
 
@@ -55,6 +62,9 @@ where
         // the latter.
         let id = req.id().cloned();
         let fut = self.inner.call(req);
+        if method == Exit::METHOD {
+            self.session_end.signal();
+        }
         Box::pin(async move {
             match AssertUnwindSafe(fut).catch_unwind().await {
                 Ok(result) => result,

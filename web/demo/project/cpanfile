@@ -1,0 +1,7 @@
+# The frameworks the demo project uses. The site build installs them and
+# ships their sources with the page, so the server reads the real code.
+requires 'Moo',         '== 2.005005';
+requires 'Mojolicious', '== 9.54';
+requires 'DBIx::Class', '== 0.082844';
+requires 'Minion',      '== 12.0';
+requires 'Type::Tiny',  '== 2.010001';

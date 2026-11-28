@@ -11,6 +11,7 @@ use tower_lsp::jsonrpc::{Request, Response};
 use tower_lsp::ExitedError;
 
 use super::PanicGuard;
+use crate::lsp::stdio_bridge::SessionEnd;
 
 /// Stand-in `LspService`: the `boom` method panics mid-poll (like a real
 /// handler hitting an `unwrap`), everything else answers `Ok`.
@@ -44,7 +45,7 @@ async fn handler_panic_degrades_and_service_survives() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
 
-    let mut guard = PanicGuard::new(MockService);
+    let mut guard = PanicGuard::new(MockService, SessionEnd::default());
 
     // A panicking REQUEST (has id): the client is blocked on a reply, so the
     // guard must yield an error response — never unwind the server task.
@@ -71,6 +72,28 @@ async fn handler_panic_degrades_and_service_survives() {
     assert!(resp3.is_none(), "a notification never emits a response");
 
     std::panic::set_hook(prev);
+}
+
+/// `exit` ends the session the moment it passes the guard, whatever the
+/// handlers still in flight are waiting for; no other message does.
+#[tokio::test]
+async fn exit_signals_the_session_end() {
+    use std::time::Duration;
+
+    let end = SessionEnd::default();
+    let mut guard = PanicGuard::new(MockService, end.clone());
+
+    let _ = guard.call(Request::build("shutdown").id(1).finish()).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), end.ended()).await.is_err(),
+        "shutdown alone leaves the session open"
+    );
+
+    let _ = guard.call(Request::build("exit").finish());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), end.ended()).await.is_ok(),
+        "exit ends the session without its future being polled"
+    );
 }
 
 /// #36: tower-lsp keeps a server→client request's oneshot SENDER in its pending

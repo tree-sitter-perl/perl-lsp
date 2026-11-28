@@ -13,6 +13,10 @@ The contract under test:
   2. coldWaitMs: 0 (wait opted out): the same verb answers
      ContentModified (-32801) — "in flux, retry" — never null.
 
+  3. the session ends at `exit` or at stdin EOF, whichever comes first,
+     even while a handler waits on the client: a server->client request
+     the client never answers must not keep the process alive.
+
 Branch 2 is forced via the opt-out rather than a monster fixture: in
 default mode -32801 only fires when a build outruns the 5 s floor,
 which post the fold fixes means roughly >20k-line files — nothing a
@@ -74,7 +78,8 @@ def make_fixture(root):
 
 
 class Client:
-    def __init__(self, root, init_options=None):
+    def __init__(self, root, init_options=None, answers=True):
+        self.answers = answers
         self.proc = subprocess.Popen(
             [BIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, cwd=root)
@@ -114,7 +119,8 @@ class Client:
                     continue
                 if "method" in m and "id" in m:
                     # server->client request: answer, or the server stalls
-                    self._send({"jsonrpc": "2.0", "id": m["id"], "result": None})
+                    if self.answers:
+                        self._send({"jsonrpc": "2.0", "id": m["id"], "result": None})
                 elif "id" in m and m["id"] in self.pending:
                     self.pending[m["id"]].put(m)
         except Exception:
@@ -142,15 +148,14 @@ class Client:
             "uri": "file://" + path, "languageId": "perl",
             "version": 1, "text": text}})
 
-    def shutdown_clean(self):
-        """shutdown (NO params key), exit, close stdin, bounded wait for
-        exit 0. Closing stdin is part of the client's side of the contract:
-        the server's serve loop ends on stdin EOF (see `stdio_bridge`), so a
-        client that keeps the pipe open waits forever however clean the
-        shutdown handshake was."""
+    def shutdown_clean(self, close_stdin=True):
+        """shutdown (NO params key), exit, bounded wait for exit 0. `exit`
+        alone must end the process, and so must stdin EOF (see
+        `stdio_bridge::SessionEnd`)."""
         r = self.request(99, "shutdown", None, timeout=15)
         self._send({"jsonrpc": "2.0", "method": "exit"})
-        self.proc.stdin.close()
+        if close_stdin:
+            self.proc.stdin.close()
         try:
             return r is not None and "error" not in r and self.proc.wait(timeout=15) == 0
         except subprocess.TimeoutExpired:
@@ -202,6 +207,26 @@ def main():
                    m.get("result") is not None,
                    "null — the cached-lie regression")
         report("clean shutdown (branch 2)", c.shutdown_clean(), "nonzero/timeout exit")
+
+        # Branch 3: a server->client request the client never answers
+        # (`client/registerCapability`, sent from `initialized`) must not keep
+        # the process alive past `exit`. An editor that quits right after
+        # `exit` is this client: its reply is never written.
+        c = Client(root, init_options={"coldWaitMs": 0}, answers=False)
+        c.open(fixture)
+        report("exit with a server request unanswered",
+               c.shutdown_clean(close_stdin=False), "nonzero/timeout exit")
+
+        # Branch 4: the same client dying without `exit`: stdin EOF alone.
+        c = Client(root, init_options={"coldWaitMs": 0}, answers=False)
+        c.open(fixture)
+        c.proc.stdin.close()
+        try:
+            report("stdin EOF with a server request unanswered",
+                   c.proc.wait(timeout=15) == 0, "nonzero exit")
+        except subprocess.TimeoutExpired:
+            c.proc.kill()
+            report("stdin EOF with a server request unanswered", False, "timeout")
 
     print(f"\n{passed} passed, {failed} failed")
     sys.exit(1 if failed else 0)
