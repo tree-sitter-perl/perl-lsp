@@ -1,98 +1,44 @@
 // Drives the built demo page: `node test/demo.mjs <site-dir> [screenshot]`.
 // Served WITHOUT the isolation headers, as GitHub Pages serves it, so the
 // page has to get isolation from its own service worker before the server
-// can start. Then every scene is clicked and its visible outcome checked: a
-// scene with no expectation here fails the run.
+// can start. Then every scene is clicked and its visible outcome checked
+// against the `expect` it carries in `demo/scenes.json`.
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { serveDirectory } from './serve.mjs';
 
-const hover = text => ['.monaco-hover-content', text];
-const suggest = text => ['.suggest-widget', text];
-const peek = text => ['.reference-zone-widget', text];
-const results = text => ['#results', text];
-// A definition scene ends on another line or file: [file, text of the line].
-// A report scene opens a dialog whose framed page mentions `report`.
-const lands = (file, line) => ({ file, line });
-
-const EXPECT = {
-  infer: hover('type: Shop::Cart'),
-  chain: hover('returns: Shop::Cart'),
-  maybe: hover('may be undef'),
-  narrow: hover('type: Shop::Item'),
-  ref: hover('type: ArrayRef'),
-  inlay: ['.view-lines', '→ HashRef'],
-  'flow-return': hover('type: Shop::Item'),
-  'flow-noreturn': hover('type: Shop::Item'),
-  'flow-ordie': hover('type: Shop::Item'),
-  'flow-loop': hover('type: Shop::Item'),
-  'flow-reassign': hover('may be undef here'),
-  'flow-redundant': hover('this guard is redundant'),
-  'flow-closure': hover('type: Shop::Item|…'),
-  'flow-try': hover('type: Shop::Item|…'),
-  'flow-deref': hover('hash deref dies at runtime'),
-  union: hover('Shop::Discount::Fixed|Shop::Discount::Percent'),
-  'union-arms': hover('class Shop::Discount::Percent'),
-  'union-def': peek('Percent.pm'),
-  'union-warn': hover('is not defined in Shop::Discount::Fixed'),
-  shape: suggest('paths'),
-  'named-complete': suggest('express'),
-  'named-def': lands('lib/Shop/Shipping.pm', '$opt{weight}'),
-  'named-rename': ['.rename-box', ''],
-  tuple: hover('type: Numeric'),
-  'tuple-sub': hover('returns: Sequence'),
-  def: lands('lib/Shop/Util.pm', 'sub format_price'),
-  role: lands('lib/Shop/Role/Describable.pm', 'sub describe'),
-  super: lands('lib/Shop/Discount.pm', 'sub describe'),
-  ctor: lands('lib/Shop/Cart.pm', "currency  => $args{currency}"),
-  key: lands('lib/Shop/Util.pm', 'return { net =>'),
-  dynamic: hover('resolved from'),
-  refs: peek('Describable.pm'),
-  impl: peek('Percent.pm'),
-  outline: ['.quick-input-widget', 'has_tags'],
-  complete: suggest('add_shipping'),
-  keys: suggest('gross'),
-  signature: ['.parameter-hints-widget', '$amount'],
-  rename: ['.rename-box', ''],
-  docs: hover('Adds $quantity of an item'),
-  typo: ['.marker-widget', 'is not defined in Shop::Cart'],
-  import: ['.action-widget', "Import 'round_cents' from Shop::Util"],
-  'mojo-helper': hover('returns: Shop::Cart'),
-  'mojo-helper-def': lands('lib/Shop/Web.pm', 'helper( current_cart'),
-  'mojo-route': lands('lib/Shop/Web/Controller/Cart.pm', 'sub show'),
-  'mojo-docs': hover('my $route = $r->get'),
-  'mojo-source': lands('local/lib/perl5/Mojolicious/Controller.pm', 'sub render'),
-  'dbic-rs': hover('type: DBIx::Class::ResultSet'),
-  'dbic-row': hover('type: Row'),
-  'dbic-column': lands('lib/Shop/Schema/Result/Product.pm', 'price =>'),
-  'dbic-rel': lands('lib/Shop/Schema/Result/Product.pm', 'has_many( reviews'),
-  'minion-task': lands('lib/Shop/Jobs.pm', 'send_receipt => sub'),
-  'minion-args': lands('lib/Shop/Jobs.pm', '$args{total}'),
-  'minion-options': suggest('attempts'),
-  'minion-docs': hover('class Minion::Job'),
-  events: hover('registration'),
-  'tt-isa': hover('type: Numeric'),
-  'tt-instance': hover('type: Shop::Cart'),
-  'tt-narrow': hover('type: Numeric'),
-  'moo-handles': hover('returns: HashRef'),
-  'moo-ctor': suggest('points'),
-  'moo-clearer': lands('lib/Shop/Customer.pm', "clearer => 'forget_address'"),
-  'moo-source': lands('local/lib/perl5/Moo.pm', 'package Moo'),
-  heatmap: { report: 'perl-lsp usage heatmap' },
-  callers: results('add_shipping'),
-  callees: results('round_cents'),
-  subtypes: results('Shop::Discount::Fixed'),
-  class: lands('lib/Shop/Order.pm', 'field $cart'),
-  'plugin-def': lands('lib/Shop/Flags.pm', 'feature_flag new_checkout'),
-  'plugin-refs': peek('flags.pl'),
-  'plugin-rename': ['.rename-box', ''],
-  'plugin-source': lands('.perl-lsp/flags.rhai', 'fn patterns'),
-  // The edit restarts the server; the scene after it only answers on the
-  // restarted one.
-  'plugin-edit': ['#status', 'Plugin reloaded'],
-  'plugin-after': lands('lib/Shop/Flags.pm', 'feature_flag beta_search'),
+// What the page shows for each kind of answer. A scene's `expect` is shared
+// with the native runner (`e2e/demo_scenes.py`): `text` is something the
+// answer contains, `lands` the file and line a jump ends on, `report` text in
+// the report dialog, `status` the status line.
+const SHOWN_IN = {
+  hover: '.monaco-hover-content',
+  complete: '.suggest-widget',
+  definition: '.reference-zone-widget',
+  references: '.reference-zone-widget',
+  implementation: '.reference-zone-widget',
+  outline: '.quick-input-widget',
+  signature: '.parameter-hints-widget',
+  rename: '.rename-box',
+  diagnostic: '.marker-widget',
+  codeAction: '.action-widget',
+  inlay: '.view-lines',
+  incomingCalls: '#results',
+  outgoingCalls: '#results',
+  subtypes: '#results',
 };
+const scenes = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '../demo/scenes.json'), 'utf8')).groups.flatMap(g => g.scenes);
+const EXPECT = Object.fromEntries(scenes.map(s => {
+  const e = s.expect;
+  if (e.lands) return [s.id, { file: e.lands[0], line: e.lands[1] }];
+  if (e.report) return [s.id, e];
+  if (e.status) return [s.id, ['#status', e.status]];
+  assert.ok(SHOWN_IN[s.action], `scene ${s.id}: no place to look for a ${s.action} answer`);
+  return [s.id, [SHOWN_IN[s.action], e.text]];
+}));
 
 const site = path.resolve(process.argv[2] ?? 'site');
 const server = await serveDirectory(site, { isolated: false });

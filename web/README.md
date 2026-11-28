@@ -54,9 +54,11 @@ and says so; without it the page loads nothing from another host. The "Demo
 page" workflow reads it from the repository variable of the same name.
 
 The project the page opens is `demo/project/`, written so each scene in
-`demo.js` has something to show. `node test/demo.mjs site` clicks every scene
-on the built page and checks what appears; a new scene needs an expectation
-there. The "Demo page" workflow
+`demo/scenes.json` has something to show. A scene carries its own `expect`,
+and two runners check it: `node test/demo.mjs site` clicks every scene on the
+built page, and `python3 ../e2e/demo_scenes.py <perl-lsp> <perl5-dir>` asks
+the native binary the same thing over LSP. A scene red in both is the engine;
+one red only in the browser is the runtime. The "Demo page" workflow
 deploys it to GitHub Pages when run by hand.
 
 Design and limits: `docs/adr/wasm-target.md`.

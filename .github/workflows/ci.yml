@@ -110,6 +110,15 @@ jobs:
       - name: Run e2e tests
         run: PERL5LIB="$PWD/test_files/lib:$RUNNER_TEMP/e2e-perl/lib/perl5" ./e2e/run.sh
 
+      # The demo page's scenes (`web/demo/scenes.json`) against the native
+      # build. The wasm job plays the same list in a browser, so a scene red
+      # here too is the engine, and one red only there is the browser runtime.
+      - name: Demo scenes (native)
+        if: ${{ !cancelled() }}
+        run: |
+          cpm install -L "$RUNNER_TEMP/demo-perl" --cpanfile web/demo/project/cpanfile
+          python3 e2e/demo_scenes.py target/release/perl-lsp "$RUNNER_TEMP/demo-perl/lib/perl5"
+
   pack-e2e-tests:
     name: Pack E2E tests (headless nvim)
     if: github.event.action != 'edited' || github.event.changes.base   # see `on:`
