@@ -1,0 +1,27 @@
+name: Wasm toolchain
+description: Installs what scripts/wasm/build.sh needs and exports WASI_SYSROOT.
+
+runs:
+  using: composite
+  steps:
+    - name: Install the pinned toolchain
+      shell: bash
+      run: |
+        toolchain="$(cat scripts/wasm/toolchain)"
+        rustup toolchain install "$toolchain" --profile minimal -t wasm32-wasip1-threads
+        echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
+
+    # Only the sysroot (libc headers for the C dependencies), not the whole
+    # SDK: the runner's own clang has the wasm32 backend. Pinned by digest
+    # because it is fetched at build time.
+    - name: Fetch WASI sysroot
+      shell: bash
+      env:
+        WASI_SDK: "25"
+        WASI_SYSROOT_SHA256: d09c62c18efcddffe4b2fdd8c5830109cc8e36130cdbc9acdc0bd1b204c942bb
+      run: |
+        url="https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-$WASI_SDK/wasi-sysroot-$WASI_SDK.0.tar.gz"
+        curl -sSfL --retry 3 -o "$RUNNER_TEMP/sysroot.tgz" "$url"
+        echo "$WASI_SYSROOT_SHA256  $RUNNER_TEMP/sysroot.tgz" | sha256sum -c -
+        tar xzf "$RUNNER_TEMP/sysroot.tgz" -C "$RUNNER_TEMP"
+        echo "WASI_SYSROOT=$RUNNER_TEMP/wasi-sysroot-$WASI_SDK.0" >> "$GITHUB_ENV"

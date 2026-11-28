@@ -69,7 +69,6 @@ tower-lsp = "0.20"
 # here so the wrapper can implement `Service` and use `catch_unwind`/`BoxFuture`.
 tower = { version = "0.4", default-features = false }
 futures = "0.3"
-tokio = { version = "1", features = ["full"] }
 tree-sitter = "0.25"
 ts-parser-perl = "2.1.2"
 ts-parser-pod = "1"
@@ -97,6 +96,21 @@ tree-sitter-python = { version = "0.25", optional = true }
 tree-sitter-r = { version = "1.2", optional = true }
 tree-sitter-cmake = { version = "0.7", optional = true }
 tree-sitter-php = { version = "0.24", optional = true }
+
+# tokio's `full` set pulls in mio, which has no WASI backend, and tokio
+# itself refuses every feature outside this list on wasm. The wasm build
+# (`scripts/wasm/build.sh`) therefore runs the server on a current-thread
+# runtime, with `std` threads behind the stdio bridge and the resolver.
+[target.'cfg(not(target_os = "wasi"))'.dependencies]
+tokio = { version = "1", features = ["full"] }
+
+[target.'cfg(target_os = "wasi")'.dependencies]
+tokio = { version = "1", features = ["sync", "macros", "io-util", "rt", "time"] }
+# DashMap's shard locks wait through parking_lot_core, whose only wasm thread
+# parker sits behind this feature (wasm atomic wait is unstable,
+# rust-lang/rust#77839). Without it a contended lock panics, so the wasm
+# build runs on the nightly `scripts/wasm/toolchain` names.
+parking_lot_core = { version = "0.9", features = ["nightly"] }
 
 # The grammar vocabulary (`cst::perl::{Field, Kind}`) is generated from the
 # linked grammar's own tables, so a name the grammar lacks fails the build.

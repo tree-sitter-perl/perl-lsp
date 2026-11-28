@@ -1,0 +1,96 @@
+{
+  "initializationOptions": { "diagnostics": { "optionalDeref": true, "redundantGuard": true, "derefShape": true, "unresolvedMethodCrossFile": true } },
+  "groups": [
+    { "group": "Types, with no annotations", "scenes": [
+      {"id":"infer","title":"A constructor call","note":"$cart is a Shop::Cart.","file":"app.pl","on":"$cart = ","action":"hover","expect":{"text":"type: Shop::Cart"}},
+      {"id":"chain","title":"A chain keeps its type","note":"add() returns the cart, so apply() is still a Shop::Cart method.","file":"app.pl","on":"->apply(","offset":2,"action":"hover","expect":{"text":"returns: Shop::Cart"}},
+      {"id":"maybe","title":"A value that may be undef","note":"parse() can return nothing: $parsed is Maybe<Shop::Item>, and calling a method on it is flagged.","file":"app.pl","on":"$parsed->name","action":"hover","expect":{"text":"may be undef"}},
+      {"id":"narrow","title":"A guard narrows the type","note":"After `if defined`, the same variable is a Shop::Item.","file":"app.pl","on":"$parsed->name","nth":1,"action":"hover","expect":{"text":"type: Shop::Item"}},
+      {"id":"ref","title":"ref() checks narrow too","note":"Inside the ARRAY branch $input is an ArrayRef.","file":"lib/Shop/Util.pm","on":"@$input","offset":1,"action":"hover","expect":{"text":"type: ArrayRef"}},
+      {"id":"inlay","title":"Inlay hints","note":"Return types and variable types appear inline, greyed.","file":"lib/Shop/Cart.pm","on":"sub totals","action":"inlay","expect":{"text":"HashRef"}}
+    ] },
+    { "group": "Control flow", "scenes": [
+      {"id":"flow-return","title":"An early return","note":"After `return ... unless defined $item`, $item is a Shop::Item for the rest of the sub.","file":"flow.pl","on":"$item->label","action":"hover","expect":{"text":"type: Shop::Item"}},
+      {"id":"flow-noreturn","title":"A call that never returns","note":"fail() always dies, so the line after it only runs with an item.","file":"flow.pl","on":"$item->name","action":"hover","expect":{"text":"type: Shop::Item"}},
+      {"id":"flow-ordie","title":"// die","note":"The undef case never gets past the assignment.","file":"flow.pl","on":"$item = Shop::Item->parse($line) //","action":"hover","expect":{"text":"type: Shop::Item"}},
+      {"id":"flow-loop","title":"next in a loop","note":"The rest of the loop body only sees real items.","file":"flow.pl","on":"$cart->add( $item","offset":12,"action":"hover","expect":{"text":"type: Shop::Item"}},
+      {"id":"flow-reassign","title":"Assigning again","note":"The guard was about the old value: the second parse may be undef again, and the call is flagged.","file":"flow.pl","on":"$item->price","action":"hover","expect":{"text":"may be undef here"}},
+      {"id":"flow-redundant","title":"A guard that cannot fail","note":"new() always returns a cart, so `defined $cart` is flagged as redundant.","file":"flow.pl","on":"defined $cart","offset":9,"action":"hover","expect":{"text":"this guard is redundant"}},
+      {"id":"flow-closure","title":"A closure runs later","note":"$item is assigned again after the closure is made, so inside it the guard is not taken as proof.","file":"flow.pl","on":"{ $item->name }","offset":3,"action":"hover","expect":{"text":"type: Shop::Item|…"}},
+      {"id":"flow-try","title":"try / catch","note":"Assigned in try, untouched in catch: the two ways out are joined.","file":"flow.pl","on":"return $item;","nth":1,"offset":8,"action":"hover","expect":{"text":"type: Shop::Item|…"}},
+      {"id":"flow-deref","title":"The wrong kind of reference","note":"ref() proved an array; a hash deref on the next line would die at runtime.","file":"flow.pl","on":"$input->{count}","offset":9,"action":"hover","expect":{"text":"hash deref dies at runtime"}}
+    ] },
+    { "group": "Unions, shapes and named arguments", "scenes": [
+      {"id":"union","title":"One of two classes","note":"pick_discount() returns a Percent on one path and a Fixed on the other.","file":"shapes.pl","on":"$discount = ","action":"hover","expect":{"text":"Shop::Discount::Fixed|Shop::Discount::Percent"}},
+      {"id":"union-arms","title":"A call on a union","note":"describe() is answered for both classes: Percent overrides it, Fixed inherits it.","file":"shapes.pl","on":"$discount->describe","offset":12,"action":"hover","expect":{"text":"class Shop::Discount::Percent"}},
+      {"id":"union-def","title":"Both definitions","note":"Go to definition offers the two describe() subs the call can reach.","file":"shapes.pl","on":"$discount->describe","offset":12,"action":"definition","expect":{"text":"Percent.pm"}},
+      {"id":"union-warn","title":"A method only one arm has","note":"rate() exists on Percent but not on Fixed, and the warning says which.","file":"shapes.pl","on":"$discount->rate","offset":12,"action":"hover","expect":{"text":"is not defined in Shop::Discount::Fixed"}},
+      {"id":"shape","title":"A hash that grows","note":"host and paths were added by later statements; all three keys complete.","file":"shapes.pl","on":"$settings->{port}","offset":12,"action":"complete","expect":{"text":"paths"}},
+      {"id":"named-complete","title":"Named argument completion","note":"new() reads carrier, express and insured from %args; the two not yet passed are offered.","file":"shapes.pl","on":"carrier => 'dhl', ","offset":18,"action":"complete","expect":{"text":"express"}},
+      {"id":"named-def","title":"A named argument to its reader","note":"weight => jumps to $opt{weight} inside quote().","file":"shapes.pl","on":"weight => 2","action":"definition","expect":{"lands":["lib/Shop/Shipping.pm","$opt{weight}"]}},
+      {"id":"named-rename","title":"Rename a named argument","note":"Renaming carrier here renames the key new() reads.","file":"shapes.pl","on":"carrier => 'dhl'","action":"rename","expect":{"text":""}},
+      {"id":"tuple","title":"A list return","note":"quote() returns (price, route); each variable gets its own type.","file":"shapes.pl","on":"$price,","action":"hover","expect":{"text":"type: Numeric"}},
+      {"id":"tuple-sub","title":"The list as a type","note":"The sub itself returns a sequence of a number and a string.","file":"shapes.pl","on":"->quote","offset":3,"action":"hover","expect":{"text":"returns: Sequence"}}
+    ] },
+    { "group": "Navigation", "scenes": [
+      {"id":"def","title":"Go to definition, across files","note":"From the call into lib/Shop/Util.pm.","file":"app.pl","on":"format_price(","action":"definition","expect":{"lands":["lib/Shop/Util.pm","sub format_price"]}},
+      {"id":"role","title":"A method from a role","note":"describe() is not in Shop::Item; it comes from the role it consumes.","file":"app.pl","on":"$book->describe","offset":7,"action":"definition","expect":{"lands":["lib/Shop/Role/Describable.pm","sub describe"]}},
+      {"id":"super","title":"SUPER::","note":"Resolves to the parent class.","file":"lib/Shop/Discount/Percent.pm","on":"SUPER::describe","offset":7,"action":"definition","expect":{"lands":["lib/Shop/Discount.pm","sub describe"]}},
+      {"id":"ctor","title":"A constructor argument","note":"currency => jumps to where new() reads that key.","file":"app.pl","on":"currency => 'EUR'","action":"definition","expect":{"lands":["lib/Shop/Cart.pm","currency  => $args{currency}"]}},
+      {"id":"key","title":"A hash key from a return value","note":"{net} jumps to the key in the hash split_tax() returns.","file":"app.pl","on":"$parts->{net}","offset":9,"action":"definition","expect":{"lands":["lib/Shop/Util.pm","return { net =>"]}},
+      {"id":"dynamic","title":"A method name built at runtime","note":"\"add_$kind\" is folded: the call resolves to add_shipping.","file":"app.pl","on":"$cart->$method","offset":8,"action":"hover","expect":{"text":"resolved from"}},
+      {"id":"refs","title":"Find references","note":"label is required by the role, defined in the class, and called.","file":"lib/Shop/Item.pm","on":"sub label","offset":4,"action":"references","expect":{"text":"Describable.pm"}},
+      {"id":"impl","title":"Find implementations","note":"Every subclass that overrides amount_off.","file":"lib/Shop/Discount.pm","on":"sub amount_off","offset":4,"action":"implementation","expect":{"text":"Percent.pm"}},
+      {"id":"outline","title":"Outline","note":"Packages, subs and Moo attributes of the file.","file":"lib/Shop/Item.pm","on":"has name","action":"outline","expect":{"text":"has_tags"}}
+    ] },
+    { "group": "Editing", "scenes": [
+      {"id":"complete","title":"Method completion","note":"The cart's methods, with their return types.","file":"app.pl","on":"$cart->totals","offset":7,"action":"complete","expect":{"text":"add_shipping"}},
+      {"id":"keys","title":"Hash key completion","note":"The keys of the hash split_tax() returns.","file":"app.pl","on":"$parts->{net}","offset":9,"action":"complete","expect":{"text":"gross"}},
+      {"id":"signature","title":"Signature help","note":"Parameter names, read from the sub body.","file":"app.pl","on":"format_price( $totals","offset":13,"action":"signature","expect":{"text":"$amount"}},
+      {"id":"rename","title":"Rename across files","note":"Renames add where it is defined and in both chained calls.","file":"lib/Shop/Cart.pm","on":"sub add ","offset":4,"action":"rename","expect":{"text":""}},
+      {"id":"docs","title":"POD on hover","note":"Documentation written next to the sub.","file":"app.pl","on":"$cart->add(","offset":7,"action":"hover","expect":{"text":"Adds $quantity of an item"}}
+    ] },
+    { "group": "Diagnostics", "scenes": [
+      {"id":"typo","title":"A misspelled method","note":"totls is not a Shop::Cart method.","file":"app.pl","on":"# A typo","action":"diagnostic","expect":{"text":"is not defined in Shop::Cart"}},
+      {"id":"import","title":"A missing import, with its fix","note":"round_cents exists in Shop::Util; the quick fix adds it to the use line.","file":"app.pl","on":"round_cents(3","action":"codeAction","expect":{"text":"Import 'round_cents' from Shop::Util"}}
+    ] },
+    { "group": "Frameworks, from their real source", "scenes": [
+      {"id":"mojo-helper","title":"A Mojolicious helper","note":"current_cart is declared in startup(); here it is a method, and it returns a Shop::Cart.","file":"lib/Shop/Web/Controller/Cart.pm","on":"$self->current_cart","offset":8,"action":"hover","expect":{"text":"returns: Shop::Cart"}},
+      {"id":"mojo-helper-def","title":"Where the helper is declared","note":"Jumps to the helper(...) call in the application class.","file":"lib/Shop/Web/Controller/Cart.pm","on":"$self->current_cart","offset":8,"action":"definition","expect":{"lands":["lib/Shop/Web.pm","helper( current_cart"]}},
+      {"id":"mojo-route","title":"A route to its action","note":"'cart#show' jumps to show() in the Cart controller.","file":"lib/Shop/Web.pm","on":"'cart#show'","offset":7,"action":"definition","expect":{"lands":["lib/Shop/Web/Controller/Cart.pm","sub show"]}},
+      {"id":"mojo-docs","title":"Framework documentation","note":"Mojolicious's own POD for get(), read from its source.","file":"lib/Shop/Web.pm","on":"$r->get","offset":5,"action":"hover","expect":{"text":"my $route = $r->get"}},
+      {"id":"mojo-source","title":"Into the framework","note":"render() opens Mojolicious::Controller, read-only.","file":"lib/Shop/Web/Controller/Cart.pm","on":"$self->render( json","offset":8,"action":"definition","expect":{"lands":["local/lib/perl5/Mojolicious/Controller.pm","sub render"]}},
+      {"id":"dbic-rs","title":"A DBIx::Class resultset","note":"resultset('Product') is a ResultSet of Product rows.","file":"catalog.pl","on":"$products = ","action":"hover","expect":{"text":"type: DBIx::Class::ResultSet"}},
+      {"id":"dbic-row","title":"A row from it","note":"next() gives a Product row, so display_name resolves.","file":"catalog.pl","on":"$product = ","action":"hover","expect":{"text":"type: Row"}},
+      {"id":"dbic-column","title":"A column accessor","note":"price is a column declared in add_columns.","file":"catalog.pl","on":"$product->price","offset":10,"action":"definition","expect":{"lands":["lib/Shop/Schema/Result/Product.pm","price =>"]}},
+      {"id":"dbic-rel","title":"A relationship","note":"reviews comes from has_many.","file":"catalog.pl","on":"$product->reviews","offset":10,"action":"definition","expect":{"lands":["lib/Shop/Schema/Result/Product.pm","has_many( reviews"]}},
+      {"id":"minion-task","title":"A Minion job to its task","note":"enqueue(send_receipt => ...) jumps to the add_task that registered it.","file":"lib/Shop/Jobs.pm","on":"enqueue( send_receipt","offset":9,"action":"definition","expect":{"lands":["lib/Shop/Jobs.pm","send_receipt => sub"]}},
+      {"id":"minion-args","title":"Job arguments","note":"total => in the enqueued list is the %args key the task reads.","file":"lib/Shop/Jobs.pm","on":"total => 12","action":"definition","expect":{"lands":["lib/Shop/Jobs.pm","$args{total}"]}},
+      {"id":"minion-options","title":"enqueue options","note":"The options hash completes with what Minion accepts.","file":"lib/Shop/Jobs.pm","on":"{ priority => 5","offset":2,"action":"complete","expect":{"text":"attempts"}},
+      {"id":"minion-docs","title":"The job object","note":"$job in the task is a Minion::Job, documented from its source.","file":"lib/Shop/Jobs.pm","on":"$job->finish","offset":6,"action":"hover","expect":{"text":"class Minion::Job"}},
+      {"id":"events","title":"An event to its handlers","note":"emit(shipped => ...) knows the handler registered with on().","file":"lib/Shop/Notifier.pm","on":"emit( shipped","offset":7,"action":"hover","expect":{"text":"registration"}},
+      {"id":"tt-isa","title":"Type::Tiny on an attribute","note":"isa => Int types the accessor.","file":"customers.pl","on":"$points","action":"hover","expect":{"text":"type: Numeric"}},
+      {"id":"tt-instance","title":"InstanceOf","note":"isa => InstanceOf['Shop::Cart'] makes cart() a Shop::Cart.","file":"customers.pl","on":"$cart ","action":"hover","expect":{"text":"type: Shop::Cart"}},
+      {"id":"tt-narrow","title":"A Type::Tiny check narrows","note":"After `return ... unless is_Int($amount)`, $amount is a number.","file":"lib/Shop/Customer.pm","on":"$self->points( $self->points + $amount","offset":31,"action":"hover","expect":{"text":"type: Numeric"}},
+      {"id":"moo-handles","title":"Moo delegation","note":"handles => [qw(add totals)] makes totals() a method here, typed as the cart types it.","file":"customers.pl","on":"$customer->totals","offset":12,"action":"hover","expect":{"text":"returns: HashRef"}},
+      {"id":"moo-ctor","title":"Constructor keys from has","note":"new() takes the attributes; the ones not yet passed are offered.","file":"customers.pl","on":"name => 'Ada', ","offset":15,"action":"complete","expect":{"text":"points"}},
+      {"id":"moo-clearer","title":"A clearer","note":"forget_address exists because of clearer => 'forget_address'.","file":"customers.pl","on":"forget_address","offset":2,"action":"definition","expect":{"lands":["lib/Shop/Customer.pm","clearer => 'forget_address'"]}},
+      {"id":"moo-source","title":"Into Moo","note":"use Moo opens the installed module.","file":"lib/Shop/Item.pm","on":"use Moo","offset":5,"action":"definition","expect":{"lands":["local/lib/perl5/Moo.pm","package Moo"]}}
+    ] },
+    { "group": "Whole program", "scenes": [
+      {"id":"heatmap","title":"Heatmap and dead code","note":"Runs `perl-lsp --heatmap` on this project, in the tab: who calls what, how much, and which subs nothing reaches.","report":["--heatmap","/work","--html"],"expect":{"report":"perl-lsp usage heatmap"}},
+      {"id":"callers","title":"Who calls this?","note":"Incoming calls to subtotal.","file":"lib/Shop/Cart.pm","on":"sub subtotal","offset":4,"action":"incomingCalls","expect":{"text":"add_shipping"}},
+      {"id":"callees","title":"What does this call?","note":"Outgoing calls from totals, across files.","file":"lib/Shop/Cart.pm","on":"sub totals","offset":4,"action":"outgoingCalls","expect":{"text":"round_cents"}},
+      {"id":"subtypes","title":"Subclasses","note":"Every class that inherits from Shop::Discount.","file":"lib/Shop/Discount.pm","on":"package Shop::Discount","offset":8,"action":"subtypes","expect":{"text":"Shop::Discount::Fixed"}},
+      {"id":"class","title":"Perl 5.38 class syntax","note":"cart => is the field of the same name, declared with :param.","file":"app.pl","on":"cart => $cart","action":"definition","expect":{"lands":["lib/Shop/Order.pm","field $cart"]}}
+    ] },
+    { "group": "Teach it your own DSL", "scenes": [
+      {"id":"plugin-def","title":"A flag name is a link","note":"To perl 'new_checkout' is a string. The project's plugin says it names a flag, so it jumps to the declaration.","file":"flags.pl","on":"'new_checkout'","offset":2,"action":"definition","expect":{"lands":["lib/Shop/Flags.pm","feature_flag new_checkout"]}},
+      {"id":"plugin-refs","title":"Every use of a flag","note":"The declaration and each lookup, across files.","file":"lib/Shop/Flags.pm","on":"gift_wrap ","action":"references","expect":{"text":"flags.pl"}},
+      {"id":"plugin-rename","title":"Rename a flag","note":"Renames it where it is declared and where it is looked up.","file":"flags.pl","on":"'gift_wrap'","offset":2,"action":"rename","expect":{"text":""}},
+      {"id":"plugin-source","title":"The plugin itself","note":"Under 90 lines: a tree-sitter query for the two call shapes and a function that says what a match means. Edit it and the server restarts with your version.","file":".perl-lsp/flags.rhai","on":"fn patterns","offset":0,"expect":{"lands":[".perl-lsp/flags.rhai","fn patterns"]}},
+      {"id":"plugin-edit","title":"Teach it another verb","note":"Adds \"disabled\" to the plugin's verb list for you. The server restarts in a few seconds.","file":".perl-lsp/flags.rhai","on":"\"feature_flag\" \"enabled\"","offset":0,"replace":"\"feature_flag\" \"enabled\" \"disabled\"","expect":{"status":"Plugin reloaded"}},
+      {"id":"plugin-after","title":"…and disabled() follows","note":"After the edit above, 'beta_search' jumps to its declaration too. Before it, nothing happens.","file":"flags.pl","on":"'beta_search'","offset":2,"action":"definition","expect":{"lands":["lib/Shop/Flags.pm","feature_flag beta_search"]}}
+    ] }
+  ]
+}

@@ -1595,6 +1595,7 @@ impl LanguageServer for Backend {
 /// instead of leaving a `<defunct>` zombie (#80). The stdin write runs in its
 /// own task concurrently with `wait_with_output`'s stdout drain so we never
 /// block writing stdin while perltidy is blocked writing stdout.
+#[cfg(not(target_os = "wasi"))]
 async fn run_perltidy(input: String) -> std::io::Result<std::process::Output> {
     use tokio::io::AsyncWriteExt;
 
@@ -1618,6 +1619,13 @@ async fn run_perltidy(input: String) -> std::io::Result<std::process::Output> {
     let output = child.wait_with_output().await;
     let _ = writer.await;
     output
+}
+
+/// WASI has no subprocesses: formatting answers as it does on a box with no
+/// perltidy installed.
+#[cfg(target_os = "wasi")]
+async fn run_perltidy(_input: String) -> std::io::Result<std::process::Output> {
+    Err(std::io::ErrorKind::Unsupported.into())
 }
 
 #[cfg(test)]

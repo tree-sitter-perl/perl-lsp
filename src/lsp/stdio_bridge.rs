@@ -13,13 +13,37 @@ use tokio::sync::mpsc;
 
 const CHUNK: usize = 64 * 1024;
 
+/// Raised once the client can no longer be served: it sent `exit`, or its end
+/// of stdin closed. `main` races `Server::serve` against it, because `serve`
+/// returns only when every in-flight handler has finished, and a handler
+/// awaiting the client's reply to a server request (`client/registerCapability`)
+/// never does once nobody is left to send one.
+#[derive(Clone, Default)]
+pub struct SessionEnd(std::sync::Arc<tokio::sync::Notify>);
+
+impl SessionEnd {
+    /// `notify_one` stores a permit, so a signal raised before `ended` is
+    /// first polled is not lost.
+    pub fn signal(&self) {
+        self.0.notify_one();
+    }
+
+    pub async fn ended(&self) {
+        self.0.notified().await;
+    }
+}
+
 pub struct ChannelReader {
     rx: mpsc::Receiver<Vec<u8>>,
     buf: Vec<u8>,
     pos: usize,
+    end: SessionEnd,
 }
 
-pub fn reader() -> ChannelReader {
+/// `end` is signalled when the async side has consumed stdin to EOF — every
+/// frame the client sent has been decoded by then, which the reader thread's
+/// own EOF does not say.
+pub fn reader(end: SessionEnd) -> ChannelReader {
     let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
     std::thread::Builder::new()
         .name("lsp-stdin".into())
@@ -40,7 +64,7 @@ pub fn reader() -> ChannelReader {
             }
         })
         .expect("spawn lsp-stdin thread");
-    ChannelReader { rx, buf: Vec::new(), pos: 0 }
+    ChannelReader { rx, buf: Vec::new(), pos: 0, end }
 }
 
 impl AsyncRead for ChannelReader {
@@ -56,7 +80,10 @@ impl AsyncRead for ChannelReader {
                     me.buf = chunk;
                     me.pos = 0;
                 }
-                Poll::Ready(None) => return Poll::Ready(Ok(())), // EOF
+                Poll::Ready(None) => {
+                    me.end.signal();
+                    return Poll::Ready(Ok(())); // EOF
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }

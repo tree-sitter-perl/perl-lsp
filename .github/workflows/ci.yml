@@ -110,6 +110,15 @@ jobs:
       - name: Run e2e tests
         run: PERL5LIB="$PWD/test_files/lib:$RUNNER_TEMP/e2e-perl/lib/perl5" ./e2e/run.sh
 
+      # The demo page's scenes (`web/demo/scenes.json`) against the native
+      # build. The wasm job plays the same list in a browser, so a scene red
+      # here too is the engine, and one red only there is the browser runtime.
+      - name: Demo scenes (native)
+        if: ${{ !cancelled() }}
+        run: |
+          cpm install -L "$RUNNER_TEMP/demo-perl" --cpanfile web/demo/project/cpanfile
+          python3 e2e/demo_scenes.py target/release/perl-lsp "$RUNNER_TEMP/demo-perl/lib/perl5"
+
   pack-e2e-tests:
     name: Pack E2E tests (headless nvim)
     if: github.event.action != 'edited' || github.event.changes.base   # see `on:`
@@ -190,3 +199,47 @@ jobs:
 
       - name: Run gold-corpus harness
         run: perl gold-corpus/run.pl
+
+  wasm-build:
+    name: Wasm build (wasip1-threads)
+    if: github.event.action != 'edited' || github.event.changes.base   # see `on:`
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/wasm-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: scripts/wasm/build.sh
+
+      # The build proves the module links; this proves it runs: the server
+      # answers cross-file LSP requests in headless Chromium, on threads.
+      - name: Browser smoke test
+        working-directory: web
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npm run smoke
+
+      # Served as GitHub Pages serves it, without isolation headers: the
+      # page's service worker has to supply them before the server starts.
+      - uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: "5.38"
+          install-modules-with: cpm
+
+      - name: Demo page test
+        working-directory: web
+        run: |
+          cpm install -L "$RUNNER_TEMP/demo-perl" --cpanfile demo/project/cpanfile
+          node build-site.mjs ../target/wasm32-wasip1-threads/debug/perl-lsp.wasm "$RUNNER_TEMP/site" "$RUNNER_TEMP/demo-perl/lib/perl5"
+          node test/demo.mjs "$RUNNER_TEMP/site" "$RUNNER_TEMP/demo-shots/page.png"
+
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-page-failures
+          path: ${{ runner.temp }}/demo-shots
+          if-no-files-found: ignore
