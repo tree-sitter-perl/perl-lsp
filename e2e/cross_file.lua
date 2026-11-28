@@ -71,7 +71,7 @@ end)
 
 t.test("hover: $items shows the imported tuple type from make_items", function()
   hover_has("hover: $items shows the imported tuple type from make_items",
-    "$items = make_items()", 0, "Sequence<")
+    "$items = make_items()", 0, "Sequence&lt;")
 end)
 
 -- ── 2. Inlay hints show imported return types ────────────────────────

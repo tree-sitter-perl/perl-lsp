@@ -9,7 +9,7 @@
       "line": 13,
       "col": 4,
       "status": "gold",
-      "expect": { "all": ["Sequence<String"] }
+      "expect": { "all": ["Sequence&lt;String"] }
     },
     {
       "id": "nested-crossfile-drill-host",
